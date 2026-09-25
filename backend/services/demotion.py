@@ -237,6 +237,15 @@ class DemotionService:
         )
 
     # ---------- 查询 ----------
+    def get_log(self, log_id: int, user_id: int) -> DetectionLog | None:
+        """取一条检测记录（按用户隔离，分离态返回）。"""
+        with self._session_factory() as session:
+            log = session.get(DetectionLog, log_id)
+            if log is None or log.user_id != user_id:
+                return None
+            session.expunge(log)
+            return log
+
     def history(self, question_id: int, user_id: int, limit: int = 20) -> list[dict]:
         """某题检测历史（新→旧），供界面展示连续通过进度。"""
         with self._session_factory() as session:

@@ -8,6 +8,7 @@ Session 策略：每次公开操作独立开短事务（session-per-operation）
 """
 from __future__ import annotations
 
+from backend.services.detection import DetectionMixin
 from backend.services.question_mixins import (
     BackupMixin,
     CoreMixin,
@@ -25,6 +26,7 @@ __all__ = ["QuestionService", "sanitize_tags"]
 class QuestionService(
     EntryMixin,
     QueryMixin,
+    DetectionMixin,
     EditTagMixin,
     ReviewMixin,
     BackupMixin,
