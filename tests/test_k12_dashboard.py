@@ -46,7 +46,11 @@ def test_dashboard_stats_subject_filter(question_service, student_user):
 
     # 复习记录随学科过滤：物理看板能看到那次复习，数学看板看不到
     assert physics["reviewed"] >= 1
-    assert math["total"] == full["total"] - physics["total"]
+    # 总量口径：各学科过滤结果互不重叠且不超过全量
+    # （测试库共享，其他用例可能录入 chemistry/biology 等学科，不用全等断言）
+    assert math["total"] >= 1
+    assert physics["total"] >= 1
+    assert math["total"] + physics["total"] <= full["total"]
 
 
 def test_dashboard_stats_default_unchanged(question_service, student_user):

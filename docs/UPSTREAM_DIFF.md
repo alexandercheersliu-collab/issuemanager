@@ -36,6 +36,55 @@
 | `scripts/setup_env.sh` | macOS/Linux 同款一键初始化（`--skip-model` 可跳过） | `c91a740` |
 | `docs/UPSTREAM_DIFF.md` | 本文档 | 本提交 |
 
+---
+
+## P1 阶段（K12 化改造 + 图片录入增强，2026-09-26）
+
+### 修改的基座已有文件（P1）
+
+| 文件 | 改动 | 目的 | 引入提交 |
+|------|------|------|----------|
+| `backend/models/orm.py` | `questions` 表新增 8 列：`subject`（默认 math，索引）/`grade`/`region`/`textbook_version`/`question_type`/`chapter`/`error_category`/`source_doc` | K12 元数据落库；source_doc 为 P2 文档输入预留 | `619b6e2` |
+| `backend/models/schemas.py` | 新增 `SUBJECT_NAMES`/`ERROR_CATEGORIES`/`ErrorCategory` 常量；`QuestionAnalysis` 增加 `question_type`/`chapter`/`error_category`（枚举约束）；`QuestionOut` 增加 8 个 K12 字段，`from_orm_model` 用 `getattr` 兜底兼容轻量替身对象 | AI 输出与视图契约同步扩展 | `e338350` |
+| `backend/repositories/questions.py` | `create`/`update` 接受 K12 字段；`_filtered_stmt` 新增 `subject`/`grade`/`error_category` SQL 过滤（`list_for_user`/`count_for_user` 同步） | CRUD 与筛选下推 | `e338350` |
+| `backend/services/question_mixins.py` | `create_manual_question`/`analyze_and_save`/`analyze_and_save_dedup`/`update_question`/`import_user_data` 全链路透传 K12 元数据；`list_questions`/`count_for_user` 支持三维筛选；索引调用收敛到 `_upsert_index`；`dashboard_stats` 新增 `subject` 过滤（复习记录同步过滤）；新增 `subjects_for_user` | 服务层 K12 化 | `e338350` `2f5041a` `3762485` |
+| `backend/services/rag.py` | `upsert_question` 新增 `subject`/`grade`/`region`/`knowledge_points`/`difficulty` 可选元数据（非空才写入） | P3 同类题元数据硬过滤基础 | `2f5041a` |
+| `backend/services/ai/base.py` | 新增 `AnalysisContext` 与 `build_system_prompt()`（缺省逐字返回基座 `SYSTEM_PROMPT`）；`JSON_INSTRUCTION` 增加 `question_type`/`chapter`/`error_category`；`analyze_question`/`analyze_text` 接受 `context`；`_complete` 抽象签名增加 `system_prompt` 参数 | 提示词按 学科+年级+地区+教材版本 参数化 | `69b13f6` |
+| `backend/services/ai/openai_compat.py` | `_complete` 使用传入的 `system_prompt` | Provider 同步 | `69b13f6` |
+| `backend/services/ai/gemini.py` | 同上 | Provider 同步 | `69b13f6` |
+| `backend/services/ai/mock.py` | `_complete` 签名同步；演示输出补 `question_type`/`chapter`/`error_category`；`analyze_text` 接受 `context` | 无 Key 演示模式跑通新字段 | `69b13f6` |
+| `backend/services/job_service.py` | `submit_analyze` 携带 K12 上下文入 payload，`_run_analyze` 透传 | 异步录题上下文不丢失 | `17ca313` |
+| `api/routers/questions.py` | `analyze`/`analyze/async` 新增 `subject`/`grade`/`region`/`textbook_version` 表单字段（grade 校验 1-12）；`text` 端点与 `PATCH` 支持完整 K12 元数据；`GET /questions` 新增 `subject`/`grade`/`error_category` 筛选参数 | 录入上下文 API 注入 | `17ca313` |
+| `frontend/pages/tutor.py` | 拍照/手动 Tab 增加学科/年级/地区/教材版本控件（共用 `_k12_context_inputs`），手动录入另有题型/章节/错因；解析结果展示新字段 | 录入界面 K12 化 | `17ca313` |
+| `frontend/pages/notebook.py` | 新增学科/年级/错因筛选（SQL 下推）；列表标题带学科·年级；清除筛选同步重置 | 错题本筛选 | `0c18332` |
+| `frontend/components.py` | 新增 `k12_meta_line()`，详情视图展示 K12 摘要行 | 详情展示 | `0c18332` |
+| `frontend/common.py` | `edit_question_form` 增加 K12 元数据编辑控件 | 编辑元数据 | `0c18332` |
+| `frontend/pages/dashboard.py` | 多学科时顶部出现「按学科筛选」下拉 | 看板筛选 | `3762485` |
+| `.env.example` | RAG 段注释写清嵌入双轨策略（远程 bge-m3 优先、本地回退） | P1.3 配置文档化 | `0198fd4` |
+| `tests/test_migrations.py` | 重构出 `_alembic_config` 助手；新增 K12 迁移回填测试 | 迁移回归 | `619b6e2` |
+| `tests/test_rag.py` | 新增 2 例：K12 元数据写入与 where 过滤、空值省略 | 向量元数据回归 | `2f5041a` |
+
+### 新增文件（P1）
+
+| 文件 | 目的 | 引入提交 |
+|------|------|----------|
+| `migrations/versions/c3f1a2b48d01_add_questions_k12_metadata.py` | K12 八列迁移；`subject` server_default + 兜底 UPDATE 回填旧数据 | `619b6e2` |
+| `tests/test_k12_metadata.py` | 枚举校验、落库、筛选、编辑、拍照录入上下文（8 例） | `e338350` |
+| `tests/test_prompt_context.py` | 提示词组装、上下文透传、非法错因枚举重试、Mock 新字段（10 例） | `69b13f6` |
+| `tests/test_k12_api.py` | 同步/异步/文本/PATCH 传参落库与列表筛选（6 例） | `17ca313` |
+| `tests/test_k12_dashboard.py` | 学科列表、看板筛选口径、默认行为、`k12_meta_line`（5 例） | `3762485` |
+
+### P1 合入上游注意事项
+
+1. **`_complete` 签名变化**：三个 Provider 的 `_complete` 增加第四个参数
+   `system_prompt`（带默认值，向后兼容）；上游若新增 Provider 需遵循同一签名。
+2. **`repo.update` 的 None 语义**：`None` = 不修改；`grade`/`error_category`
+   目前无法通过编辑表单清空（只能改值），如需清空需引入显式哨兵值。
+3. **编辑表单的错因/学科下拉**：选项来自 `schemas.ERROR_CATEGORIES` /
+   `SUBJECT_NAMES` 单一事实源，上游若调整枚举需同步检查前端引用。
+4. **ChromaDB 元数据写入**：`upsert_question` 对 None 字段省略不写，
+   旧向量文档没有 K12 元数据键，P3 过滤实现需兼容「键缺失」。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
