@@ -85,6 +85,48 @@
 4. **ChromaDB 元数据写入**：`upsert_question` 对 None 字段省略不写，
    旧向量文档没有 K12 元数据键，P3 过滤实现需兼容「键缺失」。
 
+---
+
+## P2 阶段（文档输入 —— 整卷导入，2026-09-26，前半：解析层 + 切题管线）
+
+### 修改的基座已有文件（P2）
+
+| 文件 | 改动 | 目的 | 引入提交 |
+|------|------|------|----------|
+| `requirements.txt` | 新增 `pymupdf>=1.24`（python-docx 基座已声明） | PDF 解析与逐页渲染 | `bbd78a4` |
+| `backend/services/ai/base.py` | 新增 `SEGMENT_SYSTEM_PROMPT`/`SEGMENT_INSTRUCTION`、`BaseAIProvider.segment_page()`（视觉切题）、`extract_json_list()` | 策略 A 视觉切题基础设施 | `f2adeb5` |
+| `backend/services/ai/mock.py` | `segment_page` 返回固定两题演示 | 无 Key 跑通整卷导入 | `f2adeb5` |
+| `backend/services/question_mixins.py` | `create_manual_question` 补 `difficulty`/`followup_question` 透传 | 确认入库保留解构产物 | `6c9f47e` |
+| `api/main.py` | 注册 `documents` 路由 | 整卷导入 API | `a48ed6a` |
+
+### 新增文件（P2）
+
+| 文件 | 目的 | 引入提交 |
+|------|------|----------|
+| `backend/services/document.py` | 文档解析层：`parse_document(path, work_dir) -> list[DocPage]`；PDF 逐页文本层 + 200DPI 渲染（文本 <20 字符判扫描版）；DOCX 段落提取 + 内嵌图落盘留 `[图片:...]` 锚点 | `b4e2285` |
+| `backend/services/segment.py` | 切题管线：规则切题（题号正则 + 单调递增防小问误切）、视觉切题、双策略按题号对齐（不一致标 needs_review）、跨页拼接 | `f2adeb5` |
+| `backend/services/document_service.py` | 整卷导入编排：SHA-256 去重（重复上传复用既有任务）、文档落 DOC_UPLOAD_PATH、jobs 异步管线（解析→切题→逐题解构，total/done 进度）、`confirm_import` 幂等入库（source=document、source_doc=文档名#页码） | `a48ed6a` `6c9f47e` `77d8d33` |
+| `api/routers/documents.py` | `POST /api/documents/import`（202，去重）、`GET /{job_id}/segments`、`POST /{job_id}/confirm` | `a48ed6a` `77d8d33` |
+| `tests/doc_samples.py` | 程序化样本：文字版/扫描版 PDF（pymupdf 内置 china-s 字体）、DOCX（含内嵌图） | `b4e2285` |
+| `tests/test_document_parse.py` | 三类文档解析 + 不支持格式（5 例） | `b4e2285` |
+| `tests/test_document_import.py` | 上传去重、坏输入、导入 API（5 例） | `a48ed6a` |
+| `tests/test_segment.py` | 编号风格、锚点保留、双策略对齐/错位、扫描版、跨页拼接、视觉降级（11 例） | `f2adeb5` |
+| `tests/test_document_pipeline.py` | 完整管线：解构产物、needs_review 传播、上下文 payload（3 例） | `6c9f47e` |
+| `tests/test_document_confirm.py` | 确认入库字段、幂等、segments/confirm 端点（6 例） | `77d8d33` |
+
+### P2 合入上游注意事项
+
+1. **规则切题的递增约束**：题号必须单调递增才切新题（防止把「（1）小问」
+   切成新题）；整页用（1）（2）（3）编号时从 1 递增可正常切分。
+2. **扫描版判定阈值**：页文本层 <20 字符判扫描版（`_SCANNED_TEXT_THRESHOLD`），
+   稀疏文字页（如只有一道短题的页）可能误判，下游以「规则无产出 → 视觉单路
+   + needs_review」兜底，不会丢题。
+3. **视觉切题成本**：当前每个有页图像的页都调一次视觉模型做校验；
+   成本敏感场景可改为仅规则路产出异常时才调（留待 POC 后决定）。
+4. **confirm 跳过解构失败题**：`analysis` 为 None 的 segment 不入库，
+   留待 P2.3 校对界面人工处理。
+5. **DOCX 无分页**：整篇视为一页，source_doc 恒为 `文档名#1`。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
