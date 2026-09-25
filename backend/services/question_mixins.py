@@ -154,15 +154,27 @@ class CoreMixin:
             ]
         )
 
-    def _reindex_owned(self, question) -> None:  # noqa: ANN001 - ORM 实例
-        out = QuestionOut.from_orm_model(question)
+    def _upsert_index(self, out: QuestionOut, text: str) -> None:
+        """向量索引统一入口：K12 元数据随文档写入（供 P3 元数据过滤）。"""
         self.vector_store.upsert_question(
             out.id,
+            text,
+            user_id=out.user_id,
+            tags=out.tags,
+            subject=out.subject,
+            grade=out.grade,
+            region=out.region,
+            knowledge_points=out.knowledge_points,
+            difficulty=out.difficulty,
+        )
+
+    def _reindex_owned(self, question) -> None:  # noqa: ANN001 - ORM 实例
+        out = QuestionOut.from_orm_model(question)
+        self._upsert_index(
+            out,
             " ".join(
                 [*(out.knowledge_points or []), out.content_markdown, out.answer or ""]
             ),
-            user_id=out.user_id,
-            tags=out.tags,
         )
 
 
@@ -228,11 +240,9 @@ class EntryMixin:
             )
             out = QuestionOut.from_orm_model(question)
 
-        self.vector_store.upsert_question(
-            out.id,
+        self._upsert_index(
+            out,
             " ".join([*clean_points, content_markdown.strip(), clean_answer, *clean_tags]),
-            user_id=user_id,
-            tags=clean_tags,
         )
         return out
 
@@ -287,12 +297,7 @@ class EntryMixin:
         embed_text = self._embeddable_text(analysis)
         if ocr_text:
             embed_text = f"{embed_text} {ocr_text}"
-        self.vector_store.upsert_question(
-            out.id,
-            embed_text,
-            user_id=user_id,
-            tags=tags,
-        )
+        self._upsert_index(out, embed_text)
         return out, analysis
 
     def analyze_and_save_dedup(
@@ -516,11 +521,9 @@ class EditTagMixin:
             out = QuestionOut.from_orm_model(question) if question else None
 
         if out is not None:
-            self.vector_store.upsert_question(
-                out.id,
+            self._upsert_index(
+                out,
                 " ".join([*(out.knowledge_points or []), out.content_markdown, out.answer]),
-                user_id=user_id,
-                tags=out.tags,
             )
         return out
 

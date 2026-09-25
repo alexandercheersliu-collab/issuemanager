@@ -42,3 +42,60 @@ def test_user_isolation_in_query(store):
     hits_other_user = store.semantic_search("相似三角形", user_ids=[999999])
     assert all(h.question_id != 9101 for h in hits_other_user)
     store.delete_questions([9101])
+
+
+@pytest.mark.skipif(
+    not QuestionVectorStore().is_available(),
+    reason="向量库不可用（如模型下载受限），降级路径已在其他用例覆盖",
+)
+def test_upsert_writes_k12_metadata(store):
+    """K12 元数据（学科/年级/地区/知识点/难度）随向量文档写入，供 P3 过滤。"""
+    ok = store.upsert_question(
+        9201,
+        "一元二次方程判别式与根的关系",
+        user_id=1,
+        tags=["方程"],
+        subject="math",
+        grade=9,
+        region="北京",
+        knowledge_points=["判别式", "韦达定理"],
+        difficulty="medium",
+    )
+    assert ok
+
+    collection = store._ensure_collection()
+    got = collection.get(ids=["9201"], include=["metadatas"])
+    assert got["metadatas"], "向量文档未写入"
+    metadata = got["metadatas"][0]
+    assert metadata["subject"] == "math"
+    assert metadata["grade"] == 9
+    assert metadata["region"] == "北京"
+    assert metadata["knowledge_points"] == "判别式,韦达定理"
+    assert metadata["difficulty"] == "medium"
+
+    # 元数据可用于 where 过滤（P3 同类题检索的硬过滤基础）
+    filtered = collection.get(
+        where={"$and": [{"subject": "math"}, {"grade": 9}]}, include=["metadatas"]
+    )
+    assert "9201" in filtered["ids"]
+    wrong_grade = collection.get(where={"grade": 3}, include=["metadatas"])
+    assert "9201" not in wrong_grade["ids"]
+
+    store.delete_questions([9201])
+
+
+@pytest.mark.skipif(
+    not QuestionVectorStore().is_available(),
+    reason="向量库不可用（如模型下载受限），降级路径已在其他用例覆盖",
+)
+def test_upsert_omits_empty_k12_metadata(store):
+    """未提供 K12 元数据时不写入对应键（ChromaDB 不接受 None 值）。"""
+    ok = store.upsert_question(9202, "光的折射定律应用", user_id=1, tags=["物理"])
+    assert ok
+    collection = store._ensure_collection()
+    got = collection.get(ids=["9202"], include=["metadatas"])
+    metadata = got["metadatas"][0]
+    assert "subject" not in metadata
+    assert "grade" not in metadata
+    assert "region" not in metadata
+    store.delete_questions([9202])

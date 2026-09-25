@@ -104,23 +104,38 @@ class QuestionVectorStore:
         user_id: int,
         tags: list[str],
         created_at: dt.datetime | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        knowledge_points: list[str] | None = None,
+        difficulty: str | None = None,
     ) -> bool:
+        """错题向量入库；K12 元数据（学科/年级/地区/知识点/难度）随文档写入，
+        供 P3 同类题检索做元数据硬过滤。ChromaDB 元数据值不接受 None，
+        未提供的字段直接省略。"""
         collection = self._ensure_collection()
         if collection is None or not text.strip():
             return False
+        metadata: dict = {
+            "user_id": user_id,
+            "tags": ",".join(tags),
+            "created": (created_at or dt.datetime.now(dt.timezone.utc)).strftime("%Y-%m-%d"),
+        }
+        if subject:
+            metadata["subject"] = subject
+        if grade is not None:
+            metadata["grade"] = grade
+        if region:
+            metadata["region"] = region
+        if knowledge_points:
+            metadata["knowledge_points"] = ",".join(knowledge_points)
+        if difficulty:
+            metadata["difficulty"] = difficulty
         try:
             collection.upsert(
                 ids=[str(question_id)],
                 documents=[text[:4000]],
-                metadatas=[
-                    {
-                        "user_id": user_id,
-                        "tags": ",".join(tags),
-                        "created": (created_at or dt.datetime.now(dt.timezone.utc)).strftime(
-                            "%Y-%m-%d"
-                        ),
-                    }
-                ],
+                metadatas=[metadata],
             )
             return True
         except Exception as exc:  # noqa: BLE001
