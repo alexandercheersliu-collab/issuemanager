@@ -47,3 +47,36 @@ async def import_document(
     except ValueError as exc:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     return {"job_id": job_id, "duplicated": duplicated, "status": "pending"}
+
+
+@router.get("/{job_id}/segments")
+def get_segments(job_id: str, user: User = Depends(get_current_user)) -> dict:
+    """取切题 + 逐题解构结果（含 needs_review 标记与 total/done 进度）。"""
+    job = _service().get_job(job_id, user.id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "导入任务不存在")
+    result = job["result"] or {}
+    segments = result.get("segments", [])
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "error": job["error"],
+        "pages": result.get("pages", 0),
+        "scanned_pages": result.get("scanned_pages", 0),
+        "total": result.get("total", 0),
+        "done": result.get("done", 0),
+        "needs_review_count": sum(1 for s in segments if s.get("needs_review")),
+        "confirmed": result.get("confirmed", False),
+        "segments": segments,
+    }
+
+
+@router.post("/{job_id}/confirm")
+def confirm_import(job_id: str, user: User = Depends(get_current_user)) -> dict:
+    """确认入库：解构成功的题批量写入错题本（幂等，重复确认返回既有结果）。"""
+    try:
+        return _service().confirm_import(job_id, user.id)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

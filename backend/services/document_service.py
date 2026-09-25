@@ -200,6 +200,67 @@ class DocumentService:
             job.finished_at = dt.datetime.now(dt.timezone.utc)
             session.commit()
 
+    # ---------- 确认入库 ----------
+    def confirm_import(self, job_id: str, user_id: int) -> dict:
+        """确认入库：把解构成功的 segments 批量写入错题本。
+
+        source="document"、source_doc="文档名#页码"（跨页题为 #起-止），
+        K12 上下文取任务 payload，结构化字段取逐题解构结果。
+        幂等：已确认的任务直接返回既有导入数，不重复入库。
+        """
+        from backend.services.question_service import QuestionService
+
+        with SessionLocal() as session:
+            job = session.execute(
+                select(Job).where(Job.id == job_id, Job.user_id == user_id, Job.type == JOB_TYPE)
+            ).scalar_one_or_none()
+            if job is None:
+                raise LookupError("导入任务不存在")
+            if job.status != "success":
+                raise ValueError(f"任务尚未完成（当前状态 {job.status}）")
+            result = dict(job.result or {})
+            payload = dict(job.payload or {})
+            if result.get("confirmed"):
+                return {"imported": result.get("imported", 0), "already_confirmed": True}
+
+        service = QuestionService(session_factory=SessionLocal)
+        filename = payload.get("filename") or "document"
+        imported = 0
+        for entry in result.get("segments", []):
+            analysis = entry.get("analysis")
+            if not analysis:
+                continue  # 解构失败的题留给人工校对（P2.3），本轮跳过
+            page_start, page_end = entry["page_start"], entry["page_end"]
+            page_label = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
+            try:
+                service.create_manual_question(
+                    user_id,
+                    content_markdown=f"### 题目\n{entry['text']}\n\n### 解析\n{analysis['analysis']}",
+                    answer=analysis.get("answer", ""),
+                    tags=list(analysis.get("tags") or []),
+                    knowledge_points=list(analysis.get("knowledge_points") or []),
+                    source="document",
+                    difficulty=analysis.get("difficulty") or "medium",
+                    followup_question=analysis.get("followup_question") or "",
+                    subject=payload.get("subject") or "math",
+                    grade=payload.get("grade"),
+                    region=payload.get("region"),
+                    textbook_version=payload.get("textbook_version"),
+                    question_type=analysis.get("question_type") or None,
+                    chapter=analysis.get("chapter") or None,
+                    error_category=analysis.get("error_category") or None,
+                    source_doc=f"{filename}#{page_label}",
+                )
+                imported += 1
+            except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷入库
+                logger.warning("确认入库单题失败 job=%s 题%s: %s", job_id, entry.get("number"), exc)
+
+        result["confirmed"] = True
+        result["imported"] = imported
+        self._save_result(job_id, result)
+        logger.info("确认入库完成 job=%s user=%s imported=%s", job_id, user_id, imported)
+        return {"imported": imported, "already_confirmed": False}
+
     # ---------- 查询 ----------
     def get_job(self, job_id: str, user_id: int) -> dict | None:
         """查询导入任务状态（按用户隔离）。"""
