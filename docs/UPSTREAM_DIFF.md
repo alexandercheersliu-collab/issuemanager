@@ -164,6 +164,44 @@
 7. **编辑操作的状态锁**：校对编辑仅允许 `status=success` 且未 confirm 的任务
    （409），既防止与后台解析线程的 result 写竞争，也保证已入库结果不被改。
 
+## P3 阶段（同类题检测 + 降级联动，2026-09-26，P3.1 约束检索 + 公共种子题库）
+
+### 修改的基座已有文件（P3.1）
+
+| 文件 | 改动 | 目的 | 引入提交 |
+|------|------|------|----------|
+| `backend/config.py` | 新增 `rag_leak_threshold`（默认 0.95）/`rag_filter_oversample`（默认 10）/`rag_bank_collection`（默认 question_bank） | 防泄题阈值与超采系数常量化可配；公共库集合名可配 | `6c24407` |
+| `backend/services/rag.py` | 新增 `SimilarConstraints`/`SimilarResult`/`matches_constraints`/`difficulty_window`；`constrained_similar`（K12 硬过滤 + 级联放宽 RELAX_LADDER，记录生效层级）；`similar_questions` 加防泄题过滤（semantic_search 不加）；客户端重构支持双 collection；新增 `upsert_bank_question`/`bank_size`/`similar_from_bank`；`RagHit` 加 `source`/`bank_id`/`metadata` | P3.1 全部检索能力 | `6c24407` |
+| `backend/services/question_mixins.py` | `similar_questions` 重写为三级回落编排（own→bank→AI 变式），返回 `SimilarQuestionsOutcome`（可迭代/len 兼容旧列表用法）；新增 `_generate_variant`（复用 analyze_text 的 followup_question） | 召回不足兜底链路 | `d8da502` |
+| `api/routers/questions.py` | `GET /{id}/similar` 新增可选约束参数 subject/grade/region/difficulty/strict（grade 1-12、difficulty 枚举校验），不传时旧行为不变 | API 约束入口 | `d8da502` |
+| `frontend/pages/tutor.py` | 相似错题取 `.items`，公共题库/AI 变式命中加来源前缀标记 | 界面适配新返回结构 | `d8da502` |
+
+### 新增文件（P3.1）
+
+| 文件 | 目的 | 引入提交 |
+|------|------|----------|
+| `scripts/seed_question_bank.py` | 公共种子题库生成导入：14 类模板 × 参数变体，年级×学科 276 题（数学 1-12 年级全覆盖 + 物理/化学），确定性（seed=42）、幂等 upsert、`--dry-run` | `b23787b` |
+| `tests/test_similar_constrained.py` | 约束过滤正确性、键缺失放行、难度 ±1 档、防泄题阈值（默认+可配）、级联放宽层级记录、bank 检索（9 例） | `6c24407` |
+| `tests/test_similar_fallback.py` | 三级回落编排（own 足量不回落/bank 补充/generated 兜底/strict 不回落/约束透传）+ API 兼容与参数校验（7 例） | `d8da502` |
+| `tests/test_seed_question_bank.py` | 生成器数量/唯一性/元数据完整性/年级覆盖/确定性/模板答案自洽/dry-run（7 例） | `b23787b` |
+
+### P3.1 合入上游注意事项
+
+1. **键缺失放行只能在召回后过滤**：ChromaDB where 不支持 `$exists`，
+   「旧向量文档缺 K12 元数据键时该维度不过滤」无法在 where 层表达，
+   因此约束过滤在超采召回后于 Python 层执行（`rag_filter_oversample` 控制
+   召回池放大系数）；个人库量级下成本可忽略，上游若迁到支持 exists 的
+   向量库可下推。
+2. **RagHit/返回结构扩展**：`similar_questions` 服务方法返回
+   `SimilarQuestionsOutcome`（实现 `__iter__`/`__len__` 兼容旧列表用法，
+   但 `== []` 等全等比较会失效）；bank/generated 命中以负数 id 的伪
+   `QuestionOut` 返回，`source` 字段标记来源（bank/generated）。
+3. **防泄题只作用于推荐路径**：`similar_questions`/`constrained_similar`/
+   `similar_from_bank` 过滤 ≥ 阈值近重复；`semantic_search`（用户主动搜索）
+   不过滤，避免搜不到原题。
+4. **种子题库 region 键不落库**：公共题不带地区元数据，按「键缺失放行」
+   语义在地区维度恒通过；若后续引入地方卷种子题需补 region 键。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
