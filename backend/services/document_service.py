@@ -107,6 +107,11 @@ class DocumentService:
 
     # ---------- 异步执行 ----------
     def _run_import(self, job_id: str, user_id: int) -> None:
+        """完整管线：解析 → 双策略切题 → 逐题结构化解构（进度写入 result）。"""
+        from backend.services.ai import get_ai_service
+        from backend.services.ai.base import AnalysisContext
+        from backend.services.segment import segment_document
+
         with SessionLocal() as session:
             job = session.get(Job, job_id)
             if job is None:
@@ -120,18 +125,61 @@ class DocumentService:
                 payload["doc_path"],
                 Path(payload["doc_path"]).parent / "pages" / job_id,
             )
-            result = {
+            ai = get_ai_service(self.settings)
+            context = AnalysisContext(
+                subject=payload.get("subject") or "math",
+                grade=payload.get("grade"),
+                region=payload.get("region"),
+                textbook_version=payload.get("textbook_version"),
+            )
+            segments = segment_document(pages, ai)
+
+            result: dict = {
                 "pages": len(pages),
                 "scanned_pages": sum(1 for p in pages if p.is_scanned),
-                "total": 0,
+                "total": len(segments),
                 "done": 0,
                 "segments": [],
                 "confirmed": False,
             }
+            self._save_result(job_id, result)
+
+            for segment in segments:
+                entry: dict = {
+                    "number": segment.number,
+                    "text": segment.text,
+                    "page_start": segment.page_start,
+                    "page_end": segment.page_end,
+                    "needs_review": segment.needs_review,
+                    "continued": segment.continued,
+                    "source": segment.source,
+                    "analysis": None,
+                    "error": None,
+                }
+                try:
+                    analysis = ai.analyze_text(segment.text[:4000], context=context)
+                    entry["analysis"] = analysis.model_dump(mode="json")
+                except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷
+                    logger.warning("逐题解构失败 job=%s 题%s: %s", job_id, segment.number, exc)
+                    entry["error"] = str(exc)
+                    entry["needs_review"] = True
+                result["segments"].append(entry)
+                result["done"] += 1
+                self._save_result(job_id, result)
+
             self._finish(job_id, status="success", result=result)
         except Exception as exc:  # noqa: BLE001 - 失败落库供轮询方查看
             logger.warning("文档导入失败 job=%s: %s", job_id, exc)
             self._finish(job_id, status="failed", error=str(exc))
+
+    def _save_result(self, job_id: str, result: dict) -> None:
+        """任务执行中更新进度（status 保持 running，供轮询方看 total/done）。"""
+        with SessionLocal() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                return
+            job.result = result
+            session.commit()
 
     def _finish(
         self,

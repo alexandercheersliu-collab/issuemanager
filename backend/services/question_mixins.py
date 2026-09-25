@@ -192,6 +192,8 @@ class EntryMixin:
         source: str = "manual",
         ai_analyze: bool = False,
         hint: str = "",
+        difficulty: str = "medium",
+        followup_question: str = "",
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -207,7 +209,7 @@ class EntryMixin:
         clean_tags = [t.strip() for t in (tags or []) if t.strip()]
         clean_points = [t.strip() for t in (knowledge_points or []) if t.strip()]
         clean_answer = (answer or "").strip()
-        followup = ""
+        followup = followup_question or ""
 
         if ai_analyze:
             from backend.services.ai.base import AnalysisContext
@@ -238,6 +240,7 @@ class EntryMixin:
                 answer=clean_answer,
                 knowledge_points=clean_points,
                 tags=clean_tags,
+                difficulty=difficulty,
                 followup_question=followup,
                 source=source,
                 subject=subject,
