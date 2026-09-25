@@ -73,6 +73,7 @@ def initials(name: str) -> str:
 _LABEL_TO_KEY = {
     "学情看板": "dashboard",
     "AI 录题": "tutor",
+    "整卷导入": "import_doc",
     "错题本": "notebook",
     "今日复习": "review",
     "知识图谱": "graph",

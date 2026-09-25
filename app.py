@@ -58,6 +58,7 @@ except Exception:  # noqa: BLE001 - SW 注册失败不影响应用
 _PAGES = {
     t("nav.dashboard"): "dashboard",
     t("nav.tutor"): "tutor",
+    t("nav.import_doc"): "import_doc",
     t("nav.notebook"): "notebook",
     t("nav.review"): "review",
     t("nav.graph"): "graph",
@@ -140,6 +141,10 @@ def main() -> None:
         render_dashboard(user)
     elif page == "tutor":
         render_tutor_page(user)
+    elif page == "import_doc":
+        from frontend.pages.import_doc import render_import_doc_page
+
+        render_import_doc_page(user)
     elif page == "notebook":
         render_notebook_page(user)
     elif page == "review":
