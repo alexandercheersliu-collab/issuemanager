@@ -134,7 +134,18 @@ def followup_chat(service, question, user: dict) -> None:
 
 def edit_question_form(service, question, user: dict) -> None:
     """错题编辑表单（错题本与复习页共用）。保存后提示并刷新。"""
+    from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
     from backend.services.question_service import sanitize_tags
+
+    subject_labels = list(SUBJECT_NAMES.values())
+    current_subject_label = SUBJECT_NAMES.get(
+        getattr(question, "subject", "math"), subject_labels[0]
+    )
+    grade_options = ["未设置"] + [f"{g} 年级" for g in range(1, 13)]
+    current_grade = getattr(question, "grade", None)
+    current_grade_label = f"{current_grade} 年级" if current_grade else "未设置"
+    category_options = ["未设置", *ERROR_CATEGORIES]
+    current_category = getattr(question, "error_category", None) or "未设置"
 
     with st.form(f"edit_form_{question.id}"):
         new_tags = st.text_input(
@@ -145,6 +156,40 @@ def edit_question_form(service, question, user: dict) -> None:
             "解析（Markdown）", value=question.content_markdown, height=260
         )
         new_answer = st.text_input("答案", value=question.answer)
+
+        st.caption("K12 元数据")
+        col_s, col_g, col_e = st.columns(3)
+        with col_s:
+            new_subject_label = st.selectbox(
+                "学科",
+                subject_labels,
+                index=subject_labels.index(current_subject_label),
+            )
+        with col_g:
+            new_grade_label = st.selectbox(
+                "年级", grade_options, index=grade_options.index(current_grade_label)
+            )
+        with col_e:
+            new_category = st.selectbox(
+                "错因",
+                category_options,
+                index=category_options.index(current_category)
+                if current_category in category_options
+                else 0,
+            )
+        col_r, col_t, col_q = st.columns(3)
+        with col_r:
+            new_region = st.text_input("地区", value=getattr(question, "region", None) or "")
+        with col_t:
+            new_textbook = st.text_input(
+                "教材版本", value=getattr(question, "textbook_version", None) or ""
+            )
+        with col_q:
+            new_qtype = st.text_input(
+                "题型", value=getattr(question, "question_type", None) or ""
+            )
+        new_chapter = st.text_input("章节", value=getattr(question, "chapter", None) or "")
+
         new_note = st.text_area(
             "我的笔记（易错点、思路备忘）",
             value=question.user_note or "",
@@ -154,6 +199,9 @@ def edit_question_form(service, question, user: dict) -> None:
         if st.form_submit_button("保存修改", type="primary"):
             from contextlib import suppress
 
+            new_subject = next(
+                (k for k, v in SUBJECT_NAMES.items() if v == new_subject_label), "math"
+            )
             updated = service.update_question(
                 question.id,
                 user["id"],
@@ -161,6 +209,15 @@ def edit_question_form(service, question, user: dict) -> None:
                 answer=new_answer,
                 tags=sanitize_tags(new_tags.replace("、", ",")),
                 user_note=new_note.strip() or None,
+                subject=new_subject,
+                grade=int(new_grade_label.split()[0])
+                if new_grade_label != "未设置"
+                else None,
+                region=new_region.strip(),
+                textbook_version=new_textbook.strip(),
+                question_type=new_qtype.strip(),
+                chapter=new_chapter.strip(),
+                error_category=None if new_category == "未设置" else new_category,
             )
             if updated is None:
                 st.error("保存失败：只能编辑自己的错题（教师可查看但不可修改学生的题）")

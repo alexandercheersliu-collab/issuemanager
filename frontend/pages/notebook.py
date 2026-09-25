@@ -5,6 +5,7 @@ import datetime as dt
 
 import streamlit as st
 
+from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
 from backend.services.export import generate_pdf_exam, generate_word_exam
 from backend.services.question_service import sanitize_tags
 from frontend.common import (
@@ -86,6 +87,37 @@ def render_notebook_page(user: dict) -> None:
             tag_filter = st.selectbox(
                 "按标签筛选", ["全部"] + all_tags, index=default_index, key="notebook_tag"
             )
+
+            # K12 元数据筛选：学科 / 年级 / 错因（SQL 下推）
+            present_subjects = sorted({q.subject for q in all_questions if q.subject})
+            subject_options = ["全部"] + [
+                SUBJECT_NAMES.get(s, s) for s in present_subjects
+            ]
+            subject_label = st.selectbox(
+                "按学科筛选", subject_options, index=0, key="notebook_subject"
+            )
+            subject_filter = None
+            if subject_label != "全部":
+                subject_filter = next(
+                    (k for k, v in SUBJECT_NAMES.items() if v == subject_label),
+                    subject_label,
+                )
+
+            present_grades = sorted({q.grade for q in all_questions if q.grade is not None})
+            grade_label = st.selectbox(
+                "按年级筛选",
+                ["全部"] + [f"{g} 年级" for g in present_grades],
+                index=0,
+                key="notebook_grade",
+            )
+            grade_filter = (
+                int(grade_label.split()[0]) if grade_label != "全部" else None
+            )
+
+            category_label = st.selectbox(
+                "按错因筛选", ["全部", *ERROR_CATEGORIES], index=0, key="notebook_errcat"
+            )
+            category_filter = None if category_label == "全部" else category_label
         with col_export:
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -94,6 +126,9 @@ def render_notebook_page(user: dict) -> None:
             include_others=include_others,
             tag=None if tag_filter == "全部" else tag_filter,
             keyword=keyword or None,
+            subject=subject_filter,
+            grade=grade_filter,
+            error_category=category_filter,
             semantic=semantic,
         )
 
@@ -173,9 +208,11 @@ def render_notebook_page(user: dict) -> None:
                 go_to("tutor")
         with c2:
             if st.button("清除筛选条件", width="stretch"):
-                st.session_state.pop("notebook_search", None)
-                st.session_state.pop("notebook_tag", None)
-                st.session_state.pop("notebook_page", None)
+                for key in (
+                    "notebook_search", "notebook_tag", "notebook_page",
+                    "notebook_subject", "notebook_grade", "notebook_errcat",
+                ):
+                    st.session_state.pop(key, None)
                 st.rerun()
         return
 
@@ -219,8 +256,12 @@ def render_notebook_page(user: dict) -> None:
             due_mark = "⏰ "
         else:
             due_mark = "✅ "
+        subject_label = SUBJECT_NAMES.get(q.subject, q.subject or "")
+        grade_label = f"{q.grade}年级" if q.grade is not None else ""
+        k12_label = "·".join(bit for bit in (subject_label, grade_label) if bit)
         expander_title = (
             f"{due_mark}{'、'.join(q.tags[:4]) or '未分类'}　·　{q.difficulty}　·　"
+            f"{k12_label + '　·　' if k12_label else ''}"
             f"{(q.created_at.strftime('%Y-%m-%d') if q.created_at else '')}"
         )
         with st.expander(expander_title):

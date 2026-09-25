@@ -6,7 +6,32 @@ import os
 
 import streamlit as st
 
+from backend.models.schemas import SUBJECT_NAMES
+
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
+
+
+def k12_meta_line(q) -> str:
+    """K12 元数据摘要行（学科/年级/地区/教材/题型/章节/错因/来源），无数据返回空串。"""
+    bits: list[str] = []
+    subject = SUBJECT_NAMES.get(getattr(q, "subject", None), getattr(q, "subject", None))
+    if subject:
+        bits.append(f"学科：{subject}")
+    if getattr(q, "grade", None) is not None:
+        bits.append(f"年级：{q.grade} 年级")
+    if getattr(q, "region", None):
+        bits.append(f"地区：{q.region}")
+    if getattr(q, "textbook_version", None):
+        bits.append(f"教材：{q.textbook_version}")
+    if getattr(q, "question_type", None):
+        bits.append(f"题型：{q.question_type}")
+    if getattr(q, "chapter", None):
+        bits.append(f"章节：{q.chapter}")
+    if getattr(q, "error_category", None):
+        bits.append(f"错因：{q.error_category}")
+    if getattr(q, "source_doc", None):
+        bits.append(f"来源：{q.source_doc}")
+    return " · ".join(bits)
 
 
 def question_detail_view(q, show_hit: bool = True) -> None:
@@ -25,6 +50,9 @@ def question_detail_view(q, show_hit: bool = True) -> None:
             f"<div><span class='mm-badge mm-badge--blue'>{q.difficulty}</span>{badges}</div>",
             unsafe_allow_html=True,
         )
+        meta_line = k12_meta_line(q)
+        if meta_line:
+            st.caption(meta_line)
         if q.reps:
             st.caption(f"已复习 {q.reps} 次 · 间隔 {q.interval_days:.0f} 天 · 难度系数 {q.ease:.2f}")
         else:
