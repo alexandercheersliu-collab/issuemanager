@@ -72,10 +72,13 @@ class QuestionOut(BaseModel):
 
     @classmethod
     def from_orm_model(cls, q) -> QuestionOut:  # noqa: ANN001 - ORM 实例
+        # 原图路径自愈：库里的绝对路径在 DATA_DIR 迁移后可能失效，
+        # 这里换成当前真实可用路径（找不到则留空，界面按"无图"处理）。
+        resolved = q.resolved_image_path() if hasattr(q, "resolved_image_path") else None
         return cls(
             id=q.id,
             user_id=q.user_id,
-            image_path=q.image_path,
+            image_path=str(resolved) if resolved else None,
             content_markdown=q.content_markdown,
             answer=q.answer,
             knowledge_points=list(q.knowledge_points or []),

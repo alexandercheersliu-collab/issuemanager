@@ -71,6 +71,24 @@ class QuestionVectorStore:
                 api_base=self.settings.embedding_base_url,
                 model_name=self.settings.embedding_model,
             )
+        model_dir = self.settings.chroma_model_dir
+        if model_dir is not None:
+            # ChromaDB 把 ONNX 模型缓存的父目录写死为「用户主目录/.cache/chroma/onnx_models」，
+            # 且不读取任何环境变量；这里显式改写类属性，让模型落到配置的数据盘。
+            # 最终路径 = {chroma_model_dir}/all-MiniLM-L6-v2/onnx/…
+            # 不直接取 embedding_functions.ONNXMiniLM_L6_V2：该名字未必由包入口重导出，
+            # 取不到时退回子模块导入，避免整个向量库因此降级为关键词检索。
+            onnx_cls = getattr(embedding_functions, "ONNXMiniLM_L6_V2", None)
+            if onnx_cls is None:
+                try:
+                    from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import (  # noqa: PLC0415
+                        ONNXMiniLM_L6_V2 as onnx_cls,
+                    )
+                except ImportError:
+                    onnx_cls = None
+            if onnx_cls is not None:
+                onnx_cls.DOWNLOAD_PATH = model_dir / "all-MiniLM-L6-v2"
+            logger.info("内置嵌入模型缓存目录: %s", model_dir)
         logger.info("使用 ChromaDB 内置本地嵌入模型")
         return embedding_functions.DefaultEmbeddingFunction()
 

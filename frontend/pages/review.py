@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 import streamlit as st
 
@@ -76,11 +77,11 @@ def render_review_page(user: dict) -> None:
                 last = last.replace(tzinfo=dt.timezone.utc)
             days_ago = (dt.datetime.now(dt.timezone.utc) - last).days
             st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
-        if question.image_path:
+        if question.image_path and os.path.exists(question.image_path):
             st.image(question.image_path, width=460)
         else:
             st.markdown(question.content_markdown[:220], unsafe_allow_html=True)
-            st.caption("（手动录入题，请先回忆解法）")
+            st.caption("（本题无原图，请根据题面回忆解法）")
 
         if st.button("显示解析", type="secondary"):
             st.session_state[reveal_key] = True

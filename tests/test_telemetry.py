@@ -1,6 +1,8 @@
 """AI 调用遥测测试。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import backend.services.ai.telemetry as telemetry
@@ -49,3 +51,41 @@ def test_summarize_aggregates(isolated_telemetry):
 
 def test_summarize_empty():
     assert telemetry.summarize()["calls"] == 0
+
+
+def test_write_retries_once_then_succeeds(isolated_telemetry, monkeypatch):
+    """瞬时占用（Windows 常见）应当重试一次后成功写入。"""
+    real_open = Path.open
+    calls = {"n": 0}
+
+    def flaky_open(self, *args, **kwargs):
+        if self == isolated_telemetry:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(13, "transient lock")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", flaky_open)
+    with telemetry.track_ai_call("analyze_text"):
+        pass
+
+    assert calls["n"] == 2  # 第一次失败、第二次成功
+    records = telemetry.read_recent()
+    assert len(records) == 1
+    assert records[0]["ok"] is True
+
+
+def test_write_failure_warns_instead_of_silent_loss(isolated_telemetry, monkeypatch):
+    """写不进去时必须留下 warning（旧实现只在 debug 级别，等于静默丢失）。"""
+    warnings: list[str] = []
+    monkeypatch.setattr(telemetry.logger, "warning", lambda msg, *a: warnings.append(msg % a if a else msg))
+    monkeypatch.setattr(
+        Path, "open", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied"))
+    )
+
+    with telemetry.track_ai_call("analyze_text"):  # 不得抛出
+        pass
+
+    assert len(warnings) == 1
+    assert "遥测写入失败" in warnings[0]
+    assert isolated_telemetry.exists() is False

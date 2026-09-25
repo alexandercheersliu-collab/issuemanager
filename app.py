@@ -31,7 +31,7 @@ from frontend.theme import apply_theme  # noqa: E402  需在基础样式之后�
 
 apply_theme()
 
-# PWA：manifest 与 Service Worker（静态目录 .streamlit/static/）
+# PWA：manifest 与 Service Worker（静态目录 static/，Streamlit 只认项目根下的 static）
 st.markdown(
     '<link rel="manifest" href="app/static/manifest.json">',
     unsafe_allow_html=True,

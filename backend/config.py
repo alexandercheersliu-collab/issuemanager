@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     app_name: str = "MathMaster Edu"
     app_version: str = "2.1.0"
     debug: bool = False
+    # 运行时数据根目录（SQLite / 上传原图 / 遥测日志）。
+    # 默认放在项目内 data/；可通过 DATA_DIR 指向项目外的独立数据盘，
+    # 例如 DATA_DIR=D:\workspace\learning-tour\data（此时 DB 仍在 data/ 下）。
     data_dir: Path = PROJECT_ROOT / "data"
 
     # ---------- 观测（可选）----------
@@ -34,9 +37,11 @@ class Settings(BaseSettings):
     sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
     # ---------- 数据库 ----------
-    # SQLite 开箱即用；切换 MySQL 示例：
+    # 留空 = SQLite 开箱即用，文件为 {DATA_DIR}/math_tutor.db；
+    # 也可显式指定绝对路径：DATABASE_URL=sqlite:///D:/workspace/learning-tour/data/math_tutor.db
+    # 切换 MySQL 示例：
     # DATABASE_URL=mysql+pymysql://user:password@localhost:3306/math_tutor?charset=utf8mb4
-    database_url: str = f"sqlite:///{(PROJECT_ROOT / 'data' / 'math_tutor.db').as_posix()}"
+    database_url: str = ""
 
     # ---------- 认证 ----------
     bcrypt_rounds: int = Field(default=12, ge=4, le=31)
@@ -66,6 +71,10 @@ class Settings(BaseSettings):
 
     # ---------- RAG / 向量库 ----------
     chroma_dir: Path = PROJECT_ROOT / "data" / "chroma"
+    # ChromaDB 内置嵌入模型（all-MiniLM-L6-v2）的 ONNX 缓存父目录；留空 = 沿用其默认
+    # （用户主目录 ~/.cache/chroma/onnx_models）。指向数据盘可避免模型与向量库分居两处：
+    # CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx
+    chroma_model_dir: Path | None = None
     rag_enabled: bool = True
     embedding_model: str = "BAAI/bge-m3"
     embedding_base_url: str = ""  # 留空则使用 ChromaDB 内置本地嵌入模型
@@ -87,15 +96,39 @@ class Settings(BaseSettings):
     review_default_ease: float = Field(default=2.5, ge=1.3)
     review_again_minutes: int = Field(default=10, ge=1)
 
-    @field_validator("data_dir", "chroma_dir", mode="after")
+    @field_validator("chroma_model_dir", mode="before")
     @classmethod
-    def _expand_paths(cls, value: Path) -> Path:
+    def _blank_means_default(cls, value: object) -> object:
+        """空字符串（如 CHROMA_MODEL_DIR=）等价于「未配置」。
+
+        必须在 before 阶段拦截：pydantic-settings 会把空字符串先转成 Path('.')，
+        到 after 阶段就再也分不清「用户留空」和「真的想用当前目录」。
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("data_dir", "chroma_dir", "chroma_model_dir", mode="after")
+    @classmethod
+    def _expand_paths(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         return value.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _resolve_database_url(self) -> Settings:
+        """未显式配置 DATABASE_URL 时，SQLite 落在 DATA_DIR 下。"""
+        if not self.database_url.strip():
+            db_file = (self.data_dir / "math_tutor.db").as_posix()
+            self.database_url = f"sqlite:///{db_file}"
+        return self
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if self.rag_enabled:
             self.chroma_dir.mkdir(parents=True, exist_ok=True)
+            if self.chroma_model_dir is not None:
+                self.chroma_model_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

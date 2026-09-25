@@ -224,10 +224,28 @@ Math_Tutor_RAG/
 │   ├── common.py              # 样式、缓存、公共组件
 │   └── assets/style.css       # MUJI 极简主题
 ├── tests/                     # pytest 测试套件
+├── scripts/
+│   └── install_onnx_model.py  # 断点续传安装内置嵌入模型（弱网友好）
 ├── docs/ARCHITECTURE.md       # 架构决策说明
 ├── Dockerfile / docker-compose.yml
 └── .github/workflows/ci.yml   # lint + 测试矩阵 + Docker 构建
 ```
+
+## 💾 数据落在哪里
+
+运行时数据默认在项目内 `data/`，可通过 `.env` 整体挪到独立数据盘（与代码、`.venv` 分离）：
+
+```ini
+DATA_DIR=D:\workspace\learning-tour\data              # SQLite 库 / 上传原图 / 遥测日志
+CHROMA_DIR=D:\workspace\learning-tour\data\chroma     # 向量库
+CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx   # 内置嵌入模型缓存
+```
+
+- `DATABASE_URL` 留空时，SQLite 自动落在 `{DATA_DIR}/math_tutor.db`；也可显式写绝对路径或切 MySQL。
+- 未配置远程 `EMBEDDING_*` 时用 ChromaDB 内置 `all-MiniLM-L6-v2`。其官方缓存位置在用户主目录
+  （`~/.cache/chroma/onnx_models`）且**不支持断点续传**，弱网容易反复下一半。
+  用 `python scripts/install_onnx_model.py` 可断点续传装到 `CHROMA_MODEL_DIR` 并自动校验 SHA256。
+- 启动后在「设置 → 存储」可以看到当前实际生效的路径。
 
 ## 🗺️ 路线图 (Roadmap)
 

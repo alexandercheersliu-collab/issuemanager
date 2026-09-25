@@ -10,16 +10,26 @@ from backend.config import Settings
 from backend.services.rag import QuestionVectorStore
 
 
-def _rag_settings(tmp_path, remote_embedding: bool = False) -> Settings:
+def _rag_settings(
+    tmp_path, remote_embedding: bool = False, model_dir=None
+) -> Settings:
     return Settings(
         rag_enabled=True,
         chroma_dir=tmp_path / "chroma",
+        chroma_model_dir=model_dir,
         embedding_base_url="https://emb.example/v1" if remote_embedding else "",
         embedding_api_key="emb-key" if remote_embedding else "",
         embedding_model="BAAI/bge-m3",
         rag_top_k=2,
         _env_file=None,  # type: ignore[call-arg]
     )
+
+
+def _FakeOnnxPath():
+    """当前假 chromadb 模块里内置模型类的 DOWNLOAD_PATH（被 rag.py 改写后反映出来）。"""
+    import chromadb.utils.embedding_functions as ef
+
+    return ef.ONNXMiniLM_L6_V2.DOWNLOAD_PATH
 
 
 @pytest.fixture
@@ -74,8 +84,14 @@ def fake_chromadb(monkeypatch):
             self.kind = "openai"
             state["openai_ef_kwargs"] = kwargs
 
+    class _OnnxMiniLM:
+        """占位：真实类被 rag.py 改写 DOWNLOAD_PATH，这里记录改写结果。"""
+
+        DOWNLOAD_PATH = "unset"
+
     ef.DefaultEmbeddingFunction = _DefaultEF
     ef.OpenAIEmbeddingFunction = _OpenAIEF
+    ef.ONNXMiniLM_L6_V2 = _OnnxMiniLM
     utils.embedding_functions = ef
     module.utils = utils
     monkeypatch.setitem(sys.modules, "chromadb", module)
@@ -97,6 +113,25 @@ def test_remote_embedding_function_selected(tmp_path, fake_chromadb):
     assert fake_chromadb["embedding_fn"].kind == "openai"
     assert fake_chromadb["openai_ef_kwargs"]["model_name"] == "BAAI/bge-m3"
     assert fake_chromadb["openai_ef_kwargs"]["api_base"] == "https://emb.example/v1"
+
+
+def test_local_embedding_cache_dir_is_redirected(tmp_path, fake_chromadb):
+    """配置 CHROMA_MODEL_DIR 后，内置模型缓存不得再落在用户主目录。"""
+    model_dir = tmp_path / "models" / "onnx"
+    store = QuestionVectorStore(_rag_settings(tmp_path, model_dir=model_dir))
+    assert store.is_available() is True
+    assert fake_chromadb["embedding_fn"].kind == "default"
+    assert _FakeOnnxPath() == model_dir / "all-MiniLM-L6-v2"
+
+
+def test_remote_embedding_ignores_local_model_dir(tmp_path, fake_chromadb):
+    """用远程嵌入时不改内置模型路径（避免无谓副作用）。"""
+    store = QuestionVectorStore(
+        _rag_settings(tmp_path, remote_embedding=True, model_dir=tmp_path / "models" / "onnx")
+    )
+    assert store.is_available() is True
+    assert fake_chromadb["embedding_fn"].kind == "openai"
+    assert _FakeOnnxPath() == "unset"
 
 
 def test_client_failure_degrades_gracefully(tmp_path, fake_chromadb):

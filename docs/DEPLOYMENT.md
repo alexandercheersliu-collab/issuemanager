@@ -95,6 +95,39 @@ EMBEDDING_MODEL=BAAI/bge-m3
 - **API**：`GET /api/questions/export`、`POST /api/questions/import`
 - 题目原图存于 `data/images/`，向量库存于 `data/chroma/`；Docker 部署时两者均在数据卷内，直接备份卷即可
 
+### 5.1 把运行时数据放到项目外（推荐）
+
+默认所有运行时数据都在项目内 `data/`。希望数据库与代码、`.venv` 分离（例如放到另一块盘）时，
+在 `.env` 里显式指定即可，三个目录各自独立、可单独迁移：
+
+```ini
+DATA_DIR=D:\workspace\learning-tour\data            # 根目录：SQLite DB / 上传原图 / 遥测日志
+CHROMA_DIR=D:\workspace\learning-tour\data\chroma   # 向量库
+CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx   # 内置嵌入模型缓存
+# DATABASE_URL 留空 = sqlite:///{DATA_DIR}/math_tutor.db；也可显式写绝对路径
+```
+
+迁移步骤：
+
+1. 停掉应用（避免 SQLite WAL 文件不一致）；
+2. 拷贝整个旧 `data/` 到新 `DATA_DIR`，地址库本体是 `math_tutor.db` + `-wal`/`-shm` 三件套，一起拷；
+3. 写好 `.env`，启动后在「设置 → 存储」确认路径已生效。
+
+### 5.2 内置嵌入模型（all-MiniLM-L6-v2）安装
+
+未配置远程 `EMBEDDING_*` 时使用 ChromaDB 内置 ONNX 模型。ChromaDB 官方实现把缓存路径写死为
+`~/.cache/chroma/onnx_models`（Windows 即 `C:\Users\<用户>\.cache\chroma\...`），且下载**不支持断点续传**，
+弱网下容易留下哈希不符的残包，导致每次启动重复下载。
+
+本仓库提供带断点续传的安装脚本，可反复执行（断线后重跑会接着上次进度）：
+
+```bash
+python scripts/install_onnx_model.py            # 装到 CHROMA_MODEL_DIR（未配置则用 ChromaDB 默认位置）
+python scripts/install_onnx_model.py --check-only
+```
+
+脚本会校验官方 SHA256、解压并做一次真实嵌入自检，成功后可离线启动 RAG。
+
 ## 6. 常见问题
 
 | 现象 | 处理 |
@@ -103,4 +136,5 @@ EMBEDDING_MODEL=BAAI/bge-m3
 | AI 解析 502 | 检查 `AI_API_KEY` 是否有效、模型是否有视觉能力（VL 系列而非纯文本模型） |
 | `database is locked` | 已内置 WAL + 30s busy timeout；仍出现请确认没有多个进程共用同一 SQLite 文件且频繁写 |
 | 向量库不可用 | 设置页会显示降级提示；检查 `data/chroma` 目录权限，或删除该目录重启（会重建索引，需重新录题） |
+| 首次检索卡住/反复下载模型 | ChromaDB 官方下载无断点续传；改用 `python scripts/install_onnx_model.py` 安装到 `CHROMA_MODEL_DIR` |
 | GitHub 连接失败 | 网络间歇受限；稍后重试或配置代理后 `git push` |

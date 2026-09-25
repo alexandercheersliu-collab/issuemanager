@@ -133,7 +133,14 @@ def render_settings_page(user: dict) -> None:
                 f"<span class='mm-muted'>向量库：{settings.chroma_dir.name}</span>",
                 unsafe_allow_html=True,
             )
-            st.caption("默认 SQLite 零配置；配置 DATABASE_URL 可切换 MySQL / PostgreSQL。")
+            st.caption(
+                f"数据目录：{settings.data_dir}（`.env` 的 DATA_DIR 可指向项目外磁盘，"
+                "数据库 / 向量库 / 原图 / 模型缓存均在其中）"
+            )
+            st.caption(
+                "默认 SQLite 零配置；配置 DATABASE_URL 可切换 MySQL / PostgreSQL。"
+                f"　内置嵌入模型缓存：{settings.chroma_model_dir or '（ChromaDB 默认 ~/.cache）'}"
+            )
 
     with st.container(border=True):
         st.markdown("#### 标签管理")

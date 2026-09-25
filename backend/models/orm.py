@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import (
     JSON,
@@ -26,6 +27,25 @@ from backend.config import get_settings
 
 class Base(DeclarativeBase):
     pass
+
+
+def resolve_image_path(stored: str | None, user_id: int) -> Path | None:
+    """把库里存的图片路径解析成真实可用路径。
+
+    绝对路径在 DATA_DIR 迁移后会变成悬空引用（旧目录已不存在），
+    因此这里做一次自愈：原路径不存在时，用文件名到当前数据目录找
+    {DATA_DIR}/images/u{user_id}/{文件名}。找不到返回 None。
+
+    注意：返回 None 只代表"这张图当前读不到"，不代表记录失效；
+    图片属于可重新上传的派生物，不要据此清理或删除任何文件。
+    """
+    if not stored:
+        return None
+    path = Path(stored)
+    if path.exists():
+        return path
+    fallback = get_settings().data_dir / "images" / f"u{user_id}" / path.name
+    return fallback if fallback.exists() else None
 
 
 def _utcnow() -> dt.datetime:
@@ -73,6 +93,10 @@ class Question(Base):
     user_note: Mapped[str | None] = mapped_column(Text)
     ocr_text: Mapped[str | None] = mapped_column(Text)  # 原图 OCR 文字（可选特性）
     image_hash: Mapped[str | None] = mapped_column(String(64), index=True)  # 原图 SHA-256，去重用
+
+    def resolved_image_path(self) -> Path | None:
+        """当前真实可用的原图路径（DATA_DIR 迁移后自动自愈），无图返回 None。"""
+        return resolve_image_path(self.image_path, self.user_id)
 
     # SM-2 调度状态
     reps: Mapped[int] = mapped_column(Integer, default=0)

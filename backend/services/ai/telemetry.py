@@ -56,11 +56,29 @@ def track_ai_call(operation: str) -> Iterator[dict]:
 
 
 def _write(record: dict) -> None:
-    try:
-        with _telemetry_path().open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError as exc:  # noqa: BLE001 - 遥测失败不影响主流程
-        logger.debug("遥测写入失败: %s", exc)
+    """追加一条遥测；失败不阻断主流程，但不允许静默丢失。
+
+    数据盘被占用/权限异常时，旧实现只在 debug 级别留一行日志，
+    等于遥测悄悄失效（排查网络问题时会被严重误导）。这里降级为 warning，
+    并且重试一次，覆盖 Windows 上偶发的瞬时占用。
+    """
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    for attempt in (1, 2):
+        try:
+            with _telemetry_path().open("a", encoding="utf-8") as fh:
+                fh.write(line)
+            if attempt > 1:
+                logger.info("遥测写入在第 %s 次尝试后成功", attempt)
+            return
+        except OSError as exc:  # noqa: BLE001 - 遥测失败不影响主流程
+            if attempt == 2:
+                logger.warning(
+                    "遥测写入失败（已重试 2 次），该次 AI 调用未被记录: %s | 路径=%s",
+                    exc,
+                    _telemetry_path(),
+                )
+            else:
+                time.sleep(0.05)
 
 
 def read_recent(limit: int = 100) -> list[dict]:

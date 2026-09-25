@@ -16,6 +16,10 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+.pytmp/
+.piptmp/
+.pipcache/
+pytest_*.log
 
 # ===== IDE / OS =====
 .vscode/

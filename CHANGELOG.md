@@ -2,6 +2,40 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased]
+
+### 新增
+- `scripts/install_onnx_model.py`：ChromaDB 内置嵌入模型（all-MiniLM-L6-v2 ONNX）安装器，
+  支持断点续传、官方 SHA256 校验、自动解压与嵌入自检（官方下载无续传，弱网容易反复下一半）。
+- 运行时数据可整体迁移：`.env` 新增 `DATA_DIR` / `CHROMA_DIR` / `CHROMA_MODEL_DIR`。
+
+### 变更
+- `DATABASE_URL` 留空时，SQLite 改为落在 `{DATA_DIR}/math_tutor.db`（此前固定为项目内 `data/`）；
+  显式配置 `DATA_DIR` 即可让数据库、向量库、原图、模型缓存一起放到项目外磁盘。
+- 设置页「存储」现在展示实际生效的数据目录与内置嵌入模型缓存目录。
+- 测试复用已安装的 ONNX 模型缓存（`.env` 的 `CHROMA_MODEL_DIR` / `DATA_DIR/models/onnx`），
+  不再在测试期间现下 83MB 模型。
+
+### 修复
+- **AI 录题页崩溃**：`_process_uploads` 把 `analyze_and_save_dedup()` 返回的 `EntryResult`
+  当成 `(question, analysis)` 元组解包，点「开始 AI 解析」即抛
+  `TypeError: cannot unpack non-iterable EntryResult object`。现将结果整形抽成纯函数
+  `_collect_entries` 并补 5 个回归用例（UI 层此前零覆盖）。
+- **原图路径自愈**：`questions.image_path` 存绝对路径，`DATA_DIR` 迁移后旧记录变悬空引用，
+  界面静默不显示图片、外部脚本还会误判为孤儿文件。新增 `resolve_image_path()`：
+  原路径失效时按文件名回落到 `{DATA_DIR}/images/u{user_id}/`，`QuestionOut.from_orm_model`
+  统一走它；复习页与录题页对无图情况给出明确提示。
+- **遥测静默失效**：`_write` 原先只在 debug 级别记录写入异常，AI 调用照常但遥测无声丢失；
+  改为失败重试一次、仍失败则 warning 并打印路径。
+- PWA 静态资源目录从 `.streamlit/static/` 迁到项目根 `static/`：Streamlit 的
+  `server.enableStaticServing` 只认项目根下的 `static/`，原先 3 个文件（manifest.json /
+  sw.js / icon.png）实际全部 404，启动时还会报 "no static folder found"，PWA 安装与
+  离线能力一直是失效的。`scripts/make_icon.py` 输出路径同步更新。
+- `alembic.ini` 改为纯 ASCII 注释：Alembic 按系统 locale（中文 Windows 为 cp936）读取该文件，
+  原先的 UTF-8 中文注释会让 `alembic upgrade head` 直接抛 UnicodeDecodeError。
+- `tests/test_migrations.py` 显式以 UTF-8 解析 `alembic.ini` 并新增 locale 可解码性回归测试。
+- 内置嵌入模型路径改写按子模块回退导入，假 `chromadb` 环境下不再让整个向量库降级。
+
 ## [2.3.0] - 2026-09-15
 
 ### 新增（Agent 化）

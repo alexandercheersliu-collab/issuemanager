@@ -94,6 +94,29 @@ def _render_manual_entry(service, user) -> None:
                 go_to("notebook")
 
 
+def _collect_entries(results: list) -> list[dict]:
+    """把 (文件名, EntryResult|None, 错误) 三元组整形成可渲染条目。
+
+    纯函数、不依赖 Streamlit，便于单测：历史 bug 正是这里把 EntryResult
+    当成元组解包（TypeError: cannot unpack non-iterable EntryResult object）。
+    """
+    entries: list[dict] = []
+    for name, result, error in results:
+        if error is not None or result is None:
+            entries.append({"name": name, "error": error or "解析失败", "duplicated": False})
+            continue
+        entries.append(
+            {
+                "name": name,
+                "error": None,
+                "question": result.question,
+                "analysis": result.analysis,
+                "duplicated": bool(result.duplicated),
+            }
+        )
+    return entries
+
+
 def _process_uploads(service, user, uploads, tags: list[str], hint: str) -> None:
     progress = st.progress(0.0, text="准备解析…")
     results = []
@@ -112,8 +135,9 @@ def _process_uploads(service, user, uploads, tags: list[str], hint: str) -> None
             results.append((upload.name, None, str(exc)))
     progress.progress(1.0, text="解析完成")
 
-    ok_count = sum(1 for r in results if r[1] is not None)
-    st.success(f"完成：成功 {ok_count} / {len(results)} 张，已自动归档入错题本。")
+    entries = _collect_entries(results)
+    ok_count = sum(1 for e in entries if e["error"] is None)
+    st.success(f"完成：成功 {ok_count} / {len(entries)} 张，已自动归档入错题本。")
 
     if ok_count:
         nav_col, _ = st.columns([1, 2])
@@ -121,23 +145,25 @@ def _process_uploads(service, user, uploads, tags: list[str], hint: str) -> None
             if st.button("📒 去错题本查看", type="primary"):
                 go_to("notebook")
 
-    for i, (name, result, error) in enumerate(results):
+    for i, entry in enumerate(entries):
         with st.expander(
-            f"{'✅ ' if result else '❌ '}{name}", expanded=(i == 0)
+            f"{'✅ ' if entry['error'] is None else '❌ '}{entry['name']}", expanded=(i == 0)
         ):
-            if error:
-                st.error(f"解析失败：{error}")
+            if entry["error"]:
+                st.error(f"解析失败：{entry['error']}")
                 continue
-            saved, analysis = result
-            if result.duplicated:
+            if entry["duplicated"]:
                 st.warning("检测到重复上传：已为你复用既有错题记录。")
-            _render_analysis(saved, analysis, service, user)
+            _render_analysis(entry["question"], entry["analysis"], service, user)
 
 
 def _render_analysis(saved, analysis, service, user) -> None:
     img_col, content_col = st.columns([2, 3])
     with img_col:
-        st.image(saved.image_path, width="stretch")
+        if getattr(saved, "image_path", None):
+            st.image(saved.image_path, width="stretch")
+        else:
+            st.info("原图已不可用（可能经过数据目录迁移），解析结果不受影响。")
         badges = " ".join(f'<span class="mm-badge">{t}</span>' for t in saved.tags)
         st.markdown(
             f"""<div style="margin-top:0.5rem">
