@@ -4,6 +4,8 @@ Streamlit 运行：streamlit run app.py
 """
 from __future__ import annotations
 
+import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，必须在其他 import 之前
+
 import streamlit as st
 import streamlit_antd_components as sac
 

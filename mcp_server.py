@@ -19,12 +19,14 @@ import os
 import sys
 from pathlib import Path
 
+# 保证项目根目录可导入（bootstrap 与 backend 都在项目根下）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import bootstrap  # noqa: F401,E402  注入 HOME/HF_HOME 等本地化环境变量，必须在其他第三方 import 之前
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
-
-# 保证项目根目录可导入
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backend.services.agent_tools import build_tools  # noqa: E402
 from backend.services.question_service import QuestionService  # noqa: E402
