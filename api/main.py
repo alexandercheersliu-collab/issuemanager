@@ -10,7 +10,7 @@ import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，�
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import agent, auth, comments, jobs, questions, review, stats, tags
+from api.routers import agent, auth, comments, documents, jobs, questions, review, stats, tags
 from backend.config import Settings, get_settings
 from backend.utils.logging import get_logger
 
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(comments.router, prefix=settings.api_prefix)
     app.include_router(agent.router, prefix=settings.api_prefix)
     app.include_router(jobs.router, prefix=settings.api_prefix)
+    app.include_router(documents.router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["meta"])
     def health() -> dict:
