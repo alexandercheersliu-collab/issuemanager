@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""  # 留空则使用 ChromaDB 内置本地嵌入模型
     embedding_api_key: str = ""
     rag_top_k: int = Field(default=3, ge=1, le=20)
+    # 同类题检索（P3）：防泄题相似度阈值——cosine 相似度 ≥ 阈值的候选视为泄题过滤
+    rag_leak_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
+    # 约束过滤超采系数：K12 约束按「元数据键缺失放行」语义在召回后过滤
+    # （ChromaDB where 不支持 $exists，无法在 where 层表达键缺失放行），
+    # 因此召回池按 top_k × 系数放大后再过滤
+    rag_filter_oversample: int = Field(default=10, ge=1, le=50)
+    # 公共种子题库 collection 名（跨用户共享，不按 user_id 隔离）
+    rag_bank_collection: str = "question_bank"
 
     # ---------- 重排（可选，混合检索精排）----------
     # SiliconFlow: https://api.siliconflow.cn/v1 + BAAI/bge-reranker-v2-m3
