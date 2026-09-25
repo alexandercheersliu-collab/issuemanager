@@ -127,6 +127,32 @@ def _as_date(value) -> dt.date:
     return value
 
 
+def detection_stats(logs: list, today: dt.date | None = None) -> dict:
+    """同类题检测统计（P3.3）：通过率 + 本周降级错题数。
+
+    口径：通过率 = correct / (correct + wrong)，pending（发题未作答）不计；
+    本周降级数 = demoted=True 且创建于本周（周一起，与 weekly_report 同口径）。
+    logs 为含 result / demoted / created_at 属性的鸭子类型。
+    """
+    today = today or dt.date.today()
+    monday = today - dt.timedelta(days=today.weekday())
+    answered = [log for log in logs if log.result in ("correct", "wrong")]
+    correct = sum(1 for log in answered if log.result == "correct")
+    week_demotions = sum(
+        1
+        for log in logs
+        if log.demoted
+        and log.created_at
+        and monday <= _as_date(log.created_at) <= today
+    )
+    return {
+        "detection_total": len(answered),
+        "detection_correct": correct,
+        "detection_pass_rate": round(correct / len(answered) * 100) if answered else None,
+        "week_demotions": week_demotions,
+    }
+
+
 def build_calendar(events: list, days: int = 90, today: dt.date | None = None) -> dict:
     """GitHub 风格学习日历的矩阵数据。
 

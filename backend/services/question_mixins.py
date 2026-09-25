@@ -30,6 +30,7 @@ from backend.services.stats import (
     build_calendar,
     build_difficulty_distribution,
     build_tag_stats,
+    detection_stats,
     mastery_trend,
     study_streak,
     weak_tags,
@@ -925,6 +926,15 @@ class BackupMixin:
 
 class StatsMixin:
     """学情统计：个人看板 + 教师报表。"""
+
+    def detection_overview(self, user_id: int) -> dict:
+        """同类题检测统计（P3.3 看板）：通过率 + 本周降级错题数。"""
+        from backend.services.demotion import DemotionService
+
+        logs = DemotionService(
+            self.settings, session_factory=self._session_factory
+        ).logs_for_user(user_id)
+        return detection_stats(logs)
 
     def subjects_for_user(self, user_id: int, *, include_others: bool = False) -> list[str]:
         """用户错题涉及的全部学科代码（升序），供看板/报表筛选器使用。"""

@@ -354,6 +354,8 @@ def _render_question_detail(service, q, user) -> None:
         st.markdown("<br>", unsafe_allow_html=True)
         regrade_buttons(service, q, user)
         _share_card_button(q)
+        st.divider()
+        _render_detection(service, q, user)
 
     with tab_chat:
         _render_followup_chat(service, q, user)
@@ -363,6 +365,83 @@ def _render_question_detail(service, q, user) -> None:
 
     with tab_edit:
         edit_question_form(service, q, user)
+
+
+def describe_detection_outcome(outcome: dict) -> str:
+    """判分结果的一句话描述（纯函数，可单测）。"""
+    if outcome.get("result") == "correct":
+        if outcome.get("demoted"):
+            return "✅ 回答正确！已连续通过检测，本题自动降级（复习间隔拉长）"
+        streak = outcome.get("streak", 0)
+        return f"✅ 回答正确！连续通过 {streak} 次"
+    if outcome.get("promoted"):
+        return "❌ 回答错误。本题已回升为高优先级，回到每日复习队列"
+    return "❌ 回答错误，连续通过计数已清零，继续加油"
+
+
+def _render_detection(service, q, user) -> None:
+    """同类题检测（P3.2）：发起 → 作答判分 → 降级/回升联动展示。"""
+    st.markdown("**🎯 同类题检测**")
+    challenge_key = f"det_challenge_{q.id}"
+    result_key = f"det_result_{q.id}"
+
+    result = st.session_state.get(result_key)
+    challenge = st.session_state.get(challenge_key)
+
+    if result is not None:
+        st.info(describe_detection_outcome(result))
+        if result.get("result") == "wrong" and result.get("expected_answer"):
+            st.caption(f"参考答案：{result['expected_answer']}")
+        if st.button("🔄 再测一题", key=f"det_again_{q.id}", width="stretch"):
+            st.session_state.pop(result_key, None)
+            st.rerun()
+        return
+
+    if challenge is not None:
+        tested = challenge["tested"]
+        source_label = {"bank": "公共题库", "generated": "AI 变式"}.get(
+            tested["source"], "我的错题库"
+        )
+        points = tested.get("knowledge_points") or []
+        st.caption(
+            f"来源：{source_label} · 难度 {tested['difficulty']}"
+            + (f" · 知识点：{'、'.join(points[:3])}" if points else "")
+        )
+        st.markdown(tested["content"])
+        with st.form(f"det_form_{q.id}"):
+            answer = st.text_input("你的答案", key=f"det_answer_input_{q.id}")
+            if st.form_submit_button("提交判分", type="primary"):
+                if not answer.strip():
+                    st.error("请填写答案再提交")
+                else:
+                    outcome = service.submit_detection_answer(
+                        challenge["log_id"], user["id"], answer.strip()
+                    )
+                    st.session_state.pop(challenge_key, None)
+                    st.session_state[result_key] = outcome
+                    st.rerun()
+        if st.button("放弃本次检测", key=f"det_cancel_{q.id}", width="stretch"):
+            st.session_state.pop(challenge_key, None)
+            st.rerun()
+        return
+
+    try:
+        history = service.detection_history(q.id, user["id"])
+    except LookupError:
+        history = []
+    if history:
+        latest = history[0]
+        st.caption(
+            f"连续通过 {latest['streak']}/{latest['threshold']} 次"
+            + (" · 当前已降级 🏅" if latest["state"] == "demoted" else "")
+        )
+    if st.button("发起检测（推送一道同类题）", key=f"det_start_{q.id}", width="stretch"):
+        try:
+            st.session_state[challenge_key] = service.start_detection(q.id, user["id"])
+        except (LookupError, ValueError) as exc:
+            st.error(str(exc))
+            return
+        st.rerun()
 
 
 def _render_comments(q, user) -> None:

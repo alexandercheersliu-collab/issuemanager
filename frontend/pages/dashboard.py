@@ -175,6 +175,15 @@ def render_dashboard(user: dict) -> None:
     with col4:
         stat_card(stats["due"], "待复习", accent=True)
 
+    # P3.3 检测报表：同类题通过率 + 本周降级错题数
+    detection = service.detection_overview(user["id"])
+    det_col1, det_col2, _, _ = st.columns(4)
+    with det_col1:
+        pass_rate = detection["detection_pass_rate"]
+        stat_card(f"{pass_rate}%" if pass_rate is not None else "—", "同类题通过率")
+    with det_col2:
+        stat_card(detection["week_demotions"], "本周降级错题数")
+
     action_col1, action_col2, action_col3, _ = st.columns([1, 1, 1, 1])
     with action_col1:
         if st.button("🎬 开始复习", type="primary", width="stretch", disabled=stats["due"] == 0):
