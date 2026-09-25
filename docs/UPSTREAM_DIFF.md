@@ -202,6 +202,49 @@
 4. **种子题库 region 键不落库**：公共题不带地区元数据，按「键缺失放行」
    语义在地区维度恒通过；若后续引入地方卷种子题需补 region 键。
 
+## P3.2 检测与降级联动 + P3.3 报表（2026-09-26）
+
+### 修改的基座已有文件（P3.2/P3.3）
+
+| 文件 | 改动 | 目的 | 引入提交 |
+|------|------|------|----------|
+| `backend/config.py` | 新增 `detection_pass_threshold`（默认 2）/`demotion_interval_factor`（默认 1.5） | 降级阈值与间隔系数可配 | `229084c` |
+| `backend/models/orm.py` | 新建 `DetectionLog` 模型（tested_ref/tested_source/快照/result/demoted）；`Question` 加 `demotion_state` 列与 `detection_logs` relationship | 检测留痕与降级状态 | `229084c` |
+| `backend/services/question_mixins.py` | `grade_review` 加回升钩子（demoted 题评 again → 回 normal）；StatsMixin 加 `detection_overview` | 回升入口①与看板数据通路 | `229084c` `d3952ed` |
+| `backend/services/question_service.py` | 组合 `DetectionMixin` | 检测编排并入领域门面 | `bdaa987` |
+| `backend/services/stats.py` | 新增 `detection_stats`（通过率 pending 不计；本周降级数周一起算） | P3.3 报表口径 | `d3952ed` |
+| `api/main.py` | 注册 `detection` 路由 | 检测 API | `bdaa987` |
+| `frontend/pages/notebook.py` | 错题详情加「同类题检测」区块（发起/作答/判分结果/降级状态）；`describe_detection_outcome` 纯函数 | 检测界面入口 | `d3952ed` |
+| `frontend/pages/dashboard.py` | 看板新增「同类题通过率」「本周降级错题数」两张统计卡 | P3.3 报表展示 | `d3952ed` |
+
+### 新增文件（P3.2/P3.3）
+
+| 文件 | 目的 | 引入提交 |
+|------|------|----------|
+| `migrations/versions/e7f2c91a3b55_add_detection_logs.py` | detection_logs 建表 + questions.demotion_state 列（down_revision=c3f1a2b48d01） | `229084c` |
+| `backend/services/demotion.py` | 降级规则引擎：begin/record_result（pending→correct/wrong，幂等）+ 状态机（normal→demoted→回升）+ history/logs_for_user；回升=视同 again 复习（SM-2 重置） | `229084c` `bdaa987` |
+| `backend/services/detection.py` | 检测编排 Mixin：`start_detection`（按题目自身 K12 元数据约束召回，三级回落）、`submit_detection_answer`（比对快照判分 + 联动）、`answers_match`/`tested_ref_for` 纯函数 | `bdaa987` |
+| `api/routers/detection.py` | `POST /questions/{id}/detection/start`（201）、`POST /detection/{log_id}/answer`、`GET /questions/{id}/detection/history`；404/409/422 映射 | `bdaa987` |
+| `tests/test_demotion.py` | 状态机全分支 9 例（全流转/streak 中断/阈值与系数可配/归档一致/复习 again 回升/幂等与隔离/历史） | `229084c` |
+| `tests/test_detection.py` | 判分纯函数、三来源发题、端到端降级回升、API 协议（8 例） | `bdaa987` |
+| `tests/test_detection_stats.py` | 统计口径（pending 不计/周边界）+ 看板通路 delta 断言 + 文案纯函数（5 例） | `d3952ed` |
+
+### P3.2/P3.3 合入上游注意事项
+
+1. **回升语义=一次 again 复习**：检测失败或复习 again 触及已降级题时，
+   SM-2 进度重置（reps=0、10 分钟短间隔），掌握归档（reps≥3 且间隔≥21 天）
+   自然失效——回升不需要单独的「退出归档」逻辑，双标准不存在。
+2. **降级/回升留痕复用 review_logs**：降级写 grade="easy"、回升写
+   grade="again" 的复习记录；正确率报表会把降级视为一次「记住」
+   （语义上检测通过=掌握证据），上游若细分口径需知悉这一点。
+3. **降级事件统计口径在 detection_logs.demoted**：「本周降级错题数」数的是
+   触发降级的检测记录（同一题重复降级会各计一次——回升后再降级属于新周期）。
+4. **generated 题的参考答案为即时快照**：发题时由 AI 解析生成并落
+   detection_logs.tested_answer，判分只认快照；Mock 模式下为固定演示答案。
+5. **判分是规范化字符串比对**（`_normalize_answer` + 全等/包含），
+   非语义判分；对「解题过程不同但结果等价」的复杂情形会误判为错，
+   真实场景可换 AI 判分（answers_match 是纯函数，替换点单一）。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
