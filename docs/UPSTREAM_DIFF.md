@@ -87,7 +87,7 @@
 
 ---
 
-## P2 阶段（文档输入 —— 整卷导入，2026-09-26，前半：解析层 + 切题管线）
+## P2 阶段（文档输入 —— 整卷导入，2026-09-26；前半：解析层 + 切题管线，后半：P2.3 校对界面）
 
 ### 修改的基座已有文件（P2）
 
@@ -124,8 +124,45 @@
 3. **视觉切题成本**：当前每个有页图像的页都调一次视觉模型做校验；
    成本敏感场景可改为仅规则路产出异常时才调（留待 POC 后决定）。
 4. **confirm 跳过解构失败题**：`analysis` 为 None 的 segment 不入库，
-   留待 P2.3 校对界面人工处理。
+   由 P2.3 校对界面人工补齐或重解析后再确认（见下节）。
 5. **DOCX 无分页**：整篇视为一页，source_doc 恒为 `文档名#1`。
+
+### P2.3 人工校对与批量入库（2026-09-26）
+
+#### 修改的基座已有文件（P2.3）
+
+| 文件 | 改动 | 目的 | 引入提交 |
+|------|------|------|----------|
+| `backend/repositories/questions.py` | `_filtered_stmt`/`list_for_user`/`count_for_user` 新增 `source`/`source_doc` 过滤（文档名 LIKE 前缀匹配，`%`/`_`/`\` 先转义） | 错题本按来源文档筛选（SQL 下推） | `28f7738` |
+| `backend/services/question_mixins.py` | `list_questions`/`count_for_user` 透传 `source`/`source_doc` | 同上 | `28f7738` |
+| `frontend/pages/notebook.py` | 新增「按来源文档筛选」下拉（选项取自当前可见题的 source_doc 文档名） | 入库后按文档回看整卷题 | `28f7738` |
+| `frontend/i18n.py` | 新增 `nav.import_doc`/`page.import_doc.title` | 导航文案 | `fb386ed` |
+| `frontend/common.py` | `_LABEL_TO_KEY` 新增「整卷导入」 | `go_to("import_doc")` 跳转 | `fb386ed` |
+| `app.py` | `_PAGES` 与 `main()` 注册整卷导入页（位于 AI 录题之后） | 页面路由 | `fb386ed` |
+
+#### P2 新增文件的本轮扩展
+
+| 文件 | 改动 | 引入提交 |
+|------|------|----------|
+| `backend/services/document_service.py` | 校对编辑：`update_segment`（白名单字段覆盖，编辑即清除 needs_review）、`merge_segments`/`split_segment`（结构变动标 needs_review）、`delete_segment`、`reanalyze_segment`（单题重走 AI 管线）；全部操作留痕 `result.edit_log`；仅 success 且未 confirm 可编辑；`confirm_import` 返回新增 `skipped`（跳过题号及原因） | `514a486` |
+| `api/routers/documents.py` | 校对端点：`PATCH /{job_id}/segments/{index}`、`POST .../merge`、`POST .../split`、`DELETE .../segments/{index}`、`POST .../reanalyze`；错误映射 404/409/502 | `3257960` |
+
+#### 新增文件（P2.3）
+
+| 文件 | 目的 | 引入提交 |
+|------|------|----------|
+| `frontend/pages/import_doc.py` | 校对界面：上传（SHA-256 去重提示）→ 进度轮询 → 逐题校对（高亮 needs_review、编辑表单、合并/拆分/删除/重解析）→ 确认入库（展示 imported/skipped）；统计与标题逻辑抽为纯函数 `summarize_segments`/`segment_headline` | `fb386ed` |
+| `tests/test_document_edit.py` | 服务层 8 例（编辑/合并/拆分/删除/重解析/confirm 后锁定/skipped 明细）+ API 级 4 例 | `514a486` `3257960` |
+| `tests/test_source_filter.py` | source/source_doc 筛选与计数（3 例，成员断言防共享库污染） | `28f7738` |
+| `tests/test_import_doc_page.py` | 界面纯函数（4 例） | `fb386ed` |
+
+#### P2.3 合入上游注意事项
+
+6. **confirm 返回结构变化**：P2.3 起 `confirm_import` 及 confirm 端点返回
+   `{imported, skipped, already_confirmed}`（多了 skipped 明细）；上游若有调用方
+   按双字段全等消费需同步调整。
+7. **编辑操作的状态锁**：校对编辑仅允许 `status=success` 且未 confirm 的任务
+   （409），既防止与后台解析线程的 result 写竞争，也保证已入库结果不被改。
 
 ## 合入上游注意事项
 
