@@ -106,6 +106,27 @@ class AIMessageError(RuntimeError):
     """模型未返回可解析的结构化结果。"""
 
 
+SEGMENT_SYSTEM_PROMPT = (
+    "你是一位严谨的试卷切题助手。学生会上传一页试卷的图片，"
+    "请识别本页所有完整或部分的题目，按题号顺序输出。"
+    "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
+)
+
+SEGMENT_INSTRUCTION = """请只输出一个 JSON 数组，每个元素结构如下：
+[
+  {
+    "number": "题号（阿拉伯数字字符串，如 \\"1\\"）",
+    "text": "该题在本页的题干文本（含选项；公式用 LaTeX）",
+    "continued_from_prev": false,
+    "continues_to_next": false
+  }
+]
+规则：
+- continued_from_prev=true 表示本题是上一页末尾题目的延续（此时 number 沿用上一页题号）；
+- continues_to_next=true 表示本题题干在本页未结束、延续到下一页；
+- 页眉页脚、注意事项、答题区提示等非题目内容不要输出。"""
+
+
 class BaseAIProvider(abc.ABC):
     """所有提供商实现同一接口，界面层与提供商解耦。"""
 
@@ -150,6 +171,31 @@ class BaseAIProvider(abc.ABC):
         if not reply or not reply.strip():
             raise AIMessageError("模型返回了空响应")
         return reply.strip()
+
+    def segment_page(self, image_bytes: bytes, mime_type: str = "image/png") -> list[dict]:
+        """视觉切题（策略 A）：识别一页试卷图像中的题目列表。
+
+        返回 [{"number": str, "text": str, "continued_from_prev": bool,
+        "continues_to_next": bool}, ...]；输出非法时抛 AIMessageError（调用方重试/降级）。
+        """
+        with track_ai_call("segment_page"):
+            raw = self._complete(image_bytes, mime_type, SEGMENT_INSTRUCTION, SEGMENT_SYSTEM_PROMPT)
+        items = extract_json_list(raw)
+        if items is None:
+            raise AIMessageError("切题响应中未找到 JSON 数组")
+        segments: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict) or not str(item.get("number", "")).strip():
+                raise AIMessageError(f"切题结果缺少题号: {item!r}")
+            segments.append(
+                {
+                    "number": str(item["number"]).strip(),
+                    "text": str(item.get("text", "") or "").strip(),
+                    "continued_from_prev": bool(item.get("continued_from_prev", False)),
+                    "continues_to_next": bool(item.get("continues_to_next", False)),
+                }
+            )
+        return segments
 
     def analyze_text(
         self, text: str, hint: str = "", context: AnalysisContext | None = None
@@ -230,6 +276,36 @@ def extract_json_block(raw: str) -> dict | None:
     if match:
         try:
             return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def extract_json_list(raw: str) -> list | None:
+    """从模型响应中提取 JSON 数组（兼容纯 JSON / ```json 围栏 / 夹杂说明文字）。"""
+    if not raw:
+        return None
+    text = raw.strip()
+    # 1) 直接解析
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else None
+    except json.JSONDecodeError:
+        pass
+    # 2) 提取 ```json 围栏
+    fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            return parsed if isinstance(parsed, list) else None
+        except json.JSONDecodeError:
+            pass
+    # 3) 贪婪匹配第一个方括号块
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, list) else None
         except json.JSONDecodeError:
             pass
     return None

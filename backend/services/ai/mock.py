@@ -60,6 +60,23 @@ class MockProvider(BaseAIProvider):
     ) -> QuestionAnalysis:
         return _DEMO_ANALYSIS.model_copy(deep=True)
 
+    def segment_page(self, image_bytes: bytes, mime_type: str = "image/png") -> list[dict]:
+        """演示切题：固定返回两题（无 Key 时跑通整卷导入链路）。"""
+        return [
+            {
+                "number": "1",
+                "text": "【演示切题】已知关于 x 的一元二次方程有两个实数根，求参数范围。",
+                "continued_from_prev": False,
+                "continues_to_next": False,
+            },
+            {
+                "number": "2",
+                "text": "【演示切题】计算判别式并判断根的情况。",
+                "continued_from_prev": False,
+                "continues_to_next": False,
+            },
+        ]
+
     def provider_info(self) -> AIProviderInfo:
         return AIProviderInfo(
             provider="mock",
