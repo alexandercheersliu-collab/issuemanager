@@ -166,3 +166,134 @@ def test_confirm_reports_skipped(question_service, student_user, tmp_path):
     again = service.confirm_import(job_id, student_user.id)
     assert again["already_confirmed"] is True
     assert again["skipped"] == outcome["skipped"]  # 幂等返回既有跳过明细
+
+
+# ---------- API 级：校对编辑端点 ----------
+
+
+@pytest.fixture(scope="module")
+def client():
+    from fastapi.testclient import TestClient
+
+    from api.main import create_app
+
+    return TestClient(create_app())
+
+
+@pytest.fixture(scope="module")
+def headers(client):
+    resp = client.post(
+        "/api/auth/login", json={"username": "demo", "password": "demo123"}
+    )
+    assert resp.status_code == 200, resp.text
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _api_import_and_wait(client, headers, tmp_path, name="api_edit.pdf") -> str:
+    pdf = make_text_pdf(
+        tmp_path / name,
+        ["1. 接口校对题一：求 x 的值。\n2. 接口校对题二：求 y 的值。"],
+    )
+    resp = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": (name, pdf.read_bytes(), "application/pdf")},
+        data={"subject": "math"},
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        body = client.get(f"/api/documents/{job_id}/segments", headers=headers).json()
+        if body["status"] in ("success", "failed"):
+            break
+        time.sleep(0.1)
+    assert body["status"] == "success", body["error"]
+    assert body["total"] == 2
+    return job_id
+
+
+def test_update_segment_endpoint(client, headers, tmp_path):
+    job_id = _api_import_and_wait(client, headers, tmp_path)
+
+    resp = client.patch(
+        f"/api/documents/{job_id}/segments/0",
+        headers=headers,
+        json={"text": "1. 接口校对题一（已修订）", "analysis": {"answer": "x=3"}},
+    )
+    assert resp.status_code == 200, resp.text
+    segment = resp.json()["segment"]
+    assert segment["text"] == "1. 接口校对题一（已修订）"
+    assert segment["analysis"]["answer"] == "x=3"
+    assert segment["needs_review"] is False
+
+    missing = client.patch(
+        f"/api/documents/{job_id}/segments/99",
+        headers=headers,
+        json={"text": "x"},
+    )
+    assert missing.status_code == 404
+    unknown_job = client.patch(
+        "/api/documents/no-such-job/segments/0",
+        headers=headers,
+        json={"text": "x"},
+    )
+    assert unknown_job.status_code == 404
+
+
+def test_merge_split_delete_endpoints(client, headers, tmp_path):
+    job_id = _api_import_and_wait(client, headers, tmp_path, "api_ops.pdf")
+
+    # 拆分第 1 题 → 3 题
+    body = client.get(f"/api/documents/{job_id}/segments", headers=headers).json()
+    split_at = len(body["segments"][0]["text"]) // 2
+    split = client.post(
+        f"/api/documents/{job_id}/segments/0/split",
+        headers=headers,
+        json={"split_at": split_at},
+    )
+    assert split.status_code == 200, split.text
+    assert len(split.json()["segments"]) == 2
+
+    # 合并刚拆出的两题 → 回到 2 题（拆分点可能落在词中间，按两段分别断言）
+    merge = client.post(f"/api/documents/{job_id}/segments/0/merge", headers=headers)
+    assert merge.status_code == 200, merge.text
+    merged_text = merge.json()["segment"]["text"]
+    assert body["segments"][0]["text"][:split_at].rstrip() in merged_text
+    assert body["segments"][0]["text"][split_at:].lstrip() in merged_text
+
+    # 删除第 2 题 → 剩 1 题
+    delete = client.delete(f"/api/documents/{job_id}/segments/1", headers=headers)
+    assert delete.status_code == 200
+    body = client.get(f"/api/documents/{job_id}/segments", headers=headers).json()
+    assert body["total"] == 1
+
+    # 拆分位置非法 → 409
+    bad_split = client.post(
+        f"/api/documents/{job_id}/segments/0/split",
+        headers=headers,
+        json={"split_at": 0},
+    )
+    assert bad_split.status_code == 409
+
+
+def test_reanalyze_endpoint(client, headers, tmp_path):
+    job_id = _api_import_and_wait(client, headers, tmp_path, "api_reanalyze.pdf")
+
+    resp = client.post(f"/api/documents/{job_id}/segments/1/reanalyze", headers=headers)
+    assert resp.status_code == 200, resp.text
+    segment = resp.json()["segment"]
+    assert segment["analysis"] is not None
+    assert segment["needs_review"] is False
+
+
+def test_edit_endpoints_reject_after_confirm(client, headers, tmp_path):
+    job_id = _api_import_and_wait(client, headers, tmp_path, "api_locked.pdf")
+    confirm = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
+    assert confirm.status_code == 200
+
+    resp = client.delete(f"/api/documents/{job_id}/segments/0", headers=headers)
+    assert resp.status_code == 409
+    resp = client.post(f"/api/documents/{job_id}/segments/0/merge", headers=headers)
+    assert resp.status_code == 409

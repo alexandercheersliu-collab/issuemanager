@@ -1,7 +1,10 @@
 """整卷导入路由：文档上传（去重）→ 异步切题/解构 → 校对确认入库。"""
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel
 
 from api.deps import get_current_user
 from backend.models.orm import User
@@ -80,3 +83,77 @@ def confirm_import(job_id: str, user: User = Depends(get_current_user)) -> dict:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+# ---------- 校对编辑（P2.3） ----------
+
+
+class SegmentUpdate(BaseModel):
+    """校对编辑请求体：题干与解构字段（白名单内逐字段覆盖）。"""
+
+    text: str | None = None
+    analysis: dict[str, Any] | None = None
+
+
+class SplitRequest(BaseModel):
+    """拆分请求体：在题干第 split_at 个字符后拆成两题。"""
+
+    split_at: int
+
+
+def _run_edit(action, *args, **kwargs) -> Any:
+    """统一校对编辑的错误映射：越界/不存在 404，状态冲突 409，重解析失败 502。"""
+    try:
+        return action(*args, **kwargs)
+    except (LookupError, IndexError) as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+@router.patch("/{job_id}/segments/{index}")
+def update_segment(
+    job_id: str, index: int, body: SegmentUpdate, user: User = Depends(get_current_user)
+) -> dict:
+    """编辑题干 / 解构字段；人工编辑即视为已校对（清除 needs_review）。"""
+    entry = _run_edit(
+        _service().update_segment,
+        job_id,
+        user.id,
+        index,
+        text=body.text,
+        analysis_updates=body.analysis,
+    )
+    return {"segment": entry}
+
+
+@router.post("/{job_id}/segments/{index}/merge")
+def merge_segment(job_id: str, index: int, user: User = Depends(get_current_user)) -> dict:
+    """合并第 index 题与下一题（解构结果优先保留前者，标 needs_review）。"""
+    entry = _run_edit(_service().merge_segments, job_id, user.id, index)
+    return {"segment": entry}
+
+
+@router.post("/{job_id}/segments/{index}/split")
+def split_segment(
+    job_id: str, index: int, body: SplitRequest, user: User = Depends(get_current_user)
+) -> dict:
+    """按字符偏移把一题拆成两题（后半题需重新解构）。"""
+    first, second = _run_edit(_service().split_segment, job_id, user.id, index, body.split_at)
+    return {"segments": [first, second]}
+
+
+@router.delete("/{job_id}/segments/{index}")
+def delete_segment(job_id: str, index: int, user: User = Depends(get_current_user)) -> dict:
+    """删除一题（误切的非题目内容、重复题等）。"""
+    _run_edit(_service().delete_segment, job_id, user.id, index)
+    return {"deleted": index}
+
+
+@router.post("/{job_id}/segments/{index}/reanalyze")
+def reanalyze_segment(job_id: str, index: int, user: User = Depends(get_current_user)) -> dict:
+    """单题重新解构（调既有 AI 文本解析管线），失败返回 502。"""
+    entry = _run_edit(_service().reanalyze_segment, job_id, user.id, index)
+    return {"segment": entry}
