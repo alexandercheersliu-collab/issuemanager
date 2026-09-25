@@ -31,6 +31,14 @@ class QuestionUpdate(BaseModel):
     answer: str | None = None
     tags: list[str] | None = None
     user_note: str | None = None
+    # K12 元数据（None = 不修改）
+    subject: str | None = None
+    grade: int | None = Field(default=None, ge=1, le=12)
+    region: str | None = None
+    textbook_version: str | None = None
+    question_type: str | None = None
+    chapter: str | None = None
+    error_category: str | None = None
 
 
 class TextQuestionInput(BaseModel):
@@ -38,6 +46,14 @@ class TextQuestionInput(BaseModel):
     answer: str = ""
     tags: list[str] = Field(default_factory=list, max_length=8)
     knowledge_points: list[str] = Field(default_factory=list, max_length=8)
+    # K12 元数据（可选）
+    subject: str = "math"
+    grade: int | None = Field(default=None, ge=1, le=12)
+    region: str | None = None
+    textbook_version: str | None = None
+    question_type: str | None = None
+    chapter: str | None = None
+    error_category: str | None = None
 
 
 class AnalyzeResult(BaseModel):
@@ -58,18 +74,27 @@ def list_questions(
     response: Response,
     tag: str | None = None,
     keyword: str | None = None,
+    subject: str | None = None,
+    grade: int | None = Query(default=None, ge=1, le=12),
+    error_category: str | None = None,
     semantic: bool = True,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
     user: User = Depends(get_current_user),
 ) -> list[QuestionOut]:
-    """分页列出错题（按创建时间倒序）；X-Total-Count 为过滤后的总数。"""
+    """分页列出错题（按创建时间倒序）；X-Total-Count 为过滤后的总数。
+
+    支持 K12 元数据过滤：subject（学科代码）/ grade（1-12）/ error_category（错因枚举）。
+    """
     service = _service()
     items = service.list_questions(
         user.id,
         include_others=user.role == "teacher",
         tag=tag,
         keyword=keyword,
+        subject=subject,
+        grade=grade,
+        error_category=error_category,
         semantic=semantic,
         offset=offset,
         limit=limit,
@@ -81,6 +106,9 @@ def list_questions(
             include_others=user.role == "teacher",
             tag=tag,
             keyword=keyword,
+            subject=subject,
+            grade=grade,
+            error_category=error_category,
         )
     response.headers["X-Total-Count"] = str(total)
     return items
@@ -91,9 +119,16 @@ async def analyze_question(
     image: UploadFile = File(...),
     tags: str = Form(default=""),
     hint: str = Form(default=""),
+    subject: str = Form(default="math"),
+    grade: int | None = Form(default=None),
+    region: str = Form(default=""),
+    textbook_version: str = Form(default=""),
     user: User = Depends(get_current_user),
 ) -> AnalyzeResult:
-    """上传错题图片，返回结构化解析并自动归档（含向量索引）。"""
+    """上传错题图片，返回结构化解析并自动归档（含向量索引）。
+
+    subject/grade/region/textbook_version：K12 录入上下文，参与提示词组装并落库。
+    """
     if image.content_type not in _ALLOWED_MIME:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -104,6 +139,8 @@ async def analyze_question(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "图片内容为空")
     if len(data) > _MAX_IMAGE_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片不能超过 10MB")
+    if grade is not None and not 1 <= grade <= 12:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "年级必须在 1-12 之间")
 
     try:
         saved, analysis = _service().analyze_and_save(
@@ -112,6 +149,10 @@ async def analyze_question(
             mime_type=image.content_type,
             user_tags=sanitize_tags(tags),
             hint=hint,
+            subject=subject or "math",
+            grade=grade,
+            region=region or None,
+            textbook_version=textbook_version or None,
         )
     except Exception as exc:  # noqa: BLE001 - 统一转为 502
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI 解析失败: {exc}") from exc
@@ -131,6 +172,13 @@ def create_text_question(
         answer=payload.answer,
         tags=payload.tags,
         knowledge_points=payload.knowledge_points,
+        subject=payload.subject,
+        grade=payload.grade,
+        region=payload.region,
+        textbook_version=payload.textbook_version,
+        question_type=payload.question_type,
+        chapter=payload.chapter,
+        error_category=payload.error_category,
     )
 
 
@@ -151,6 +199,10 @@ async def analyze_question_async(
     image: UploadFile = File(...),
     tags: str = Form(default=""),
     hint: str = Form(default=""),
+    subject: str = Form(default="math"),
+    grade: int | None = Form(default=None),
+    region: str = Form(default=""),
+    textbook_version: str = Form(default=""),
     user: User = Depends(get_current_user),
 ) -> dict:
     """提交异步解析任务，返回 job_id；用 GET /api/jobs/{job_id} 轮询结果。"""
@@ -164,6 +216,8 @@ async def analyze_question_async(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "图片内容为空")
     if len(data) > _MAX_IMAGE_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "图片不能超过 10MB")
+    if grade is not None and not 1 <= grade <= 12:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "年级必须在 1-12 之间")
 
     from backend.services.job_service import JobService
 
@@ -174,6 +228,10 @@ async def analyze_question_async(
         mime_type=image.content_type,
         tags=sanitize_tags(tags),
         hint=hint,
+        subject=subject or "math",
+        grade=grade,
+        region=region or None,
+        textbook_version=textbook_version or None,
     )
     return {"job_id": job_id, "status": "pending"}
 
@@ -246,6 +304,13 @@ def update_question(
         answer=payload.answer,
         tags=payload.tags,
         user_note=payload.user_note,
+        subject=payload.subject,
+        grade=payload.grade,
+        region=payload.region,
+        textbook_version=payload.textbook_version,
+        question_type=payload.question_type,
+        chapter=payload.chapter,
+        error_category=payload.error_category,
     )
     if updated is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "错题不存在")

@@ -20,7 +20,7 @@ def test_alembic_ini_is_ascii_readable():
     ALEMBIC_INI.read_bytes().decode(locale.getpreferredencoding(False))
 
 
-def _alembic_config(db: Path, monkeypatch) -> "object":  # noqa: ANN001,F821
+def _alembic_config(db: Path, monkeypatch):  # noqa: ANN001,ANN202
     """构造 Alembic Config（以 UTF-8 解析 alembic.ini，绕开 locale 读取）。
 
     alembic.ini 以 UTF-8 保存（含中文注释）；Alembic 默认按系统 locale 读取

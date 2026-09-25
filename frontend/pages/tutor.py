@@ -3,9 +3,44 @@ from __future__ import annotations
 
 import streamlit as st
 
+from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
 from backend.services.question_service import sanitize_tags
 from frontend.common import followup_chat, get_question_service, go_to, page_header
 from frontend.components import save_followup_button
+
+_GRADE_OPTIONS = ["不限"] + [f"{g} 年级" for g in range(1, 13)]
+
+
+def _k12_context_inputs(key_prefix: str) -> dict:
+    """学科/年级/地区/教材版本录入控件（拍照与手动两个 Tab 共用）。
+
+    返回可直接传给服务层的上下文字典；界面层纯控件，服务调用方负责传参。
+    """
+    subject_labels = list(SUBJECT_NAMES.values())
+    col_s, col_g = st.columns(2)
+    with col_s:
+        subject_label = st.selectbox(
+            "学科", subject_labels, index=0, key=f"{key_prefix}_subject"
+        )
+    with col_g:
+        grade_label = st.selectbox("年级", _GRADE_OPTIONS, index=0, key=f"{key_prefix}_grade")
+    col_r, col_t = st.columns(2)
+    with col_r:
+        region = st.text_input(
+            "地区（可选）", placeholder="例如：北京", key=f"{key_prefix}_region"
+        )
+    with col_t:
+        textbook = st.text_input(
+            "教材版本（可选）", placeholder="例如：人教版", key=f"{key_prefix}_textbook"
+        )
+    subject = next(k for k, v in SUBJECT_NAMES.items() if v == subject_label)
+    grade = int(grade_label.split()[0]) if grade_label != "不限" else None
+    return {
+        "subject": subject,
+        "grade": grade,
+        "region": region.strip() or None,
+        "textbook_version": textbook.strip() or None,
+    }
 
 
 def render_tutor_page(user: dict) -> None:
@@ -35,6 +70,7 @@ def render_tutor_page(user: dict) -> None:
                     if len(uploads) > 4:
                         st.caption(f"已选择 {len(uploads)} 张图片")
             with col_meta:
+                context = _k12_context_inputs("photo")
                 tags_input = st.text_input("标签（可选，逗号分隔）", placeholder="例如：期末复习, 几何", key="photo_tags")
                 hint = st.text_area(
                     "给老师的话（可选）",
@@ -43,7 +79,7 @@ def render_tutor_page(user: dict) -> None:
                 )
 
             if uploads and st.button("开始 AI 解析", type="primary", width="stretch"):
-                _process_uploads(service, user, uploads, sanitize_tags(tags_input), hint)
+                _process_uploads(service, user, uploads, sanitize_tags(tags_input), hint, context)
 
     with tab_manual:
         _render_manual_entry(service, user)
@@ -59,6 +95,7 @@ def _render_manual_entry(service, user) -> None:
                 placeholder="### 题目\n已知 $x^2-2(k-1)x+k^2=0$ 有两个实数根，求 $k$ 的取值范围。\n\n### 解析\n由判别式…",
                 height=200,
             )
+            context = _k12_context_inputs("manual")
             col_a, col_t, col_k = st.columns([2, 2, 2])
             with col_a:
                 answer = st.text_input("正确答案（可选）")
@@ -66,6 +103,19 @@ def _render_manual_entry(service, user) -> None:
                 tags = st.text_input("标签（逗号分隔）", placeholder="例如：几何, 相似三角形")
             with col_k:
                 points = st.text_input("考点（逗号分隔，可选）", placeholder="例如：相似三角形")
+            col_q, col_c, col_e = st.columns([2, 2, 2])
+            with col_q:
+                question_type = st.text_input(
+                    "题型（可选）", placeholder="例如：解答题", key="manual_qtype"
+                )
+            with col_c:
+                chapter = st.text_input(
+                    "章节（可选）", placeholder="例如：一元二次方程", key="manual_chapter"
+                )
+            with col_e:
+                error_category = st.selectbox(
+                    "错因（可选）", ["未选择", *ERROR_CATEGORIES], index=0, key="manual_errcat"
+                )
             ai_enrich = st.toggle(
                 "让 AI 解析并补全空缺标注",
                 value=False,
@@ -84,6 +134,13 @@ def _render_manual_entry(service, user) -> None:
                     tags=sanitize_tags(tags),
                     knowledge_points=sanitize_tags(points),
                     ai_analyze=ai_enrich,
+                    subject=context["subject"],
+                    grade=context["grade"],
+                    region=context["region"],
+                    textbook_version=context["textbook_version"],
+                    question_type=question_type.strip() or None,
+                    chapter=chapter.strip() or None,
+                    error_category=None if error_category == "未选择" else error_category,
                 )
             except Exception as exc:  # noqa: BLE001 - AI 失败给出明确提示
                 st.error(f"保存失败：{exc}")
@@ -117,7 +174,7 @@ def _collect_entries(results: list) -> list[dict]:
     return entries
 
 
-def _process_uploads(service, user, uploads, tags: list[str], hint: str) -> None:
+def _process_uploads(service, user, uploads, tags: list[str], hint: str, context: dict) -> None:
     progress = st.progress(0.0, text="准备解析…")
     results = []
     for idx, upload in enumerate(uploads, 1):
@@ -128,7 +185,15 @@ def _process_uploads(service, user, uploads, tags: list[str], hint: str) -> None
             image_bytes = upload.getvalue()
             mime = upload.type or "image/jpeg"
             entry = service.analyze_and_save_dedup(
-                user["id"], image_bytes, mime_type=mime, user_tags=tags, hint=hint
+                user["id"],
+                image_bytes,
+                mime_type=mime,
+                user_tags=tags,
+                hint=hint,
+                subject=context["subject"],
+                grade=context["grade"],
+                region=context["region"],
+                textbook_version=context["textbook_version"],
             )
             results.append((upload.name, entry, None))
         except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
@@ -172,6 +237,15 @@ def _render_analysis(saved, analysis, service, user) -> None:
             unsafe_allow_html=True,
         )
     with content_col:
+        meta_bits = []
+        if getattr(analysis, "question_type", ""):
+            meta_bits.append(f"题型：{analysis.question_type}")
+        if getattr(analysis, "chapter", ""):
+            meta_bits.append(f"章节：{analysis.chapter}")
+        if getattr(analysis, "error_category", None):
+            meta_bits.append(f"错因：{analysis.error_category}")
+        if meta_bits:
+            st.caption(" · ".join(meta_bits))
         st.markdown(f"**考点**：{'、'.join(analysis.knowledge_points)}")
         st.markdown(analysis.analysis, unsafe_allow_html=True)
         st.markdown(f"**正确答案**：{analysis.answer}")

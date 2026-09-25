@@ -28,6 +28,10 @@ class JobService:
         mime_type: str,
         tags: list[str] | None = None,
         hint: str = "",
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
     ) -> str:
         """创建异步解析任务并立即返回 job_id（图片存入任务目录等待执行）。"""
         job_id = uuid.uuid4().hex
@@ -49,6 +53,10 @@ class JobService:
                         "image_path": str(image_path),
                         "tags": tags or [],
                         "hint": hint,
+                        "subject": subject or "math",
+                        "grade": grade,
+                        "region": region,
+                        "textbook_version": textbook_version,
                     },
                 )
             )
@@ -81,6 +89,10 @@ class JobService:
                 mime_type=payload.get("mime_type", "image/jpeg"),
                 user_tags=list(payload.get("tags") or []),
                 hint=payload.get("hint", ""),
+                subject=payload.get("subject") or "math",
+                grade=payload.get("grade"),
+                region=payload.get("region"),
+                textbook_version=payload.get("textbook_version"),
             )
             result = {
                 "question_id": entry.question.id,
