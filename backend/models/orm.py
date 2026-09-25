@@ -94,6 +94,18 @@ class Question(Base):
     ocr_text: Mapped[str | None] = mapped_column(Text)  # 原图 OCR 文字（可选特性）
     image_hash: Mapped[str | None] = mapped_column(String(64), index=True)  # 原图 SHA-256，去重用
 
+    # ---------- K12 元数据（二开扩展）----------
+    subject: Mapped[str] = mapped_column(
+        String(32), default="math", server_default="math", index=True
+    )  # 学科代码：math/chinese/english/physics/...
+    grade: Mapped[int | None] = mapped_column(Integer)  # 年级 1-12
+    region: Mapped[str | None] = mapped_column(String(64))  # 地区，如：北京
+    textbook_version: Mapped[str | None] = mapped_column(String(64))  # 教材版本，如：人教版
+    question_type: Mapped[str | None] = mapped_column(String(32))  # 题型，如：选择题/解答题
+    chapter: Mapped[str | None] = mapped_column(String(128))  # 章节，如：一元二次方程
+    error_category: Mapped[str | None] = mapped_column(String(32))  # 结构化错因（枚举见 schemas.ERROR_CATEGORIES）
+    source_doc: Mapped[str | None] = mapped_column(String(256))  # 来源文档#页码（P2 文档输入预留）
+
     def resolved_image_path(self) -> Path | None:
         """当前真实可用的原图路径（DATA_DIR 迁移后自动自愈），无图返回 None。"""
         return resolve_image_path(self.image_path, self.user_id)
