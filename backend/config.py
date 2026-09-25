@@ -99,11 +99,17 @@ class Settings(BaseSettings):
     # SHARE_CARD_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
     share_card_font_path: Path | None = None
 
+    # ---------- 文档上传（整卷导入）----------
+    # 上传文档（PDF/DOCX 等）的存储目录；留空 = <DATA_DIR>/uploads/docs，
+    # 自定义 DATA_DIR 时自动跟随。显式指定示例：
+    # DOC_UPLOAD_PATH=D:\workspace\learning-tour\data\uploads\docs
+    doc_upload_path: Path | None = None
+
     # ---------- 复习算法 (SM-2) ----------
     review_default_ease: float = Field(default=2.5, ge=1.3)
     review_again_minutes: int = Field(default=10, ge=1)
 
-    @field_validator("chroma_model_dir", "share_card_font_path", mode="before")
+    @field_validator("chroma_model_dir", "share_card_font_path", "doc_upload_path", mode="before")
     @classmethod
     def _blank_means_default(cls, value: object) -> object:
         """空字符串（如 CHROMA_MODEL_DIR=）等价于「未配置」。
@@ -115,7 +121,10 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("data_dir", "chroma_dir", "chroma_model_dir", "share_card_font_path", mode="after")
+    @field_validator(
+        "data_dir", "chroma_dir", "chroma_model_dir", "share_card_font_path", "doc_upload_path",
+        mode="after",
+    )
     @classmethod
     def _expand_paths(cls, value: Path | None) -> Path | None:
         if value is None:
@@ -130,8 +139,17 @@ class Settings(BaseSettings):
             self.database_url = f"sqlite:///{db_file}"
         return self
 
+    @model_validator(mode="after")
+    def _resolve_doc_upload_path(self) -> Settings:
+        """未显式配置 DOC_UPLOAD_PATH 时，落在 <DATA_DIR>/uploads/docs。"""
+        if self.doc_upload_path is None:
+            self.doc_upload_path = self.data_dir / "uploads" / "docs"
+        return self
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        if self.doc_upload_path is not None:
+            self.doc_upload_path.mkdir(parents=True, exist_ok=True)
         if self.rag_enabled:
             self.chroma_dir.mkdir(parents=True, exist_ok=True)
             if self.chroma_model_dir is not None:
