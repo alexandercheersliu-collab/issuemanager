@@ -20,7 +20,13 @@ class GeminiProvider(BaseAIProvider):
         self._client = genai.Client(api_key=self.settings.ai_api_key)
         self.model_name = self.settings.ai_model or "gemini-2.0-flash"
 
-    def _complete(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
+    def _complete(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+    ) -> str:
         response = self._client.models.generate_content(
             model=self.model_name,
             contents=[
@@ -28,7 +34,7 @@ class GeminiProvider(BaseAIProvider):
                 prompt,
             ],
             config=self._genai.types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 temperature=self.settings.ai_temperature,
                 response_mime_type="application/json",
             ),

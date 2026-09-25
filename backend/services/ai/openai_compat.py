@@ -24,13 +24,19 @@ class OpenAICompatProvider(BaseAIProvider):
             max_retries=0,  # 重试策略在 BaseAIProvider 内统一控制
         )
 
-    def _complete(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
+    def _complete(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+    ) -> str:
         data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         response = self._client.chat.completions.create(
             model=self.settings.ai_model,
             temperature=self.settings.ai_temperature,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": [

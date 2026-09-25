@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from backend.models.schemas import AIProviderInfo, QuestionAnalysis
-from backend.services.ai.base import BaseAIProvider
+from backend.services.ai.base import SYSTEM_PROMPT, AnalysisContext, BaseAIProvider
 
 _DEMO_ANALYSIS = QuestionAnalysis(
     knowledge_points=["一元二次方程", "判别式", "代数运算"],
@@ -27,11 +27,20 @@ _DEMO_ANALYSIS = QuestionAnalysis(
     followup_question=(
         "已知关于 $x$ 的方程 $x^2 - (m+2)x + m = 0$ 有两个不相等的实数根，求 $m$ 的取值范围。"
     ),
+    question_type="解答题",
+    chapter="一元二次方程",
+    error_category="概念不清",
 )
 
 
 class MockProvider(BaseAIProvider):
-    def _complete(self, image_bytes: bytes, mime_type: str, prompt: str) -> str:
+    def _complete(
+        self,
+        image_bytes: bytes,
+        mime_type: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+    ) -> str:
         return _DEMO_ANALYSIS.model_dump_json()
 
     def chat(self, messages: list[dict]) -> str:
@@ -46,7 +55,9 @@ class MockProvider(BaseAIProvider):
             "再从已知条件出发逐步推导，检查每一步的适用条件（例如判别式、定义域）。"
         )
 
-    def analyze_text(self, text: str, hint: str = "") -> QuestionAnalysis:
+    def analyze_text(
+        self, text: str, hint: str = "", context: AnalysisContext | None = None
+    ) -> QuestionAnalysis:
         return _DEMO_ANALYSIS.model_copy(deep=True)
 
     def provider_info(self) -> AIProviderInfo:

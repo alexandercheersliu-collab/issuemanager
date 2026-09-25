@@ -210,7 +210,18 @@ class EntryMixin:
         followup = ""
 
         if ai_analyze:
-            analysis = self.ai.analyze_text(content_markdown.strip(), hint)
+            from backend.services.ai.base import AnalysisContext
+
+            analysis = self.ai.analyze_text(
+                content_markdown.strip(),
+                hint,
+                context=AnalysisContext(
+                    subject=subject,
+                    grade=grade,
+                    region=region,
+                    textbook_version=textbook_version,
+                ),
+            )
             clean_answer = clean_answer or analysis.answer
             clean_points = clean_points or analysis.knowledge_points[:4]
             clean_tags = clean_tags or analysis.tags[:4]
@@ -265,7 +276,19 @@ class EntryMixin:
         image_hash：调用方（analyze_and_save_dedup）预算好的原图哈希，入库供去重。
         subject/grade/region/textbook_version：录入上下文，随解析落库为 K12 元数据。
         """
-        analysis = self.ai.analyze_question(image_bytes, mime_type, hint)
+        from backend.services.ai.base import AnalysisContext
+
+        analysis = self.ai.analyze_question(
+            image_bytes,
+            mime_type,
+            hint,
+            context=AnalysisContext(
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+            ),
+        )
         tags = analysis.merged_tags(user_tags or [])
 
         image_path = self._persist_image(user_id, image_bytes)
