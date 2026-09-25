@@ -182,6 +182,18 @@ EMBEDDING_MODEL=BAAI/bge-m3
 3. **今日复习** — 闪卡式复习：看题回忆 → 显示解析 → 按掌握程度评分（忘了/勉强/记得/秒懂）→ SM-2 自动安排下次复习时间。
 4. **学情看板** — 累计错题、待复习数、知识点分布环形图、薄弱知识点掌握度条、近 14 天录入趋势。
 
+## 🧩 K12 二次开发功能（本分支新增）
+
+本分支在上游基座上做了面向 K12 场景的二次开发，与上游差异的完整清单见 **[docs/UPSTREAM_DIFF.md](docs/UPSTREAM_DIFF.md)**：
+
+1. **K12 元数据** — 题目增加学段 / 年级 / 学科 / 教材版本等结构化字段，贯穿录入、检索、筛选与导出。
+2. **整卷导入** — 上传整份试卷文档（`documents` 模块）→ 自动切题（`segment`）→ OCR 可选 → 逐题入库，异步任务跟踪进度（`jobs`）。
+3. **同类题检测与降级** — 录题时检测公共题库 / 本人历史中的同类题（`detection`）；公共题库命中即复用解析并降级为「引用入库」，避免重复消耗 AI 额度（`demotion`）。
+4. **约束检索与公共题库** — 向量检索支持按学段 / 年级 / 学科等元数据约束过滤（`RAG_FILTER_OVERSAMPLE` 过采样后过滤）；内置公共题库集合（`RAG_BANK_COLLECTION`，默认 `question_bank`），用 `python scripts/seed_question_bank.py` 灌入。
+5. **数据整体迁移** — `python scripts/migrate_data.py --new-data-dir <绝对路径>` 把 SQLite 库 / uploads / 散落日志 / Chroma 向量库 / 内置模型缓存整体复制到新数据目录并逐项校验（文件数、字节数、DB 表行数），不删旧数据；MySQL 部署会提示改用 mysqldump。
+6. **新配置项** — `CHROMA_MODEL_DIR`（内置嵌入模型缓存目录）、`RAG_LEAK_THRESHOLD` / `RAG_FILTER_OVERSAMPLE` / `RAG_BANK_COLLECTION`、`SHARE_CARD_FONT_PATH`（分享卡片字体，可配置避免系统路径硬编码）、`DOC_UPLOAD_PATH`、`OCR_ENABLED` 等，详见 `backend/config.py` 注释与 `.env.example`。
+7. **语音模块** — 语音录入 / 播报（原 4.1 规划）**已明确延后**，不在本分支交付范围。
+
 ## 🧪 测试与质量
 
 ```bash
@@ -225,7 +237,10 @@ Math_Tutor_RAG/
 │   └── assets/style.css       # MUJI 极简主题
 ├── tests/                     # pytest 测试套件
 ├── scripts/
-│   └── install_onnx_model.py  # 断点续传安装内置嵌入模型（弱网友好）
+│   ├── install_onnx_model.py  # 断点续传安装内置嵌入模型（弱网友好）
+│   ├── seed_question_bank.py  # 灌入公共题库（配合同类题检测）
+│   ├── migrate_data.py        # 数据目录整体迁移（复制+校验，不删旧数据）
+│   └── setup_env.ps1/.sh      # 全新环境一键部署脚本
 ├── docs/ARCHITECTURE.md       # 架构决策说明
 ├── Dockerfile / docker-compose.yml
 └── .github/workflows/ci.yml   # lint + 测试矩阵 + Docker 构建
@@ -246,6 +261,9 @@ CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx   # 内置嵌入模
   （`~/.cache/chroma/onnx_models`）且**不支持断点续传**，弱网容易反复下一半。
   用 `python scripts/install_onnx_model.py` 可断点续传装到 `CHROMA_MODEL_DIR` 并自动校验 SHA256。
 - 启动后在「设置 → 存储」可以看到当前实际生效的路径。
+- 已有部署想整体挪数据目录：先停服务，再跑 `python scripts/migrate_data.py --new-data-dir <新绝对路径>`
+  （可加 `--dry-run` 预演），校验通过后按脚本结尾提示更新 `.env`；旧数据默认保留作备份。
+- 公共题库灌入：`python scripts/seed_question_bank.py`（配合 `RAG_BANK_COLLECTION`）。
 
 ## 🗺️ 路线图 (Roadmap)
 
@@ -255,6 +273,7 @@ CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx   # 内置嵌入模
 - [x] ~~教师端学生总览~~（v2.1）
 - [ ] PostgreSQL 支持；对象存储（S3/OSS）托管题目图片
 - [ ] OpenTelemetry 观测埋点；消息队列异步解析
+- [ ] 语音录入 / 语音播报（**本分支已登记延后**，见 docs/UPSTREAM_DIFF.md P4 节）
 
 ## ⚠️ 已知限制 (Known Limitations)
 
