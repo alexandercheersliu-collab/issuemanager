@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -105,6 +106,11 @@ class Question(Base):
     chapter: Mapped[str | None] = mapped_column(String(128))  # 章节，如：一元二次方程
     error_category: Mapped[str | None] = mapped_column(String(32))  # 结构化错因（枚举见 schemas.ERROR_CATEGORIES）
     source_doc: Mapped[str | None] = mapped_column(String(256))  # 来源文档#页码（P2 文档输入预留）
+    # 降级状态（P3.2）：normal / demoted（连续通过同类题检测后降级，
+    # 复习 again 或检测失败自动回升为 normal）
+    demotion_state: Mapped[str] = mapped_column(
+        String(16), default="normal", server_default="normal"
+    )
 
     def resolved_image_path(self) -> Path | None:
         """当前真实可用的原图路径（DATA_DIR 迁移后自动自愈），无图返回 None。"""
@@ -130,6 +136,9 @@ class Question(Base):
     )
     comments: Mapped[list[Comment]] = relationship(
         back_populates="question", cascade="all, delete-orphan", order_by="Comment.created_at"
+    )
+    detection_logs: Mapped[list[DetectionLog]] = relationship(
+        back_populates="question", cascade="all, delete-orphan"
     )
 
     def is_due(self, now: dt.datetime | None = None) -> bool:
@@ -198,3 +207,39 @@ class ReviewLog(Base):
     )
 
     question: Mapped[Question] = relationship(back_populates="review_logs")
+
+
+class DetectionLog(Base):
+    """一次同类题检测明细（P3.2）：原错题 → 同类题作答 → 结果与降级联动。
+
+    tested_ref：同类题标识——库内题为 str(question_id)，公共题库为
+    "bank:<内容哈希>"，AI 变式为 "gen:<内容哈希>"。
+    result：pending（已发题未作答）/ correct / wrong。
+    demoted：本次检测是否触发了原错题降级（报表「降级错题数」口径）。
+    """
+
+    __tablename__ = "detection_logs"
+    __table_args__ = (
+        Index("ix_detection_logs_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    question_id: Mapped[int] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    tested_ref: Mapped[str] = mapped_column(String(128))
+    tested_source: Mapped[str] = mapped_column(String(16))  # own / bank / generated
+    tested_content: Mapped[str | None] = mapped_column(Text)  # 同类题题干快照
+    tested_answer: Mapped[str | None] = mapped_column(Text)  # 参考答案快照（判分依据）
+    result: Mapped[str] = mapped_column(String(8), default="pending")
+    student_answer: Mapped[str | None] = mapped_column(Text)
+    demoted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    question: Mapped[Question] = relationship(
+        back_populates="detection_logs"
+    )

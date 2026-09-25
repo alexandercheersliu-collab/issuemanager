@@ -826,6 +826,12 @@ class ReviewMixin:
                 ease=question.ease,
                 interval_days=question.interval_days,
             )
+            # P3.2 回升钩子：已降级题复习再错（again）→ 回升 normal。
+            # SM-2 本身已把 reps 重置为 0、间隔压到 10 分钟（高优先级），
+            # 这里只需同步降级状态；掌握归档口径（reps≥3 且间隔≥21 天）自然失效。
+            was_demoted = (
+                grade == "again" and question.demotion_state == "demoted"
+            )
             updated = repo.apply_schedule(
                 question_id,
                 user_id,
@@ -836,6 +842,9 @@ class ReviewMixin:
                 ease_after=schedule.ease_after,
                 due_at=schedule.due_at,
             )
+            if was_demoted and updated is not None:
+                updated.demotion_state = "normal"
+                logger.info("降级题复习再错，自动回升 question=%s", question_id)
             return QuestionOut.from_orm_model(updated) if updated else None
 
 

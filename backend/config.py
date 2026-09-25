@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     review_default_ease: float = Field(default=2.5, ge=1.3)
     review_again_minutes: int = Field(default=10, ge=1)
 
+    # ---------- 同类题检测与降级（P3.2）----------
+    # 同一原错题连续通过检测达到该次数 → 触发降级（掌握度提升 + 间隔拉长）
+    detection_pass_threshold: int = Field(default=2, ge=1, le=10)
+    # 降级时 SM-2 间隔拉长系数（在 quality=5 调度结果上再乘该系数）
+    demotion_interval_factor: float = Field(default=1.5, ge=1.0, le=10.0)
+
     @field_validator("chroma_model_dir", "share_card_font_path", "doc_upload_path", mode="before")
     @classmethod
     def _blank_means_default(cls, value: object) -> object:
