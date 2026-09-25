@@ -175,11 +175,15 @@ class QuestionRepository:
         subject: str | None = None,
         grade: int | None = None,
         error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
     ):
-        """构造带归属/标签/关键词/K12 元数据过滤的查询（过滤全部下推到 SQL）。
+        """构造带归属/标签/关键词/K12 元数据/来源过滤的查询（过滤全部下推到 SQL）。
 
         tags / knowledge_points 为 JSON 列，SQLite 与 MySQL 均以文本存储，
         用 LIKE 匹配带引号的标签即可精确命中。
+        source_doc 按「文档名」前缀匹配（落库格式为 文档名#页码），
+        LIKE 通配符先转义，避免文档名含 %/_ 时误匹配。
         """
         stmt = select(Question).order_by(Question.created_at.desc())
         if not include_others:
@@ -192,6 +196,13 @@ class QuestionRepository:
             stmt = stmt.where(Question.grade == grade)
         if error_category:
             stmt = stmt.where(Question.error_category == error_category)
+        if source:
+            stmt = stmt.where(Question.source == source)
+        if source_doc:
+            escaped = (
+                source_doc.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            stmt = stmt.where(Question.source_doc.like(f"{escaped}#%", escape="\\"))
         if keyword:
             like = f"%{keyword}%"
             stmt = stmt.where(
@@ -215,6 +226,8 @@ class QuestionRepository:
         subject: str | None = None,
         grade: int | None = None,
         error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
         offset: int = 0,
         limit: int | None = None,
     ) -> list[Question]:
@@ -226,6 +239,8 @@ class QuestionRepository:
             subject=subject,
             grade=grade,
             error_category=error_category,
+            source=source,
+            source_doc=source_doc,
         )
         if offset:
             stmt = stmt.offset(offset)
@@ -243,6 +258,8 @@ class QuestionRepository:
         subject: str | None = None,
         grade: int | None = None,
         error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
     ) -> int:
         """与 list_for_user 相同口径的总数（供分页使用，SQL 计数）。"""
         stmt = self._filtered_stmt(
@@ -253,6 +270,8 @@ class QuestionRepository:
             subject=subject,
             grade=grade,
             error_category=error_category,
+            source=source,
+            source_doc=source_doc,
         )
         count_stmt = select(func.count()).select_from(stmt.subquery())
         return int(self.session.execute(count_stmt).scalar_one())

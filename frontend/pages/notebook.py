@@ -118,6 +118,19 @@ def render_notebook_page(user: dict) -> None:
                 "按错因筛选", ["全部", *ERROR_CATEGORIES], index=0, key="notebook_errcat"
             )
             category_filter = None if category_label == "全部" else category_label
+
+            # 来源文档筛选：整卷导入题落库为 source_doc=文档名#页码，按文档名前缀过滤
+            doc_names = sorted(
+                {
+                    q.source_doc.split("#")[0]
+                    for q in all_questions
+                    if getattr(q, "source_doc", None)
+                }
+            )
+            doc_label = st.selectbox(
+                "按来源文档筛选", ["全部"] + doc_names, index=0, key="notebook_source_doc"
+            )
+            source_doc_filter = None if doc_label == "全部" else doc_label
         with col_export:
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -129,6 +142,7 @@ def render_notebook_page(user: dict) -> None:
             subject=subject_filter,
             grade=grade_filter,
             error_category=category_filter,
+            source_doc=source_doc_filter,
             semantic=semantic,
         )
 
@@ -211,6 +225,7 @@ def render_notebook_page(user: dict) -> None:
                 for key in (
                     "notebook_search", "notebook_tag", "notebook_page",
                     "notebook_subject", "notebook_grade", "notebook_errcat",
+                    "notebook_source_doc",
                 ):
                     st.session_state.pop(key, None)
                 st.rerun()

@@ -388,6 +388,8 @@ class QueryMixin:
         subject: str | None = None,
         grade: int | None = None,
         error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
         semantic: bool = True,
         offset: int = 0,
         limit: int | None = None,
@@ -396,6 +398,7 @@ class QueryMixin:
 
         offset/limit 在过滤后应用；不传 limit 返回全部（界面默认），API 层分页传入。
         subject/grade/error_category：K12 元数据过滤（SQL 下推）。
+        source/source_doc：来源过滤（整卷导入题按文档名前缀匹配，SQL 下推）。
         """
         with self._session() as repo:
             primary = repo.list_for_user(
@@ -406,6 +409,8 @@ class QueryMixin:
                 subject=subject,
                 grade=grade,
                 error_category=error_category,
+                source=source,
+                source_doc=source_doc,
                 offset=offset,
                 limit=limit,
             )
@@ -470,6 +475,8 @@ class QueryMixin:
         subject: str | None = None,
         grade: int | None = None,
         error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
     ) -> int:
         """过滤口径下的错题总数（API 分页用）。"""
         with self._session() as repo:
@@ -481,6 +488,8 @@ class QueryMixin:
                 subject=subject,
                 grade=grade,
                 error_category=error_category,
+                source=source,
+                source_doc=source_doc,
             )
 
     def get_question(self, question_id: int, user_id: int) -> QuestionOut | None:
