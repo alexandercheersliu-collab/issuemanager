@@ -92,11 +92,18 @@ class Settings(BaseSettings):
     # 需要：pip install rapidocr-onnxruntime
     ocr_enabled: bool = False
 
+    # ---------- 分享卡片 ----------
+    # 渲染分享卡片使用的中文字体文件（.ttf/.ttc/.otf）绝对路径；
+    # 留空 = 按平台自动探测常见字体（Windows 微软雅黑/黑体、Linux 文泉驿、
+    # macOS 苹方），都找不到则回退 PIL 默认字体（可能不支持中文）。
+    # SHARE_CARD_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+    share_card_font_path: Path | None = None
+
     # ---------- 复习算法 (SM-2) ----------
     review_default_ease: float = Field(default=2.5, ge=1.3)
     review_again_minutes: int = Field(default=10, ge=1)
 
-    @field_validator("chroma_model_dir", mode="before")
+    @field_validator("chroma_model_dir", "share_card_font_path", mode="before")
     @classmethod
     def _blank_means_default(cls, value: object) -> object:
         """空字符串（如 CHROMA_MODEL_DIR=）等价于「未配置」。
@@ -108,7 +115,7 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("data_dir", "chroma_dir", "chroma_model_dir", mode="after")
+    @field_validator("data_dir", "chroma_dir", "chroma_model_dir", "share_card_font_path", mode="after")
     @classmethod
     def _expand_paths(cls, value: Path | None) -> Path | None:
         if value is None:

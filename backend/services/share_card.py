@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 
 from PIL import Image, ImageDraw
 
+from backend.config import get_settings
 from backend.utils.logging import get_logger
 
 logger = get_logger("share_card")
@@ -23,36 +25,44 @@ _COLORS = {
 }
 
 
+def _font_candidates(bold: bool = False) -> list[str]:
+    """字体候选清单：配置项优先，其次按平台探测常见中文字体路径。"""
+    candidates: list[str] = []
+    configured = get_settings().share_card_font_path
+    if configured is not None:
+        candidates.append(str(configured))
+    if sys.platform.startswith("win"):
+        candidates += [
+            r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+        ]
+    elif sys.platform == "darwin":
+        candidates.append("/System/Library/Fonts/PingFang.ttc")
+    else:
+        candidates += [
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+    return candidates
+
+
 def _font(size: int, bold: bool = False):
-    """按平台挑选可用中文字体；找不到则用 PIL 默认（可能不支持中文）。"""
+    """按候选清单挑选可用中文字体；找不到则用 PIL 默认（可能不支持中文）。"""
     from PIL import ImageFont
 
-    candidates = [
-        r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\simhei.ttf",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-    ]
-    for path in candidates:
+    for path in _font_candidates(bold):
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
             except OSError:
+                logger.warning("字体加载失败，尝试下一个候选: %s", path)
                 continue
     return ImageFont.load_default(size=size)
 
 
 def has_cjk_font() -> bool:
     """当前环境是否有可渲染中文的字体（决定测试断言与卡片回退样式）。"""
-    return _font(20) is not None and any(
-        os.path.exists(p)
-        for p in (
-            r"C:\Windows\Fonts\msyh.ttc",
-            r"C:\Windows\Fonts\simhei.ttf",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-        )
-    )
+    return any(os.path.exists(p) for p in _font_candidates())
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
