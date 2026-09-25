@@ -26,6 +26,13 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["backend", "frontend"]
 
+[tool.ruff.lint.per-file-ignores]
+# 入口文件首行必须 `import bootstrap`（注入 HOME/HF_HOME 等环境变量），
+# 该 import 语义上要求置于所有第三方库之前，与 isort 排序规则冲突，故豁免。
+"app.py" = ["I001"]
+"api/main.py" = ["I001"]
+"mcp_server.py" = ["I001"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
