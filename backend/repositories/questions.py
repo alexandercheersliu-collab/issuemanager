@@ -32,6 +32,14 @@ class QuestionRepository:
         source: str = "ai",
         ocr_text: str | None = None,
         image_hash: str | None = None,
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        question_type: str | None = None,
+        chapter: str | None = None,
+        error_category: str | None = None,
+        source_doc: str | None = None,
     ) -> Question:
         question = Question(
             user_id=user_id,
@@ -45,6 +53,14 @@ class QuestionRepository:
             source=source,
             ocr_text=ocr_text or None,
             image_hash=image_hash,
+            subject=subject or "math",
+            grade=grade,
+            region=region or None,
+            textbook_version=textbook_version or None,
+            question_type=question_type or None,
+            chapter=chapter or None,
+            error_category=error_category or None,
+            source_doc=source_doc or None,
         )
         self.session.add(question)
         self.session.flush()
@@ -60,6 +76,13 @@ class QuestionRepository:
         tags: list[str] | None = None,
         knowledge_points: list[str] | None = None,
         user_note: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        question_type: str | None = None,
+        chapter: str | None = None,
+        error_category: str | None = None,
     ) -> Question | None:
         question = self._get_owned(question_id, user_id)
         if question is None:
@@ -74,6 +97,20 @@ class QuestionRepository:
             question.knowledge_points = knowledge_points
         if user_note is not None:
             question.user_note = user_note
+        if subject is not None:
+            question.subject = subject
+        if grade is not None:
+            question.grade = grade
+        if region is not None:
+            question.region = region or None
+        if textbook_version is not None:
+            question.textbook_version = textbook_version or None
+        if question_type is not None:
+            question.question_type = question_type or None
+        if chapter is not None:
+            question.chapter = chapter or None
+        if error_category is not None:
+            question.error_category = error_category or None
         self.session.flush()
         return question
 
@@ -135,8 +172,11 @@ class QuestionRepository:
         include_others: bool = False,
         tag: str | None = None,
         keyword: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        error_category: str | None = None,
     ):
-        """构造带归属/标签/关键词过滤的查询（过滤全部下推到 SQL）。
+        """构造带归属/标签/关键词/K12 元数据过滤的查询（过滤全部下推到 SQL）。
 
         tags / knowledge_points 为 JSON 列，SQLite 与 MySQL 均以文本存储，
         用 LIKE 匹配带引号的标签即可精确命中。
@@ -146,6 +186,12 @@ class QuestionRepository:
             stmt = stmt.where(Question.user_id == user_id)
         if tag:
             stmt = stmt.where(Question.tags.cast(String).contains(f'"{tag}"'))
+        if subject:
+            stmt = stmt.where(Question.subject == subject)
+        if grade is not None:
+            stmt = stmt.where(Question.grade == grade)
+        if error_category:
+            stmt = stmt.where(Question.error_category == error_category)
         if keyword:
             like = f"%{keyword}%"
             stmt = stmt.where(
@@ -166,11 +212,20 @@ class QuestionRepository:
         include_others: bool = False,
         tag: str | None = None,
         keyword: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        error_category: str | None = None,
         offset: int = 0,
         limit: int | None = None,
     ) -> list[Question]:
         stmt = self._filtered_stmt(
-            user_id, include_others=include_others, tag=tag, keyword=keyword
+            user_id,
+            include_others=include_others,
+            tag=tag,
+            keyword=keyword,
+            subject=subject,
+            grade=grade,
+            error_category=error_category,
         )
         if offset:
             stmt = stmt.offset(offset)
@@ -185,10 +240,19 @@ class QuestionRepository:
         include_others: bool = False,
         tag: str | None = None,
         keyword: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        error_category: str | None = None,
     ) -> int:
         """与 list_for_user 相同口径的总数（供分页使用，SQL 计数）。"""
         stmt = self._filtered_stmt(
-            user_id, include_others=include_others, tag=tag, keyword=keyword
+            user_id,
+            include_others=include_others,
+            tag=tag,
+            keyword=keyword,
+            subject=subject,
+            grade=grade,
+            error_category=error_category,
         )
         count_stmt = select(func.count()).select_from(stmt.subquery())
         return int(self.session.execute(count_stmt).scalar_one())

@@ -180,6 +180,14 @@ class EntryMixin:
         source: str = "manual",
         ai_analyze: bool = False,
         hint: str = "",
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        question_type: str | None = None,
+        chapter: str | None = None,
+        error_category: str | None = None,
+        source_doc: str | None = None,
     ) -> QuestionOut:
         """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。"""
         if not content_markdown or not content_markdown.strip():
@@ -195,6 +203,10 @@ class EntryMixin:
             clean_points = clean_points or analysis.knowledge_points[:4]
             clean_tags = clean_tags or analysis.tags[:4]
             followup = analysis.followup_question
+            # AI 结构化字段补全空缺（手填优先）
+            question_type = question_type or analysis.question_type or None
+            chapter = chapter or analysis.chapter or None
+            error_category = error_category or analysis.error_category
 
         with self._session() as repo:
             question = repo.create(
@@ -205,6 +217,14 @@ class EntryMixin:
                 tags=clean_tags,
                 followup_question=followup,
                 source=source,
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+                question_type=question_type,
+                chapter=chapter,
+                error_category=error_category,
+                source_doc=source_doc,
             )
             out = QuestionOut.from_orm_model(question)
 
@@ -225,10 +245,15 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_hash: str | None = None,
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
     ) -> tuple[QuestionOut, QuestionAnalysis]:
         """完整录入链路：AI 解析 → 图片落盘 →（可选 OCR）→ 数据库 → 向量索引。
 
         image_hash：调用方（analyze_and_save_dedup）预算好的原图哈希，入库供去重。
+        subject/grade/region/textbook_version：录入上下文，随解析落库为 K12 元数据。
         """
         analysis = self.ai.analyze_question(image_bytes, mime_type, hint)
         tags = analysis.merged_tags(user_tags or [])
@@ -249,6 +274,13 @@ class EntryMixin:
                 image_path=str(image_path),
                 ocr_text=ocr_text,
                 image_hash=image_hash,
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+                question_type=analysis.question_type or None,
+                chapter=analysis.chapter or None,
+                error_category=analysis.error_category,
             )
             out = QuestionOut.from_orm_model(question)
 
@@ -271,6 +303,10 @@ class EntryMixin:
         mime_type: str = "image/jpeg",
         user_tags: list[str] | None = None,
         hint: str = "",
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
     ) -> EntryResult:
         """带去重的录题：同图已录入时跳过 AI 调用，直接返回既有记录。"""
         image_hash = hashlib.sha256(image_bytes).hexdigest()
@@ -286,6 +322,9 @@ class EntryMixin:
                 tags=list(out.tags or []),
                 mistake_cause="",
                 followup_question=out.followup_question or "",
+                question_type=out.question_type or "",
+                chapter=out.chapter or "",
+                error_category=out.error_category,  # type: ignore[arg-type]
             )
             logger.info("重复图片 question=%s user=%s，直接复用", out.id, user_id)
             return EntryResult(question=out, analysis=analysis, duplicated=True)
@@ -297,6 +336,10 @@ class EntryMixin:
             user_tags=user_tags,
             hint=hint,
             image_hash=image_hash,
+            subject=subject,
+            grade=grade,
+            region=region,
+            textbook_version=textbook_version,
         )
         return EntryResult(question=out, analysis=analysis, duplicated=False)
 
@@ -311,6 +354,9 @@ class QueryMixin:
         include_others: bool = False,
         tag: str | None = None,
         keyword: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        error_category: str | None = None,
         semantic: bool = True,
         offset: int = 0,
         limit: int | None = None,
@@ -318,6 +364,7 @@ class QueryMixin:
         """关键词检索；开启语义搜索时用 RRF 融合向量与关键词两路结果（可选重排）。
 
         offset/limit 在过滤后应用；不传 limit 返回全部（界面默认），API 层分页传入。
+        subject/grade/error_category：K12 元数据过滤（SQL 下推）。
         """
         with self._session() as repo:
             primary = repo.list_for_user(
@@ -325,6 +372,9 @@ class QueryMixin:
                 include_others=include_others,
                 tag=tag,
                 keyword=keyword,
+                subject=subject,
+                grade=grade,
+                error_category=error_category,
                 offset=offset,
                 limit=limit,
             )
@@ -386,6 +436,9 @@ class QueryMixin:
         include_others: bool = False,
         tag: str | None = None,
         keyword: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        error_category: str | None = None,
     ) -> int:
         """过滤口径下的错题总数（API 分页用）。"""
         with self._session() as repo:
@@ -394,6 +447,9 @@ class QueryMixin:
                 include_others=include_others,
                 tag=tag,
                 keyword=keyword,
+                subject=subject,
+                grade=grade,
+                error_category=error_category,
             )
 
     def get_question(self, question_id: int, user_id: int) -> QuestionOut | None:
@@ -433,6 +489,13 @@ class EditTagMixin:
         answer: str | None = None,
         tags: list[str] | None = None,
         user_note: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        question_type: str | None = None,
+        chapter: str | None = None,
+        error_category: str | None = None,
     ) -> QuestionOut | None:
         with self._session() as repo:
             question = repo.update(
@@ -442,6 +505,13 @@ class EditTagMixin:
                 answer=answer,
                 tags=tags,
                 user_note=user_note,
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+                question_type=question_type,
+                chapter=chapter,
+                error_category=error_category,
             )
             out = QuestionOut.from_orm_model(question) if question else None
 
@@ -651,6 +721,7 @@ class BackupMixin:
         imported = 0
         for item in items:
             try:
+                grade_raw = item.get("grade")
                 self.create_manual_question(
                     user_id,
                     content_markdown=str(item.get("content_markdown", "")).strip(),
@@ -658,6 +729,14 @@ class BackupMixin:
                     tags=[str(t) for t in (item.get("tags") or [])][:8],
                     knowledge_points=[str(t) for t in (item.get("knowledge_points") or [])][:8],
                     source="imported",
+                    subject=str(item.get("subject") or "math"),
+                    grade=int(grade_raw) if grade_raw else None,
+                    region=item.get("region") or None,
+                    textbook_version=item.get("textbook_version") or None,
+                    question_type=item.get("question_type") or None,
+                    chapter=item.get("chapter") or None,
+                    error_category=item.get("error_category") or None,
+                    source_doc=item.get("source_doc") or None,
                 )
                 imported += 1
             except Exception as exc:  # noqa: BLE001 - 单条失败不阻断整体

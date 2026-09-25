@@ -9,6 +9,24 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
+# ---------------- K12 元数据常量 ----------------
+# 学科代码 → 中文名（存储用代码，提示词与界面展示用中文名）
+SUBJECT_NAMES: dict[str, str] = {
+    "math": "数学",
+    "chinese": "语文",
+    "english": "英语",
+    "physics": "物理",
+    "chemistry": "化学",
+    "biology": "生物",
+    "history": "历史",
+    "geography": "地理",
+    "politics": "政治",
+}
+
+# 结构化错因枚举（AI 输出与录入界面共用；非法值触发 ValidationError 并重试）
+ERROR_CATEGORIES: tuple[str, ...] = ("概念不清", "计算失误", "审题偏差", "方法不会", "粗心其他")
+ErrorCategory = Literal["概念不清", "计算失误", "审题偏差", "方法不会", "粗心其他"]
+
 
 # ---------------- AI 结构化输出 ----------------
 class QuestionAnalysis(BaseModel):
@@ -23,6 +41,12 @@ class QuestionAnalysis(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=6, description="归档标签")
     mistake_cause: str = Field(default="", description="常见出错原因分析")
     followup_question: str = Field(default="", description="一道举一反三的变式练习题")
+    # K12 结构化字段（二开扩展；模型给不出时留空/None，不阻断解析）
+    question_type: str = Field(default="", description="题型，如：选择题/填空题/解答题")
+    chapter: str = Field(default="", description="所属章节，如：一元二次方程")
+    error_category: ErrorCategory | None = Field(
+        default=None, description="结构化错因分类（枚举值之一）"
+    )
 
     @field_validator("knowledge_points", "tags")
     @classmethod
@@ -63,6 +87,15 @@ class QuestionOut(BaseModel):
     source: str = "ai"
     user_note: str | None = None
     ocr_text: str | None = None
+    # K12 元数据（二开扩展）
+    subject: str = "math"
+    grade: int | None = None
+    region: str | None = None
+    textbook_version: str | None = None
+    question_type: str | None = None
+    chapter: str | None = None
+    error_category: str | None = None
+    source_doc: str | None = None
     reps: int = 0
     ease: float = 2.5
     interval_days: float = 0
@@ -88,6 +121,15 @@ class QuestionOut(BaseModel):
             source=q.source,
             user_note=q.user_note,
             ocr_text=q.ocr_text,
+            # K12 元数据：getattr 兜底，兼容无新列的轻量替身对象（老测试桩/第三方模型）
+            subject=getattr(q, "subject", None) or "math",
+            grade=getattr(q, "grade", None),
+            region=getattr(q, "region", None),
+            textbook_version=getattr(q, "textbook_version", None),
+            question_type=getattr(q, "question_type", None),
+            chapter=getattr(q, "chapter", None),
+            error_category=getattr(q, "error_category", None),
+            source_doc=getattr(q, "source_doc", None),
             reps=q.reps,
             ease=q.ease,
             interval_days=q.interval_days,
