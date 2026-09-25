@@ -258,11 +258,13 @@ def _render_analysis(saved, analysis, service, user) -> None:
 
         st.divider()
         st.markdown("**相似错题（向量召回）**")
-        similar = service.similar_questions(saved, user_id=user["id"])
+        similar = service.similar_questions(saved, user_id=user["id"]).items
         if similar:
             for q in similar:
+                source_mark = {"bank": "公共题库", "generated": "AI 变式"}.get(q.source)
+                prefix = f"[{source_mark}] " if source_mark else ""
                 st.markdown(
-                    f"- 🏷️ {'、'.join(q.tags[:3])} · "
+                    f"- {prefix}🏷️ {'、'.join(q.tags[:3])} · "
                     f"<span class='mm-muted'>{q.content_markdown[:60]}…</span>",
                     unsafe_allow_html=True,
                 )

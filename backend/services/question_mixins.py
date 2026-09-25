@@ -12,6 +12,7 @@ import re
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,7 @@ from backend.repositories.questions import QuestionRepository
 from backend.services.ai import get_ai_service
 from backend.services.ai.base import BaseAIProvider
 from backend.services.entry_types import EntryResult
-from backend.services.rag import QuestionVectorStore
+from backend.services.rag import QuestionVectorStore, SimilarConstraints
 from backend.services.review import ReviewScheduler
 from backend.services.stats import (
     build_accuracy_trend,
@@ -55,6 +56,28 @@ def sanitize_tags(raw: str) -> list[str]:
         if tag and tag not in seen:
             seen.append(tag)
     return seen
+
+
+@dataclass
+class SimilarQuestionsOutcome:
+    """同类题召回结果（P3.1）：items 按来源混合（own/bank/generated）。
+
+    level：实际生效的最宽约束层级（0=全约束 … 4=无约束）；
+    relaxed：是否发生过约束放宽。
+    """
+
+    items: list[QuestionOut]
+    level: int = 0
+
+    @property
+    def relaxed(self) -> bool:
+        return self.level > 0
+
+    def __iter__(self) -> Iterator[QuestionOut]:  # 兼容按列表迭代的旧调用方
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
 
 
 class CoreMixin:
@@ -497,24 +520,133 @@ class QueryMixin:
             q = repo.get_owned(question_id, user_id)
             return QuestionOut.from_orm_model(q) if q else None
 
-    def similar_questions(self, question: QuestionOut, *, user_id: int) -> list[QuestionOut]:
-        """「举一反三」：以本题解析文本为查询，召回最相近的历史错题。"""
+    def similar_questions(
+        self,
+        question: QuestionOut,
+        *,
+        user_id: int,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        difficulty: str | None = None,
+        knowledge_points: list[str] | None = None,
+        strict: bool = False,
+        top_k: int | None = None,
+    ) -> SimilarQuestionsOutcome:
+        """「举一反三」同类题召回（P3.1）：三级回落编排。
+
+        ① 用户错题库约束召回（K12 硬过滤 + 防泄题，宽松模式级联放宽）；
+        ② 不足 top_k 时回落公共种子题库（source="bank"）；
+        ③ 仍不足时由 AI 生成变式题兜底（source="generated"，复用 followup_question 能力）。
+        strict=True 只做第 ① 级全约束召回。旧调用（不传约束参数）语义不变。
+        """
+        top_k = top_k or self.settings.rag_top_k
         query_text = " ".join(
             [*(question.knowledge_points or []), *(question.tags or []), question.content_markdown]
         )
-        hits: list = self.vector_store.similar_questions(
-            query_text, user_ids=[user_id], exclude_id=question.id
+        constraints = SimilarConstraints(
+            subject=subject,
+            grade=grade,
+            region=region,
+            knowledge_points=list(knowledge_points or []),
+            difficulty=difficulty,
         )
-        if not hits:
-            return []
-        ordered_ids = [hit.question_id for hit in hits]
-        with self._session() as repo:
-            pool = {
-                q.id: QuestionOut.from_orm_model(q)
-                for q in repo.list_for_user(user_id)
-                if q.id in set(ordered_ids)
-            }
-        return [pool[qid] for qid in ordered_ids if qid in pool]
+
+        own = self.vector_store.constrained_similar(
+            query_text,
+            user_ids=[user_id],
+            exclude_id=question.id,
+            constraints=constraints,
+            strict=strict,
+            top_k=top_k,
+        )
+        ordered_ids = [hit.question_id for hit in own.hits]
+        pool: dict = {}
+        if ordered_ids:
+            with self._session() as repo:
+                pool = {
+                    q.id: QuestionOut.from_orm_model(q)
+                    for q in repo.list_for_user(user_id)
+                    if q.id in set(ordered_ids)
+                }
+        items = [pool[qid] for qid in ordered_ids if qid in pool]
+        level = own.level
+
+        if not strict and len(items) < top_k:
+            bank = self.vector_store.similar_from_bank(
+                query_text,
+                constraints=constraints,
+                top_k=top_k - len(items),
+            )
+            if bank.hits:
+                level = max(level, bank.level)
+                items.extend(self._bank_hit_as_question(hit, -1 - i) for i, hit in enumerate(bank.hits))
+
+        if not strict and len(items) < top_k:
+            variant = self._generate_variant(question)
+            if variant:
+                items.append(self._generated_as_question(question, variant))
+
+        return SimilarQuestionsOutcome(items=items, level=level)
+
+    @staticmethod
+    def _bank_hit_as_question(hit, pseudo_id: int) -> QuestionOut:
+        """公共题库命中包装为 QuestionOut（id 为负数占位，source="bank" 标记来源）。"""
+        meta = hit.metadata
+        points = [p for p in str(meta.get("knowledge_points") or "").split(",") if p]
+        return QuestionOut(
+            id=pseudo_id,
+            user_id=0,
+            image_path=None,
+            content_markdown=hit.snippet,
+            answer=str(meta.get("answer") or ""),
+            knowledge_points=points,
+            tags=["公共题库"],
+            difficulty=str(meta.get("difficulty") or "medium"),
+            source="bank",
+            subject=str(meta.get("subject") or "math"),
+            grade=meta.get("grade"),
+            region=meta.get("region"),
+            question_type=meta.get("question_type") or None,
+            chapter=meta.get("chapter") or None,
+        )
+
+    @staticmethod
+    def _generated_as_question(question: QuestionOut, variant: str) -> QuestionOut:
+        """AI 变式题包装为 QuestionOut（source="generated"，不落库）。"""
+        return QuestionOut(
+            id=-9999,
+            user_id=0,
+            image_path=None,
+            content_markdown=variant,
+            answer="",
+            knowledge_points=list(question.knowledge_points or [])[:4],
+            tags=["AI 变式"],
+            difficulty=question.difficulty or "medium",
+            source="generated",
+            subject=question.subject or "math",
+            grade=question.grade,
+            region=question.region,
+        )
+
+    def _generate_variant(self, question: QuestionOut) -> str | None:
+        """LLM 变式生成兜底：复用分析管线的 followup_question 能力。"""
+        from backend.services.ai.base import AnalysisContext
+
+        try:
+            analysis = self.ai.analyze_text(
+                question.content_markdown[:4000],
+                context=AnalysisContext(
+                    subject=question.subject or "math",
+                    grade=question.grade,
+                    region=question.region,
+                    textbook_version=question.textbook_version,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - 生成失败仅少一条兜底，不影响召回
+            logger.info("变式生成失败 question=%s: %s", question.id, exc)
+            return None
+        return (analysis.followup_question or "").strip() or None
 
 
 class EditTagMixin:

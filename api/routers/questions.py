@@ -283,12 +283,34 @@ def get_question(question_id: int, user: User = Depends(get_current_user)) -> Qu
 
 @router.get("/{question_id}/similar", response_model=list[QuestionOut])
 def similar_questions(
-    question_id: int, user: User = Depends(get_current_user)
+    question_id: int,
+    subject: str | None = Query(default=None, description="学科硬过滤（如 math）"),
+    grade: int | None = Query(default=None, ge=1, le=12, description="年级硬过滤"),
+    region: str | None = Query(default=None, description="地区硬过滤"),
+    difficulty: str | None = Query(
+        default=None, pattern="^(easy|medium|hard)$", description="难度（±1 档）"
+    ),
+    strict: bool = Query(default=False, description="严格模式：召回不足也不放宽/回落"),
+    user: User = Depends(get_current_user),
 ) -> list[QuestionOut]:
+    """同类题召回（P3.1）：约束参数均可选，不传时与旧行为一致。
+
+    宽松模式下召回不足会级联放宽（先放地区、再放年级），并回落公共题库
+    （source="bank"）与 AI 变式生成（source="generated"）。
+    """
     question = _service().get_question(question_id, user.id)
     if question is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "错题不存在")
-    return _service().similar_questions(question, user_id=user.id)
+    outcome = _service().similar_questions(
+        question,
+        user_id=user.id,
+        subject=subject or None,
+        grade=grade,
+        region=region or None,
+        difficulty=difficulty,
+        strict=strict,
+    )
+    return outcome.items
 
 
 @router.patch("/{question_id}", response_model=QuestionOut)
