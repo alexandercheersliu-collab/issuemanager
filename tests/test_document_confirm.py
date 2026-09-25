@@ -54,7 +54,7 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     service, job_id = _import_and_wait(question_service, student_user, tmp_path)
 
     outcome = service.confirm_import(job_id, student_user.id)
-    assert outcome == {"imported": 2, "already_confirmed": False}
+    assert outcome == {"imported": 2, "skipped": [], "already_confirmed": False}
 
     docs = [
         q
@@ -84,7 +84,7 @@ def test_confirm_import_is_idempotent(question_service, student_user, tmp_path):
 
     before = len(question_service.list_questions(student_user.id, semantic=False))
     second = service.confirm_import(job_id, student_user.id)
-    assert second == {"imported": 2, "already_confirmed": True}
+    assert second == {"imported": 2, "skipped": [], "already_confirmed": True}
     after = len(question_service.list_questions(student_user.id, semantic=False))
     assert after == before  # 重复确认不产生新题
 
@@ -149,7 +149,7 @@ def test_confirm_endpoint(client, headers, tmp_path):
 
     confirm = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
     assert confirm.status_code == 200, confirm.text
-    assert confirm.json() == {"imported": 2, "already_confirmed": False}
+    assert confirm.json() == {"imported": 2, "skipped": [], "already_confirmed": False}
 
     again = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
     assert again.status_code == 200
