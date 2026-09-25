@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from backend.models.schemas import SUBJECT_NAMES
 from frontend.common import get_question_service, go_to, page_header, provider_badges, stat_card
 
 _BLUE = "#2563eb"
@@ -131,7 +132,26 @@ def _render_mastery_trend(trend: list[dict]) -> None:
 
 def render_dashboard(user: dict) -> None:
     service = get_question_service()
-    stats = service.dashboard_stats(user["id"], include_others=user["role"] == "teacher")
+    include_others = user["role"] == "teacher"
+
+    # 按学科筛选（全部 = 不过滤）；选项取自用户错题实际涉及的学科
+    subjects = service.subjects_for_user(user["id"], include_others=include_others)
+    subject = None
+    if len(subjects) > 1:
+        filter_col, _ = st.columns([1, 3])
+        with filter_col:
+            subject_label = st.selectbox(
+                "按学科筛选",
+                ["全部"] + [SUBJECT_NAMES.get(s, s) for s in subjects],
+                index=0,
+                key="dashboard_subject",
+            )
+        if subject_label != "全部":
+            subject = next(
+                (k for k, v in SUBJECT_NAMES.items() if v == subject_label), None
+            )
+
+    stats = service.dashboard_stats(user["id"], include_others=include_others, subject=subject)
 
     st.markdown(
         f"""

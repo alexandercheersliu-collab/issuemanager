@@ -773,6 +773,12 @@ class BackupMixin:
 class StatsMixin:
     """学情统计：个人看板 + 教师报表。"""
 
+    def subjects_for_user(self, user_id: int, *, include_others: bool = False) -> list[str]:
+        """用户错题涉及的全部学科代码（升序），供看板/报表筛选器使用。"""
+        with self._session() as repo:
+            questions = repo.list_for_user(user_id, include_others=include_others)
+        return sorted({q.subject for q in questions if q.subject})
+
     def students_overview(self, teacher_id: int) -> list[dict]:
         """教师报表：每个学生的错题/复习/掌握度/活跃度汇总。仅教师可调用。"""
         with self._user_session() as users:
@@ -835,11 +841,19 @@ class StatsMixin:
         rows.sort(key=lambda r: r["total"], reverse=True)
         return rows
 
-    def dashboard_stats(self, user_id: int, *, include_others: bool = False) -> dict:
+    def dashboard_stats(
+        self, user_id: int, *, include_others: bool = False, subject: str | None = None
+    ) -> dict:
+        """学情看板统计；subject 提供时按学科过滤（错题与关联复习记录同步过滤）。"""
         with self._session() as repo:
             questions = repo.list_for_user(user_id, include_others=include_others)
             outs = [QuestionOut.from_orm_model(q) for q in questions]
             logs = repo.review_logs_for_user(user_id)
+
+        if subject:
+            outs = [o for o in outs if o.subject == subject]
+            scoped_ids = {o.id for o in outs}
+            logs = [log for log in logs if log.question_id in scoped_ids]
 
         logs_by_question: dict[int, list[tuple[str, float]]] = {}
         for log in logs:
