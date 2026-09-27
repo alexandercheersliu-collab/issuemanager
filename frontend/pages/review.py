@@ -17,6 +17,72 @@ from frontend.common import (
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
 
+# 有掌握迹象的评分：推荐发起同类题检测（验证掌握可触发降级拉长间隔）
+_GOOD_GRADES = ("good", "easy")
+# 降级状态机终态：已降级的题不再推荐检测
+_TERMINAL_DEMOTION_STATES = ("demoted",)
+
+
+def pick_detection_candidates(
+    items: list[dict],
+    *,
+    good_grades: tuple[str, ...] = _GOOD_GRADES,
+    terminal_states: tuple[str, ...] = _TERMINAL_DEMOTION_STATES,
+    limit: int = 3,
+) -> list[dict]:
+    """从本轮复习记录中筛出推荐发起同类题检测的候选（纯函数，可单测）。
+
+    items: [{"id", "grade", "demotion_state", "mastered", ...}, ...]
+    规则：评分有掌握迹象（good/easy）+ 未降级（demotion_state 非终态）+ 未掌握归档；
+    保持原顺序，最多 limit 个。
+    """
+    picked: list[dict] = []
+    for item in items:
+        if item.get("grade") not in good_grades:
+            continue
+        if item.get("demotion_state") in terminal_states:
+            continue
+        if item.get("mastered"):
+            continue
+        picked.append(item)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _render_detection_recommendations(service, user: dict, summary: dict) -> None:
+    """复习完成后的「推荐检测」区块：候选题内联发起检测（不跳页）。"""
+    from frontend.pages.notebook import _render_detection
+
+    enriched: list[dict] = []
+    for item in summary.get("items", []):
+        question = service.get_question(item["id"], user["id"])
+        if question is None:
+            continue
+        enriched.append(
+            {
+                "id": question.id,
+                "grade": item["grade"],
+                "demotion_state": question.demotion_state,
+                "mastered": question.mastered,
+                "question": question,
+            }
+        )
+    picked = pick_detection_candidates(enriched)
+    if not picked:
+        st.caption("💪 本轮暂无适合检测的题——答错的题已优先排期，巩固后再来挑战同类题检测！")
+        return
+
+    st.divider()
+    st.markdown("##### 🎯 推荐检测：趁热验证掌握")
+    st.caption("对表现好的错题发起同类题检测，连续 2 次通过可自动降级、拉长复习间隔。")
+    for cand in picked:
+        question = cand["question"]
+        with st.container(border=True):
+            snippet = " ".join(question.content_markdown.split())[:60]
+            st.markdown(f"**#{question.id}** · {snippet}…")
+            _render_detection(service, question, user)
+
 
 def render_review_page(user: dict) -> None:
     service = get_question_service()
@@ -24,16 +90,23 @@ def render_review_page(user: dict) -> None:
 
     due = service.due_questions(user["id"])
     if not due:
-        summary = st.session_state.pop("review_session", None)
+        # 完成总结跨 rerun 保留（内联检测会触发 rerun）：首次弹出时另存，
+        # 新一轮评分时在评分处理器里清掉。
+        fresh = st.session_state.pop("review_session", None)
+        if fresh and fresh.get("graded"):
+            st.session_state["review_done_summary"] = fresh
+        summary = st.session_state.get("review_done_summary")
         if summary and summary.get("graded"):
             grades = summary.get("grades", {})
             strong = grades.get("good", 0) + grades.get("easy", 0)
             rate = round(strong / summary["graded"] * 100) if summary["graded"] else 0
-            st.balloons()
+            if fresh:
+                st.balloons()
             st.success(
                 f"🎉 本轮复习完成！共评分 {summary['graded']} 题，"
                 f"记得/秒懂占 {rate}%。错题已按 SM-2 重新排期，明天见。"
             )
+            _render_detection_recommendations(service, user, summary)
             if st.button("返回学情看板", type="primary"):
                 go_to("dashboard")
         else:
@@ -106,6 +179,12 @@ def render_review_page(user: dict) -> None:
                         session_stats = st.session_state[session_key]
                         session_stats["graded"] += 1
                         session_stats["grades"][grade] = session_stats["grades"].get(grade, 0) + 1
+                        # 逐题记录（id + 评分），供完成总结的「推荐检测」筛选
+                        session_stats.setdefault("items", []).append(
+                            {"id": question.id, "grade": grade}
+                        )
+                        # 新一轮评分开始，上一轮完成总结作废
+                        st.session_state.pop("review_done_summary", None)
                         if updated is not None:
                             when = format_interval(updated.interval_days)
                             msg = f"下次复习：{when}"

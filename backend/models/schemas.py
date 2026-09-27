@@ -102,6 +102,8 @@ class QuestionOut(BaseModel):
     due_at: dt.datetime | None = None
     last_reviewed_at: dt.datetime | None = None
     created_at: dt.datetime | None = None
+    # 同类题检测降级状态（P3.2）：normal / demoted
+    demotion_state: str = "normal"
 
     @classmethod
     def from_orm_model(cls, q) -> QuestionOut:  # noqa: ANN001 - ORM 实例
@@ -136,6 +138,7 @@ class QuestionOut(BaseModel):
             due_at=q.due_at,
             last_reviewed_at=q.last_reviewed_at,
             created_at=q.created_at,
+            demotion_state=getattr(q, "demotion_state", None) or "normal",
         )
 
     @computed_field  # type: ignore[prop-decorator]
