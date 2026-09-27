@@ -264,6 +264,10 @@ CHROMA_MODEL_DIR=D:\workspace\learning-tour\data\models\onnx   # 内置嵌入模
 - 已有部署想整体挪数据目录：先停服务，再跑 `python scripts/migrate_data.py --new-data-dir <新绝对路径>`
   （可加 `--dry-run` 预演），校验通过后按脚本结尾提示更新 `.env`；旧数据默认保留作备份。
 - 公共题库灌入：`python scripts/seed_question_bank.py`（配合 `RAG_BANK_COLLECTION`）。
+- **老库升级表结构**：应用启动走 `create_all`，不会给已存在的表加新列。若旧库在 K12 二次开发前创建
+  （报 `no such column: questions.subject` 之类错误），先备份 `.db` 文件，再执行：
+  `python -m alembic stamp b98b7ec07b27 && python -m alembic upgrade head`
+  （`b98b7ec07b27` 是 jobs 表版本；若启动时 `create_all` 已自动建过空的 `detection_logs`，先删掉该空表再执行）。
 
 ## 🗺️ 路线图 (Roadmap)
 
