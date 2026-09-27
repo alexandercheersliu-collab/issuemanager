@@ -304,6 +304,32 @@
 3. **likely_wrong 只是预判**：仅影响勾选框默认值，不入库、不影响解析；
    模型不返回该字段时全链路按 False 处理，无破坏性变更。
 
+## P5.1 复习完成后推荐检测（2026-09-27）
+
+### 修改的基座已有文件（P5.1）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/pages/review.py` | 复习完成总结新增「🎯 推荐检测」区块：本轮评分逐题记录（`review_session.items`），候选筛选纯函数 `pick_detection_candidates`（good/easy + 未降级 + 未掌握归档，最多 3 题）；候选题复用 notebook 的 `_render_detection` 页内内联完成「发起→作答→判分→降级/回升展示」，不跳页；无候选时显示鼓励文案；完成总结改存 `review_done_summary` 跨 rerun 保留（内联检测触发 rerun 不丢总结），新一轮评分时作废 |
+| `backend/models/schemas.py` | `QuestionOut` 新增 `demotion_state` 字段（默认 "normal"），`from_orm_model` 用 getattr 兜底兼容轻量替身对象 |
+| `README.md` | 功能导览「今日复习」补一句推荐检测 |
+
+### 新增文件（P5.1）
+
+| 文件 | 说明 |
+| --- | --- |
+| `tests/test_review_recommend.py` | 6 例：候选筛选（好评过滤 / 已降级与已掌握排除 / 全错空候选 / limit 与顺序）+ 内联检测服务层流程（好评进候选 → 发起 → 作答判分 → 连续 2 次通过触发降级 → 降级后退出候选；答错清零仍可推荐） |
+
+### P5.1 合入上游注意事项
+
+1. **未改降级引擎**：推荐检测只是复用 `start_detection` /
+   `submit_detection_answer` 的又一入口，降级/回升语义与 notebook 完全一致。
+2. **review.py 依赖 notebook.\_render_detection**：检测交互状态按题隔离
+   （`det_challenge_{id}` / `det_result_{id}`），复习页与错题本同时打开同题
+   检测会共享 session key——属同一用户的同一会话，语义可接受。
+3. **完成总结持久化键**：`review_done_summary` 与 `review_session` 分工
+   （前者仅展示、后者累计本轮），改动复习页状态机时注意两处同步。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
