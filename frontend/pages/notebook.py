@@ -37,7 +37,12 @@ def render_notebook_page(user: dict) -> None:
     with st.container(border=True):
         is_teacher = user["role"] == "teacher"
 
-        col_search, col_tag, col_export = st.columns([3, 2, 2])
+        # 第一行：搜索 + 排序（+ 教师的学生选择）
+        if is_teacher:
+            col_search, col_sort, col_student = st.columns([4, 1.6, 1.6])
+        else:
+            col_search, col_sort = st.columns([5, 1.6])
+            col_student = None
         with col_search:
             keyword = st.text_input(
                 "搜索",
@@ -45,50 +50,60 @@ def render_notebook_page(user: dict) -> None:
                 placeholder="例如：判别式没掌握的题 / 相似三角形（自然语言即可）",
                 key="notebook_search",
             )
-            semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
-            only_due = st.toggle("仅看待复习", value=False, help="隐藏已掌握和尚未到期的错题")
-            only_mastered = st.toggle("仅看已掌握 🏆", value=False, help="只显示已归档的熟题")
+        with col_sort:
             sort_mode = st.selectbox(
                 "排序",
                 ["最新录入", "最早录入", "复习次数最少", "最近复习"],
                 key="notebook_sort",
             )
-        with col_tag:
-            if is_teacher:
-                overview = service.students_overview(user["id"])
-                student_names = ["全部学生"] + [r["username"] for r in overview]
-                default_student = preset_student if preset_student in student_names else "全部学生"
+        if is_teacher:
+            overview = service.students_overview(user["id"])
+            student_names = ["全部学生"] + [r["username"] for r in overview]
+            default_student = preset_student if preset_student in student_names else "全部学生"
+            with col_student:
                 student_name = st.selectbox(
                     "查看学生", student_names,
                     index=student_names.index(default_student),
                     key="notebook_student",
                 )
-                if student_name == "全部学生":
-                    # 教师视角：全部 = 自己 + 所有学生的题
-                    view_user_id = user["id"]
-                    include_others = True
-                else:
-                    view_user_id = next(
-                        (r["user_id"] for r in overview if r["username"] == student_name),
-                        user["id"],
-                    )
-                    include_others = False
-            else:
+            if student_name == "全部学生":
+                # 教师视角：全部 = 自己 + 所有学生的题
                 view_user_id = user["id"]
+                include_others = True
+            else:
+                view_user_id = next(
+                    (r["user_id"] for r in overview if r["username"] == student_name),
+                    user["id"],
+                )
                 include_others = False
+        else:
+            view_user_id = user["id"]
+            include_others = False
 
-            all_questions = service.list_questions(
-                view_user_id, include_others=include_others, semantic=False
-            )
-            all_tags = sorted({t for q in all_questions for t in q.tags})
+        # 第二行：开关一行排布
+        tog1, tog2, tog3, _tog_pad = st.columns([1.2, 1.2, 1.4, 3])
+        with tog1:
+            semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
+        with tog2:
+            only_due = st.toggle("仅看待复习", value=False, help="隐藏已掌握和尚未到期的错题")
+        with tog3:
+            only_mastered = st.toggle("仅看已掌握 🏆", value=False, help="只显示已归档的熟题")
+
+        # 第三行：筛选器紧凑网格（标签 / 学科 / 年级 / 错因 / 来源文档）
+        all_questions = service.list_questions(
+            view_user_id, include_others=include_others, semantic=False
+        )
+        all_tags = sorted({t for q in all_questions for t in q.tags})
+        filt1, filt2, filt3, filt4, filt5 = st.columns(5)
+        with filt1:
             default_index = (
                 (["全部"] + all_tags).index(preset_tag) if preset_tag in all_tags else 0
             )
             tag_filter = st.selectbox(
                 "按标签筛选", ["全部"] + all_tags, index=default_index, key="notebook_tag"
             )
-
-            # K12 元数据筛选：学科 / 年级 / 错因（SQL 下推）
+        with filt2:
+            # K12 元数据筛选：学科（SQL 下推）
             present_subjects = sorted({q.subject for q in all_questions if q.subject})
             subject_options = ["全部"] + [
                 SUBJECT_NAMES.get(s, s) for s in present_subjects
@@ -102,7 +117,7 @@ def render_notebook_page(user: dict) -> None:
                     (k for k, v in SUBJECT_NAMES.items() if v == subject_label),
                     subject_label,
                 )
-
+        with filt3:
             present_grades = sorted({q.grade for q in all_questions if q.grade is not None})
             grade_label = st.selectbox(
                 "按年级筛选",
@@ -113,12 +128,12 @@ def render_notebook_page(user: dict) -> None:
             grade_filter = (
                 int(grade_label.split()[0]) if grade_label != "全部" else None
             )
-
+        with filt4:
             category_label = st.selectbox(
                 "按错因筛选", ["全部", *ERROR_CATEGORIES], index=0, key="notebook_errcat"
             )
             category_filter = None if category_label == "全部" else category_label
-
+        with filt5:
             # 来源文档筛选：整卷导入题落库为 source_doc=文档名#页码，按文档名前缀过滤
             doc_names = sorted(
                 {
@@ -131,8 +146,6 @@ def render_notebook_page(user: dict) -> None:
                 "按来源文档筛选", ["全部"] + doc_names, index=0, key="notebook_source_doc"
             )
             source_doc_filter = None if doc_label == "全部" else doc_label
-        with col_export:
-            st.markdown("<br>", unsafe_allow_html=True)
 
         questions = service.list_questions(
             view_user_id,
