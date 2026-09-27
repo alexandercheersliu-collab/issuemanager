@@ -103,7 +103,7 @@ def _render_sidebar(user: dict) -> str:
             """
             <div class="mm-brand">
               <div class="mm-brand__logo">📘</div>
-              <div class="mm-brand__title">MathMaster Edu</div>
+              <div class="mm-brand__title">Issues Manager</div>
               <div class="mm-brand__tag">视觉大模型 × RAG 错题本</div>
             </div>
             """,

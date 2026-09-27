@@ -96,7 +96,7 @@ def render_share_card(question, base_url: str = "") -> io.BytesIO:
         content = content.replace(token, "")
     content_lines = _wrap(draw_probe, content.strip() or "（无题面）", font_body, _CARD_W - 2 * _MARGIN)
     answer_lines = _wrap(draw_probe, question.answer or "—", font_body, _CARD_W - 2 * _MARGIN)
-    footer = "MathMaster Edu · 智能错题本"
+    footer = "Issues Manager · 智能错题本"
 
     body_h = 34 * len(content_lines) + 24
     answer_h = 34 * len(answer_lines) + 70

@@ -15,7 +15,7 @@ def render_auth_page() -> None:
         """
         <div class="mm-login">
             <div class="mm-login__logo">📘</div>
-            <h1 class="mm-login__title">MathMaster Edu</h1>
+            <h1 class="mm-login__title">Issues Manager</h1>
             <p class="mm-login__subtitle">基于视觉大模型与 RAG 的智能错题本</p>
         </div>
         """,

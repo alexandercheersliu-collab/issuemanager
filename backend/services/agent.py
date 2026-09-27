@@ -17,7 +17,7 @@ logger = get_logger("agent")
 MAX_TOOL_ROUNDS = 8
 
 SYSTEM_PROMPT = (
-    "你是 MathMaster Edu 错题本的学习助手。"
+    "你是 Issues Manager 错题本的学习助手。"
     "用户会用自然语言提出需求（搜索错题、录入题目、安排复习、查看学情等），"
     "你可以调用工具来完成。规则："
     "1. 操作前先想清楚需要哪些信息，不确定就先查询；"

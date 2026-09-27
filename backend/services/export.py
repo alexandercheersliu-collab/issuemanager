@@ -34,7 +34,7 @@ def generate_word_exam(
 
     subtitle = doc.add_paragraph(
         f"{'重做版' if mode == 'redo' else '详解版'} · 共 {len(questions)} 题 · "
-        f"由 MathMaster Edu 自动生成 · {dt.date.today().strftime('%Y-%m-%d')}"
+        f"由 Issues Manager 自动生成 · {dt.date.today().strftime('%Y-%m-%d')}"
     )
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.runs[0].font.size = Pt(10)
@@ -110,7 +110,7 @@ def generate_pdf_exam(
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     stream = io.BytesIO()
 
-    doc = SimpleDocTemplate(stream, pagesize=A4, title=exam_title, author="MathMaster Edu")
+    doc = SimpleDocTemplate(stream, pagesize=A4, title=exam_title, author="Issues Manager")
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "CNTitle", parent=styles["Title"], fontName="STSong-Light", fontSize=18
@@ -125,7 +125,7 @@ def generate_pdf_exam(
     story: list = [
         Paragraph(exam_title, title_style),
         Paragraph(
-            f"共 {len(questions)} 题 · MathMaster Edu 生成 · {dt.date.today():%Y-%m-%d}",
+            f"共 {len(questions)} 题 · Issues Manager 生成 · {dt.date.today():%Y-%m-%d}",
             meta_style,
         ),
         Spacer(1, 0.5 * cm),

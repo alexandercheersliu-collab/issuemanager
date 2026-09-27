@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    app_name: str = "MathMaster Edu"
+    app_name: str = "Issues Manager"
     app_version: str = "2.1.0"
     debug: bool = False
     # 运行时数据根目录（SQLite / 上传原图 / 遥测日志）。
