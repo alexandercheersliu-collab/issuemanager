@@ -433,7 +433,8 @@ def _render_detection(service, q, user) -> None:
                 "🔄 再来一道", key=f"det_next_{q.id}", type="primary", width="stretch"
             ):
                 try:
-                    new_challenge = service.start_detection(q.id, user["id"])
+                    with st.spinner("正在出题…（首次或题库未命中时需 AI 生成，约 10–30 秒）"):
+                        new_challenge = service.start_detection(q.id, user["id"])
                 except (LookupError, ValueError) as exc:
                     st.error(str(exc))
                 else:
@@ -486,7 +487,8 @@ def _render_detection(service, q, user) -> None:
         )
     if st.button("发起检测（推送一道同类题）", key=f"det_start_{q.id}", width="stretch"):
         try:
-            st.session_state[challenge_key] = service.start_detection(q.id, user["id"])
+            with st.spinner("正在出题…（首次或题库未命中时需 AI 生成，约 10–30 秒）"):
+                st.session_state[challenge_key] = service.start_detection(q.id, user["id"])
         except (LookupError, ValueError) as exc:
             st.error(str(exc))
             return
