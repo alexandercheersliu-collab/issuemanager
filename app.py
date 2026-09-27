@@ -7,7 +7,6 @@ from __future__ import annotations
 import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，必须在其他 import 之前
 
 import streamlit as st
-import streamlit_antd_components as sac
 
 from backend.config import get_settings
 from frontend.common import current_user, load_css, logout_user
@@ -71,17 +70,17 @@ _TEACHER_PAGES = {
     t("nav.students"): "students",
 }
 
-# 侧边栏导航图标（Bootstrap Icons 名，streamlit_antd_components 渲染）
+# 侧边栏导航图标（emoji，深浅色通吃；自定义组件 iframe 无法跟随主题故弃用 sac.menu）
 _NAV_ICONS = {
-    "dashboard": "house",
-    "tutor": "camera",
-    "import_doc": "file-earmark-arrow-up",
-    "notebook": "journal-text",
-    "review": "arrow-repeat",
-    "graph": "diagram-3",
-    "students": "people",
-    "assistant": "robot",
-    "settings": "gear",
+    "dashboard": "🏠",
+    "tutor": "📸",
+    "import_doc": "📄",
+    "notebook": "📒",
+    "review": "🔁",
+    "graph": "🧠",
+    "students": "👥",
+    "assistant": "🤖",
+    "settings": "⚙️",
 }
 
 
@@ -113,13 +112,12 @@ def _render_sidebar(user: dict) -> str:
         pending = st.session_state.pop("_pending_nav", None)  # 必须在菜单实例化前写入其 key
         if pending:
             st.session_state["nav"] = pending
-        menu = sac.menu(
-            [sac.MenuItem(label, icon=_NAV_ICONS.get(key)) for label, key in visible.items()],
-            format_func="title",
-            color="#2563eb",
-            variant="light",
-            open_all=True,
+        menu = st.radio(
+            "导航",
+            list(visible.keys()),
+            format_func=lambda lbl: f"{_NAV_ICONS.get(visible[lbl], '')} {lbl}",
             key="nav",
+            label_visibility="collapsed",
         )
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown(

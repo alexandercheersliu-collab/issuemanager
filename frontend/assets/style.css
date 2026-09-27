@@ -99,6 +99,31 @@ section[data-testid="stSidebar"] {
 .mm-brand__title { font-size: 1.12rem; font-weight: 700; color: var(--mm-navy); }
 .mm-brand__tag { font-size: 0.8rem; color: var(--mm-text-2); margin-top: 0.15rem; }
 
+/* 侧边栏导航（st.radio 菜单化：隐藏圆圈、整行 hover/active 态）
+   DOM：stRadioGroup > div[data-selected] > label[stRadioOption] > span(隐藏 input) + div > [圆圈, 文本] */
+section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] {
+  gap: 2px;
+}
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"] {
+  width: 100%;
+  padding: 0.5rem 0.85rem;
+  border-radius: var(--mm-radius-sm);
+  cursor: pointer;
+  color: var(--mm-text);
+  transition: background-color 0.12s ease;
+}
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:hover {
+  background: var(--mm-bg);
+}
+section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] > div[data-selected="true"] > label {
+  background: var(--mm-primary-soft);
+  color: var(--mm-primary);
+  font-weight: 600;
+}
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:first-child {
+  display: none;  /* 单选圆圈 */
+}
+
 /* 用户卡片 */
 .mm-user-card {
   display: flex;
