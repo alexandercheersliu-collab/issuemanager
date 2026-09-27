@@ -71,6 +71,19 @@ _TEACHER_PAGES = {
     t("nav.students"): "students",
 }
 
+# 侧边栏导航图标（Bootstrap Icons 名，streamlit_antd_components 渲染）
+_NAV_ICONS = {
+    "dashboard": "house",
+    "tutor": "camera",
+    "import_doc": "file-earmark-arrow-up",
+    "notebook": "journal-text",
+    "review": "arrow-repeat",
+    "graph": "diagram-3",
+    "students": "people",
+    "assistant": "robot",
+    "settings": "gear",
+}
+
 
 def _render_sidebar(user: dict) -> str:
     from frontend.common import initials
@@ -89,9 +102,10 @@ def _render_sidebar(user: dict) -> str:
     with st.sidebar:
         st.markdown(
             """
-            <div style="text-align:center;padding:1.2rem 0 0.6rem 0">
-              <div style="font-size:1.15rem;font-weight:700;color:#1a365d">📘 MathMaster Edu</div>
-              <div class="mm-muted">视觉大模型 × RAG 错题本</div>
+            <div class="mm-brand">
+              <div class="mm-brand__logo">📘</div>
+              <div class="mm-brand__title">MathMaster Edu</div>
+              <div class="mm-brand__tag">视觉大模型 × RAG 错题本</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -100,7 +114,7 @@ def _render_sidebar(user: dict) -> str:
         if pending:
             st.session_state["nav"] = pending
         menu = sac.menu(
-            [sac.MenuItem(label) for label in visible],
+            [sac.MenuItem(label, icon=_NAV_ICONS.get(key)) for label, key in visible.items()],
             format_func="title",
             color="#2563eb",
             variant="light",
@@ -110,16 +124,14 @@ def _render_sidebar(user: dict) -> str:
         st.markdown("<hr>", unsafe_allow_html=True)
         st.markdown(
             f"""
-            <div style="display:flex;align-items:center;gap:0.6rem">
+            <div class="mm-user-card">
               <div class="user-avatar">{initials(user['username'])}</div>
               <div>
-                <div style="font-weight:600;font-size:0.92rem">{user['username']}</div>
-                <div class="mm-muted">{user['role']}</div>
+                <div class="mm-user-card__name">{user['username']}</div>
+                <div class="mm-user-card__role">{"教师" if user['role'] == "teacher" else "学生"}</div>
               </div>
             </div>
-            <div class="mm-muted" style="text-align:center;margin-top:0.8rem;font-size:0.75rem">
-              v{settings.app_version}
-            </div>
+            <div class="mm-version">v{settings.app_version}</div>
             """,
             unsafe_allow_html=True,
         )

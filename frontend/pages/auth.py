@@ -14,6 +14,7 @@ def render_auth_page() -> None:
     st.markdown(
         """
         <div class="mm-login">
+            <div class="mm-login__logo">📘</div>
             <h1 class="mm-login__title">MathMaster Edu</h1>
             <p class="mm-login__subtitle">基于视觉大模型与 RAG 的智能错题本</p>
         </div>
@@ -21,25 +22,27 @@ def render_auth_page() -> None:
         unsafe_allow_html=True,
     )
 
-    tab_login, tab_register = st.tabs(["登录", "注册"])
+    _pad_l, center, _pad_r = st.columns([1, 1.1, 1])
+    with center:
+        tab_login, tab_register = st.tabs(["登录", "注册"])
 
     st.markdown(
         """
-        <div style="max-width:640px;margin:1.2rem auto 0 auto;display:flex;gap:0.8rem">
-          <div style="flex:1;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:0.9rem;text-align:center">
-            <div style="font-size:1.5rem">📸</div>
-            <div style="font-weight:600;color:#1a365d;margin-top:0.2rem">拍照录题</div>
-            <div style="font-size:0.8rem;color:#64748b;margin-top:0.2rem">视觉大模型识别手写题，自动生成考点解析</div>
+        <div class="mm-features">
+          <div class="mm-feature-card">
+            <div class="mm-feature-card__icon">📸</div>
+            <div class="mm-feature-card__title">拍照录题</div>
+            <div class="mm-feature-card__desc">视觉大模型识别手写题，自动生成考点解析</div>
           </div>
-          <div style="flex:1;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:0.9rem;text-align:center">
-            <div style="font-size:1.5rem">🔁</div>
-            <div style="font-weight:600;color:#1a365d;margin-top:0.2rem">间隔重复</div>
-            <div style="font-size:0.8rem;color:#64748b;margin-top:0.2rem">SM-2 算法科学排期，对抗遗忘曲线</div>
+          <div class="mm-feature-card">
+            <div class="mm-feature-card__icon">🔁</div>
+            <div class="mm-feature-card__title">间隔重复</div>
+            <div class="mm-feature-card__desc">SM-2 算法科学排期，对抗遗忘曲线</div>
           </div>
-          <div style="flex:1;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:0.9rem;text-align:center">
-            <div style="font-size:1.5rem">🧠</div>
-            <div style="font-weight:600;color:#1a365d;margin-top:0.2rem">知识图谱</div>
-            <div style="font-size:0.8rem;color:#64748b;margin-top:0.2rem">RAG 向量检索举一反三，薄弱点一目了然</div>
+          <div class="mm-feature-card">
+            <div class="mm-feature-card__icon">🧠</div>
+            <div class="mm-feature-card__title">知识图谱</div>
+            <div class="mm-feature-card__desc">RAG 向量检索举一反三，薄弱点一目了然</div>
           </div>
         </div>
         """,
