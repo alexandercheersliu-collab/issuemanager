@@ -81,6 +81,18 @@ class SimilarQuestionsOutcome:
         return len(self.items)
 
 
+# 出题进度回调消息（三级回落各一条，真实走到哪步报哪步）
+PROGRESS_RECALL_OWN = "🔍 正在从你的错题库检索同类题…"
+PROGRESS_RECALL_BANK = "📚 你的错题库候选不足，正在检索公共题库…"
+PROGRESS_RECALL_GENERATE = "✨ 题库候选不足，正在让 AI 生成一道变式题（约 10–30 秒）…"
+
+
+def emit_progress(on_progress: Callable[[str], None] | None, message: str) -> None:
+    """进度回调打点：回调为 None 时静默（不影响既有调用方）。"""
+    if on_progress is not None:
+        on_progress(message)
+
+
 class CoreMixin:
     """共享基础设施：配置、会话、AI 客户端、向量库、图片落盘、索引。"""
 
@@ -593,6 +605,7 @@ class QueryMixin:
         knowledge_points: list[str] | None = None,
         strict: bool = False,
         top_k: int | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> SimilarQuestionsOutcome:
         """「举一反三」同类题召回（P3.1）：三级回落编排。
 
@@ -600,6 +613,7 @@ class QueryMixin:
         ② 不足 top_k 时回落公共种子题库（source="bank"）；
         ③ 仍不足时由 AI 生成变式题兜底（source="generated"，复用 followup_question 能力）。
         strict=True 只做第 ① 级全约束召回。旧调用（不传约束参数）语义不变。
+        on_progress：可选进度回调，真实走到哪级报哪级（未走到的级别不报）。
         """
         top_k = top_k or self.settings.rag_top_k
         query_text = " ".join(
@@ -613,6 +627,7 @@ class QueryMixin:
             difficulty=difficulty,
         )
 
+        emit_progress(on_progress, PROGRESS_RECALL_OWN)
         own = self.vector_store.constrained_similar(
             query_text,
             user_ids=[user_id],
@@ -634,6 +649,7 @@ class QueryMixin:
         level = own.level
 
         if not strict and len(items) < top_k:
+            emit_progress(on_progress, PROGRESS_RECALL_BANK)
             bank = self.vector_store.similar_from_bank(
                 query_text,
                 constraints=constraints,
@@ -644,6 +660,7 @@ class QueryMixin:
                 items.extend(self._bank_hit_as_question(hit, -1 - i) for i, hit in enumerate(bank.hits))
 
         if not strict and len(items) < top_k:
+            emit_progress(on_progress, PROGRESS_RECALL_GENERATE)
             variant = self._generate_variant(question)
             if variant:
                 items.append(self._generated_as_question(question, variant))

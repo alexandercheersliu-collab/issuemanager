@@ -11,15 +11,21 @@ from __future__ import annotations
 import hashlib
 import random
 import unicodedata
+from collections.abc import Callable
 
 from backend.models.schemas import QuestionOut
 from backend.services.demotion import RESULT_CORRECT, RESULT_WRONG, DemotionService
+from backend.services.question_mixins import emit_progress
 from backend.utils.logging import get_logger
 
 logger = get_logger("detection")
 
 # 发起检测时的候选召回规模：取 top-k 后再去重随机，避免总是推 top-1 同一道题
 DETECTION_CANDIDATE_TOP_K = 10
+
+# 出题进度回调消息（recall 阶段的三条在 question_mixins 中定义）
+PROGRESS_VARIANT_ANSWER = "📝 正在为变式题生成参考答案…"
+PROGRESS_DONE = "✅ 出题完成"
 
 
 def _normalize_answer(text: str | None) -> str:
@@ -92,7 +98,13 @@ class DetectionMixin:
     def _demotion(self) -> DemotionService:
         return DemotionService(self.settings, session_factory=self._session_factory)
 
-    def start_detection(self, question_id: int, user_id: int) -> dict:
+    def start_detection(
+        self,
+        question_id: int,
+        user_id: int,
+        *,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> dict:
         """对一道错题发起同类题检测：按题目自身 K12 元数据约束召回一道同类题。
 
         宽松模式三级回落（own → bank → generated）保证总有题可测；
@@ -101,6 +113,9 @@ class DetectionMixin:
         推题策略：召回 top-k 候选后排除本题检测历史已考过的 tested_ref，
         从剩余候选中随机抽一（见 pick_tested_candidate 的三级放宽），
         避免反复发起总推 top-1 同一道题。
+
+        on_progress：可选进度回调（Callable[[str], None]），在召回各级回落、
+        变式参考答案生成与完成时打点；默认 None 不影响既有调用。
         """
         question = self.get_question(question_id, user_id)
         if question is None:
@@ -115,6 +130,7 @@ class DetectionMixin:
             difficulty=question.difficulty,
             knowledge_points=list(question.knowledge_points or []),
             top_k=DETECTION_CANDIDATE_TOP_K,
+            on_progress=on_progress,
         )
         if not outcome.items:
             raise LookupError("暂无可用的同类题（召回与生成均失败）")
@@ -126,6 +142,7 @@ class DetectionMixin:
 
         tested_answer = tested.answer
         if tested.source == "generated":
+            emit_progress(on_progress, PROGRESS_VARIANT_ANSWER)
             tested_answer = self._generate_reference_answer(tested, question)
 
         log_id = self._demotion().begin(
@@ -136,6 +153,7 @@ class DetectionMixin:
             tested_content=tested.content_markdown,
             tested_answer=tested_answer,
         )
+        emit_progress(on_progress, PROGRESS_DONE)
         logger.info(
             "发起检测 question=%s user=%s tested=%s source=%s",
             question_id, user_id, log_id, tested.source,

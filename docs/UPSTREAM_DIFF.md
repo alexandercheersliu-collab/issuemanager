@@ -409,3 +409,31 @@
    不依赖 Streamlit；「再来一道」的状态迁移（pop result → set challenge →
    rerun）在 `_render_detection` 内，改状态机时注意 challenge_key/result_key
    配对。
+
+## P5.4 同类题检测：出题进度分步反馈（2026-09-27）
+
+### 修改的基座已有文件（P5.4）
+
+| 文件 | 说明 |
+| --- | --- |
+| `backend/services/question_mixins.py` | `similar_questions` 新增可选 `on_progress: Callable[[str], None] \| None`；三级回落各一条进度消息常量（`PROGRESS_RECALL_OWN` / `PROGRESS_RECALL_BANK` / `PROGRESS_RECALL_GENERATE`），真实走到哪级报哪级；新增 `emit_progress` 打点助手（回调为 None 时静默） |
+| `backend/services/detection.py` | `start_detection` 新增可选 `on_progress` 并透传给 `similar_questions`；变式题参考答案快照前报 `PROGRESS_VARIANT_ANSWER`，出题结束报 `PROGRESS_DONE` |
+| `frontend/pages/notebook.py` | 「发起检测」「🔄 再来一道」两处 st.spinner 改为 `st.status("正在出题…", expanded=True)` 分步展示（on_progress 消息逐条 st.write 进 status），完成 `state="complete"` 收起、异常 `state="error"`；抽取 `_start_detection_with_status` 复用；review.py 推荐检测区块复用 `_render_detection` 自动生效 |
+
+### 新增文件（P5.4）
+
+| 文件 | 说明 |
+| --- | --- |
+| `tests/test_detection_progress.py` | 4 例：错题库充足只报检索+完成 / 公共题库路径四步（不含参考答案生成）/ AI 变式路径完整五步 / 不传回调静默兼容 |
+
+### P5.4 合入上游注意事项
+
+1. **回调消息文案以模块常量为准**：测试断言常量而非字面量，微调文案不碎测试；
+   前端只负责展示，不感知文案内容。
+2. **✨ 生成步骤在多数发起中都会出现**：检测召回 top_k=10，库内候选不足 10
+   道即触发变式补位（既有回落语义），因此「AI 生成变式题」步骤并非只在
+   题库全空时出现；文案已用「候选不足」而非「未命中」保持准确。
+3. **st.write 依赖 st.status 的 dg 栈**：`on_progress=lambda msg: st.write(msg)`
+   只在 `with st.status(...)` 动态作用域内才会写入 status 容器；回调是同步
+   调用，跨线程使用需另寻通道。
+4. **API 路由不受影响**：`api/routers/detection.py` 不传回调，默认 None 静默。

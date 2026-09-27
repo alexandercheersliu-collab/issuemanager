@@ -400,11 +400,30 @@ def detection_progress_text(streak: int, threshold: int, state: str) -> str:
     return text
 
 
+def _start_detection_with_status(service, q, user) -> dict | None:
+    """发起检测并用 st.status 分步展示出题进度（走哪步报哪步）。
+
+    成功返回 challenge dict；失败在 status 上标记 error 并返回 None。
+    """
+    with st.status("正在出题…", expanded=True) as status:
+        try:
+            challenge = service.start_detection(
+                q.id, user["id"], on_progress=lambda msg: st.write(msg)
+            )
+        except (LookupError, ValueError) as exc:
+            status.update(label="❌ 出题失败", state="error")
+            st.error(str(exc))
+            return None
+        status.update(label="✅ 出题完成", state="complete", expanded=False)
+        return challenge
+
+
 def _render_detection(service, q, user) -> None:
     """同类题检测（P3.2）：发起 → 作答判分 → 降级/回升联动展示。
 
     连续刷题流：判分后「🔄 再来一道」直接为同一原错题内联发起新一轮
     （走去重随机推题），无需返回重新发起；「🏁 结束检测」返回入口视图。
+    出题等待用 st.status 分步展示进度（on_progress 回调逐条写入）。
     """
     st.markdown("**🎯 同类题检测**")
     challenge_key = f"det_challenge_{q.id}"
@@ -432,12 +451,8 @@ def _render_detection(service, q, user) -> None:
             if st.button(
                 "🔄 再来一道", key=f"det_next_{q.id}", type="primary", width="stretch"
             ):
-                try:
-                    with st.spinner("正在出题…（首次或题库未命中时需 AI 生成，约 10–30 秒）"):
-                        new_challenge = service.start_detection(q.id, user["id"])
-                except (LookupError, ValueError) as exc:
-                    st.error(str(exc))
-                else:
+                new_challenge = _start_detection_with_status(service, q, user)
+                if new_challenge is not None:
                     st.session_state.pop(result_key, None)
                     st.session_state[challenge_key] = new_challenge
                     st.rerun()
@@ -486,12 +501,10 @@ def _render_detection(service, q, user) -> None:
             + (" · 当前已降级 🏅" if latest["state"] == "demoted" else "")
         )
     if st.button("发起检测（推送一道同类题）", key=f"det_start_{q.id}", width="stretch"):
-        try:
-            with st.spinner("正在出题…（首次或题库未命中时需 AI 生成，约 10–30 秒）"):
-                st.session_state[challenge_key] = service.start_detection(q.id, user["id"])
-        except (LookupError, ValueError) as exc:
-            st.error(str(exc))
+        challenge = _start_detection_with_status(service, q, user)
+        if challenge is None:
             return
+        st.session_state[challenge_key] = challenge
         st.rerun()
 
 
