@@ -344,3 +344,34 @@
    `AttributeError: 'Server' object has no attribute 'list_tools'`，为基座
    代码与已安装 `mcp` 库版本不匹配所致，基线提交 `dc76d65` 上即可复现，
    待后续升级 mcp 依赖或适配 API 时处理。
+
+## P5.2 UI 全面美化（2026-09-27）
+
+### 修改的基座已有文件（P5.2）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/assets/style.css` | 全面重写为 `--mm-*` CSS 变量设计系统（浅色 `:root` + 旧变量别名保留）；组件统一：按钮/tabs/expander/输入框/进度条/dropzone 虚线大卡/徽标/mm-candidate/mm-brand/mm-user-card/mm-feature-card/mm-login\_\_logo；radio 导航菜单化（隐藏圆圈、active 高亮） |
+| `frontend/theme.py` | 深色模式改为同名 `--mm-*` 变量覆盖 + 原生组件补丁（header/次按钮/tabs/下拉/toggle/dropzone 按钮与说明文字）；新增 `_DARK_JS`：借 `components.html` 同源脚本把 sac 评分按钮 iframe 背景改透明、文字改浅色 |
+| `.streamlit/config.toml` | `backgroundColor` 改 `#f5f7fb`（配合浅色设计系统底色） |
+| `app.py` | 侧边栏导航从 `sac.menu` 换成 `st.radio`（sac iframe 深色白底且文本点击不冒泡），`_NAV_ICONS` emoji 图标 map 保持 label 语义，`go_to`/`_pending_nav` 机制不变；品牌区 `.mm-brand` 渐变 logo + 用户卡片 `.mm-user-card`（角色显示中文「教师/学生」） |
+| `frontend/pages/auth.py` | 登录页居中卡片化：logo + `.mm-features` 特性卡 + tabs 居中 columns `[1,1.1,1]` |
+| `frontend/common.py` | `stat_card()` 新增 `icon`/`variant` 参数（variant: accent/teal/ok/warn），向后兼容 |
+| `frontend/pages/dashboard.py` | 统计卡带图标；图表区包 `st.container(border=True)`；plotly 颜色 helper `_chart_text()`/`_chart_grid()` 跟随 dark\_mode |
+| `frontend/pages/tutor.py` | dropzone 通栏、标签+hint 两列（hint 改 text\_input）、K12 元数据收 expander「🎓 学科/年级/教材等补充信息（可选）」、切题候选每题包 `st.container(border=True)` |
+| `frontend/pages/notebook.py` | 筛选区重排：行1 搜索+排序（+教师学生选择）、行2 三个 toggle、行3 五个筛选下拉 |
+| `frontend/pages/review.py` | 闪卡居中（columns `[0.7,2.6,0.7]`）、评分按钮改 `sac.buttons` 四色大按钮（again 红/hard 橙/good 蓝/easy 绿，`variant="filled"`, `return_index=True`）、间隔预览合并一行 caption |
+
+### P5.2 合入上游注意事项
+
+1. **st.radio 导航的 CSS 依赖 Streamlit 1.64 react-aria DOM 结构**
+   （`div[data-testid="stRadioGroup"] > div[data-selected] > label[data-testid="stRadioOption"]`）；
+   升级 Streamlit 大版本时需复查隐藏圆圈与 active 高亮两条规则。
+2. **sac 仅用于复习页评分按钮**：导航已弃用 sac.menu；`_DARK_JS` 的同源
+   iframe 补丁只在 `dark_mode` 开启时注入，若 sac 版本更换 iframe title
+   命名（`streamlit_antd_components`），补丁选择器需同步。
+3. **`stat_card` 新参数向后兼容**：不传 `icon`/`variant` 时渲染与旧版一致。
+4. **plotly 深色适配只覆盖 dashboard**：graph 页图表仍用默认配色，深色下
+   可读性依赖全局 CSS，未逐图验证。
+5. **keyboard\_shortcuts 与 sac 评分按钮**：快捷键按按钮文本点击，sac 渲染
+   真实 `<button>` 理论兼容，但未实测逐键触发。
