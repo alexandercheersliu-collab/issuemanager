@@ -5,6 +5,7 @@ import datetime as dt
 import os
 
 import streamlit as st
+import streamlit_antd_components as sac
 
 from backend.services.review import GRADE_ORDER, format_interval
 from frontend.common import (
@@ -16,6 +17,8 @@ from frontend.common import (
 )
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
+# 评分按钮四色：忘了红 / 勉强橙 / 记得蓝 / 秒懂绿
+_GRADE_COLORS = {"again": "red", "hard": "orange", "good": "blue", "easy": "green"}
 
 # 有掌握迹象的评分：推荐发起同类题检测（验证掌握可触发降级拉长间隔）
 _GOOD_GRADES = ("good", "easy")
@@ -142,64 +145,81 @@ def render_review_page(user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    with st.container(border=True):
-        reveal_key = f"reveal_{question.id}"  # 按题隔离，避免上一题状态泄漏
-        if question.last_reviewed_at:
-            last = question.last_reviewed_at
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=dt.timezone.utc)
-            days_ago = (dt.datetime.now(dt.timezone.utc) - last).days
-            st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
-        if question.image_path and os.path.exists(question.image_path):
-            st.image(question.image_path, width=460)
-        else:
-            st.markdown(question.content_markdown[:220], unsafe_allow_html=True)
-            st.caption("（本题无原图，请根据题面回忆解法）")
+    # 闪卡居中加大：窄屏下中间列自然占满
+    _card_l, card_col, _card_r = st.columns([0.7, 2.6, 0.7])
+    with card_col:
+        with st.container(border=True):
+            reveal_key = f"reveal_{question.id}"  # 按题隔离，避免上一题状态泄漏
+            if question.last_reviewed_at:
+                last = question.last_reviewed_at
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=dt.timezone.utc)
+                days_ago = (dt.datetime.now(dt.timezone.utc) - last).days
+                st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
+            if question.image_path and os.path.exists(question.image_path):
+                st.image(question.image_path, width=460)
+            else:
+                st.markdown(question.content_markdown[:220], unsafe_allow_html=True)
+                st.caption("（本题无原图，请根据题面回忆解法）")
 
-        if st.button("显示解析", type="secondary"):
-            st.session_state[reveal_key] = True
+            if st.button("显示解析", type="secondary", width="stretch"):
+                st.session_state[reveal_key] = True
 
-        if st.session_state.get(reveal_key):
-            st.divider()
-            st.markdown(question.content_markdown, unsafe_allow_html=True)
-            st.markdown(f"**答案**：{question.answer}")
-            st.markdown("##### 这道题你掌握得如何？")
-            grade_cols = st.columns(4)
-            for col, grade in zip(grade_cols, GRADE_ORDER, strict=False):
-                with col:
+            if st.session_state.get(reveal_key):
+                st.divider()
+                st.markdown(question.content_markdown, unsafe_allow_html=True)
+                st.markdown(f"**答案**：{question.answer}")
+                # 各档评分的下次间隔预览（一行紧凑展示）
+                previews = []
+                for grade in GRADE_ORDER:
                     preview = service.scheduler.next_schedule(
                         grade=grade,
                         reps=question.reps,
                         ease=question.ease,
                         interval_days=question.interval_days,
                     )
-                    if st.button(_GRADE_LABELS[grade], key=f"grade_{grade}", width="stretch"):
-                        updated = service.grade_review(question.id, user["id"], grade)
-                        st.session_state[reveal_key] = False
-                        session_stats = st.session_state[session_key]
-                        session_stats["graded"] += 1
-                        session_stats["grades"][grade] = session_stats["grades"].get(grade, 0) + 1
-                        # 逐题记录（id + 评分），供完成总结的「推荐检测」筛选
-                        session_stats.setdefault("items", []).append(
-                            {"id": question.id, "grade": grade}
-                        )
-                        # 新一轮评分开始，上一轮完成总结作废
-                        st.session_state.pop("review_done_summary", None)
-                        if updated is not None:
-                            when = format_interval(updated.interval_days)
-                            msg = f"下次复习：{when}"
-                            if updated.mastered:
-                                msg += " · 🎉 已掌握归档，移出复习池"
-                            st.session_state["last_schedule_msg"] = msg
-                        st.session_state[idx_key] = cursor
-                        st.rerun()
-                    st.caption(format_interval(preview.next_interval))  # 评分后该题移出待复习队列，游标原地指向下一题
-        else:
-            skip_col, _ = st.columns([1, 2])
-            with skip_col:
-                if st.button("⏭️ 先跳过这道", width="stretch"):
-                    st.session_state[idx_key] = (cursor + 1) % len(due)
+                    previews.append(f"{_GRADE_LABELS[grade]} {format_interval(preview.next_interval)}")
+                clicked = sac.buttons(
+                    [
+                        sac.ButtonsItem(_GRADE_LABELS[g], color=_GRADE_COLORS[g])
+                        for g in GRADE_ORDER
+                    ],
+                    index=None,
+                    label="这道题你掌握得如何？",
+                    variant="filled",
+                    size="lg",
+                    use_container_width=True,
+                    return_index=True,
+                    key=f"grade_btns_{question.id}",
+                )
+                st.caption(" · ".join(previews))
+                if clicked is not None:
+                    grade = GRADE_ORDER[clicked]
+                    updated = service.grade_review(question.id, user["id"], grade)
+                    st.session_state[reveal_key] = False
+                    session_stats = st.session_state[session_key]
+                    session_stats["graded"] += 1
+                    session_stats["grades"][grade] = session_stats["grades"].get(grade, 0) + 1
+                    # 逐题记录（id + 评分），供完成总结的「推荐检测」筛选
+                    session_stats.setdefault("items", []).append(
+                        {"id": question.id, "grade": grade}
+                    )
+                    # 新一轮评分开始，上一轮完成总结作废
+                    st.session_state.pop("review_done_summary", None)
+                    if updated is not None:
+                        when = format_interval(updated.interval_days)
+                        msg = f"下次复习：{when}"
+                        if updated.mastered:
+                            msg += " · 🎉 已掌握归档，移出复习池"
+                        st.session_state["last_schedule_msg"] = msg
+                    st.session_state[idx_key] = cursor
                     st.rerun()
+            else:
+                skip_col, _ = st.columns([1, 2])
+                with skip_col:
+                    if st.button("⏭️ 先跳过这道", width="stretch"):
+                        st.session_state[idx_key] = (cursor + 1) % len(due)
+                        st.rerun()
 
     if st.session_state.get("last_schedule_msg"):
         st.caption(st.session_state["last_schedule_msg"])
