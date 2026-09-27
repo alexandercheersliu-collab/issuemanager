@@ -375,3 +375,37 @@
    可读性依赖全局 CSS，未逐图验证。
 5. **keyboard\_shortcuts 与 sac 评分按钮**：快捷键按按钮文本点击，sac 渲染
    真实 `<button>` 理论兼容，但未实测逐键触发。
+
+## P5.3 同类题检测：推题去重随机化 + 连续刷题流（2026-09-27）
+
+### 修改的基座已有文件（P5.3）
+
+| 文件 | 说明 |
+| --- | --- |
+| `backend/services/detection.py` | `start_detection` 候选召回 top_k 1→10（`DETECTION_CANDIDATE_TOP_K`），排除本题 detection_logs 已考过的 tested_ref 后随机抽一；新增纯函数 `pick_tested_candidate`（三级策略见下）；`submit_detection_answer` 返回新增 `threshold` 字段 |
+| `backend/services/demotion.py` | `DemotionService` 新增 `tested_refs(question_id, user_id)`：本题检测历史全部 tested_ref 集合（含 pending 与 bank:/gen: 前缀） |
+| `frontend/pages/notebook.py` | `_render_detection` 判分结果区：「🔄 再测一题」改为「🔄 再来一道」（直接内联发起新一轮检测，答一道→看结果→下一道连续刷题）+「🏁 结束检测」返回入口视图；新增纯函数 `detection_progress_text` 实时展示连续通过 x/阈值；达阈值降级时 st.success 明确展示；已降级后保留「再来一道」（继续巩固，答错自动回升）；review.py 推荐检测区块复用同一组件自动获得新流程 |
+| `tests/test_detection.py` | `test_submit_answer_and_demotion_e2e` 改两道不同 bank 题（同答案），并断言两次推题 tested_ref 不同 |
+| `tests/test_review_recommend.py` / `tests/test_detection_stats.py` | 内联检测/统计用例各补一道不同 bank 题，适配去重随机推题（第二次发起不再重推第一题） |
+
+### 新增文件（P5.3）
+
+| 文件 | 说明 |
+| --- | --- |
+| `tests/test_detection_variety.py` | 8 例：pick 纯函数（库内优先/变式兜底/全考过放宽重考/固定种子随机不总同一道）+ 服务层连续发起 4 次不重复、耗尽后第 5 次放宽有题可推 + 连续作答流（答错清零→两道新题答对→计数累计→达阈值降级）+ 进度文案 |
+
+### P5.3 合入上游注意事项
+
+1. **推题三级策略（pick_tested_candidate 纯函数）**：① 库内/公共题库未考过
+   候选随机抽一；② 都考过则优先用本次新生成的 AI 变式（每次生成本身就是
+   新题）；③ 变式也考过（内容哈希相同）则放宽从已考过的库内题随机重考——
+   检测本质是巩固训练，重考优于无题可推。
+2. **库内题优先于变式**：随机池不含 generated（其参考答案为 AI 即时生成，
+   可靠性低于库内快照），仅作兜底；上游若想让变式进入随机池，改
+   `pick_tested_candidate` 一处即可。
+3. **tested_refs 含 pending**：发起即登记（未作答也算已推），放弃检测后
+   同一题不会再推，直至候选耗尽走放宽；这是有意为之。
+4. **界面纯函数约定**：`detection_progress_text` / `describe_detection_outcome`
+   不依赖 Streamlit；「再来一道」的状态迁移（pop result → set challenge →
+   rerun）在 `_render_detection` 内，改状态机时注意 challenge_key/result_key
+   配对。

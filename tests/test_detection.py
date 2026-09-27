@@ -118,10 +118,27 @@ def test_start_detection_generated_fallback_gets_answer(
 
 
 def test_submit_answer_and_demotion_e2e(question_service, student_user, monkeypatch):
-    """端到端：连续 2 次答对 → 自动降级（间隔拉长 + mastered 口径一致）。"""
-    source = _make_question(question_service, student_user)
-    monkeypatch.setattr(question_service, "vector_store", _StubStore(bank_hits=[_bank_hit()]))
+    """端到端：连续 2 次答对 → 自动降级（间隔拉长 + mastered 口径一致）。
 
+    两道不同 bank 题（同答案）：第二次发起走去重随机推新题，不再重推第一题。
+    """
+    source = _make_question(question_service, student_user)
+    hits = [
+        _bank_hit(),
+        RagHit(
+            question_id=-2,
+            distance=0.5,
+            snippet="公共题库：解方程 x² - 5x + 6 = 0",
+            source="bank",
+            bank_id="bank-math-9-002",
+            metadata={"subject": "math", "grade": 9, "answer": "x=1 或 x=2", "difficulty": "medium"},
+        ),
+    ]
+    monkeypatch.setattr(
+        question_service, "vector_store", _StubStore(bank_hits=hits)
+    )
+
+    tested_refs: list[str] = []
     for expected_streak in (1, 2):
         challenge = question_service.start_detection(source.id, student_user.id)
         assert challenge["tested"]["source"] == "bank"
@@ -130,6 +147,8 @@ def test_submit_answer_and_demotion_e2e(question_service, student_user, monkeypa
         )
         assert outcome["result"] == "correct"
         assert outcome["streak"] == expected_streak
+        tested_refs.append(_log(challenge["log_id"]).tested_ref)
+    assert len(set(tested_refs)) == 2  # 去重随机：两次推题不同
     assert outcome["demoted"] is True
     assert outcome["state"] == "demoted"
 

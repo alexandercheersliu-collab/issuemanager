@@ -101,7 +101,19 @@ def test_inline_detection_flow_and_demotion(question_service, student_user, monk
         grade=9,
     )
     monkeypatch.setattr(
-        question_service, "vector_store", _StubStore(bank_hits=[_bank_hit()])
+        question_service,
+        "vector_store",
+        _StubStore(bank_hits=[
+            _bank_hit(),
+            RagHit(
+                question_id=-2,
+                distance=0.5,
+                snippet="公共题库：解方程 x² - 5x + 6 = 0",
+                source="bank",
+                bank_id="bank-math-9-002",
+                metadata={"subject": "math", "grade": 9, "answer": "x=1 或 x=2", "difficulty": "medium"},
+            ),
+        ]),
     )
 
     # 1) 复习评 good → 候选筛选命中
@@ -110,6 +122,7 @@ def test_inline_detection_flow_and_demotion(question_service, student_user, monk
     assert [c["id"] for c in picked] == [source.id]
 
     # 2) 内联检测：发起 → 作答 → 判分（连续 2 次正确 → 自动降级）
+    #    去重随机推题：第二次发起推另一道 bank 题，不再重推第一道
     for expected_streak in (1, 2):
         challenge = question_service.start_detection(source.id, student_user.id)
         assert challenge["tested"]["source"] == "bank"

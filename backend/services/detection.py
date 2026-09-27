@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import unicodedata
 
 from backend.models.schemas import QuestionOut
@@ -16,6 +17,9 @@ from backend.services.demotion import RESULT_CORRECT, RESULT_WRONG, DemotionServ
 from backend.utils.logging import get_logger
 
 logger = get_logger("detection")
+
+# 发起检测时的候选召回规模：取 top-k 后再去重随机，避免总是推 top-1 同一道题
+DETECTION_CANDIDATE_TOP_K = 10
 
 
 def _normalize_answer(text: str | None) -> str:
@@ -51,6 +55,37 @@ def tested_ref_for(tested: QuestionOut) -> str:
     return str(tested.id)
 
 
+def pick_tested_candidate(
+    items: list[QuestionOut],
+    tested_refs: set[str],
+    *,
+    rng: random.Random | None = None,
+) -> tuple[QuestionOut, bool]:
+    """推题筛选（纯函数）：从 top-k 候选中选一道，返回 (选中题, 是否放宽重考)。
+
+    三级策略：
+    ① 库内/公共题库中「未考过」的候选里随机抽一（候选充足时连续发起不重复）；
+    ② 库内候选都考过时，优先用本次新生成的 AI 变式——每次生成本身就是新题；
+    ③ 变式也考过（内容哈希相同）则放宽：从已考过的题里随机重考。
+       检测本质是巩固训练，重考一道旧题优于无题可推。
+    """
+    picker = rng or random
+    fresh_lib = [
+        q for q in items
+        if q.source != "generated" and tested_ref_for(q) not in tested_refs
+    ]
+    if fresh_lib:
+        return picker.choice(fresh_lib), False
+    fresh_gen = [
+        q for q in items
+        if q.source == "generated" and tested_ref_for(q) not in tested_refs
+    ]
+    if fresh_gen:
+        return picker.choice(fresh_gen), False
+    retest_pool = [q for q in items if q.source != "generated"] or list(items)
+    return picker.choice(retest_pool), True
+
+
 class DetectionMixin:
     """同类题检测：发起（约束检索取题）与作答判分（联动降级引擎）。"""
 
@@ -62,6 +97,10 @@ class DetectionMixin:
 
         宽松模式三级回落（own → bank → generated）保证总有题可测；
         generated 题即时生成参考答案快照。返回 log_id 与题干（答案不下发）。
+
+        推题策略：召回 top-k 候选后排除本题检测历史已考过的 tested_ref，
+        从剩余候选中随机抽一（见 pick_tested_candidate 的三级放宽），
+        避免反复发起总推 top-1 同一道题。
         """
         question = self.get_question(question_id, user_id)
         if question is None:
@@ -75,11 +114,15 @@ class DetectionMixin:
             region=question.region,
             difficulty=question.difficulty,
             knowledge_points=list(question.knowledge_points or []),
-            top_k=1,
+            top_k=DETECTION_CANDIDATE_TOP_K,
         )
         if not outcome.items:
             raise LookupError("暂无可用的同类题（召回与生成均失败）")
-        tested = outcome.items[0]
+
+        tested_refs = self._demotion().tested_refs(question_id, user_id)
+        tested, retest = pick_tested_candidate(outcome.items, tested_refs)
+        if retest:
+            logger.info("候选全部考过，放宽为重考 question=%s", question_id)
 
         tested_answer = tested.answer
         if tested.source == "generated":
@@ -148,6 +191,7 @@ class DetectionMixin:
             "promoted": outcome.promoted,
             "mastered": outcome.mastered,
             "next_interval": outcome.next_interval,
+            "threshold": self.settings.detection_pass_threshold,
         }
 
     def detection_history(self, question_id: int, user_id: int) -> list[dict]:

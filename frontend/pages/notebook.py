@@ -392,8 +392,20 @@ def describe_detection_outcome(outcome: dict) -> str:
     return "❌ 回答错误，连续通过计数已清零，继续加油"
 
 
+def detection_progress_text(streak: int, threshold: int, state: str) -> str:
+    """连续通过进度文案（纯函数，可单测）：判分后实时更新 x/阈值 展示。"""
+    text = f"连续通过 {min(streak, threshold)}/{threshold} 次"
+    if state == "demoted":
+        text += " · 已掌握降级 🏅"
+    return text
+
+
 def _render_detection(service, q, user) -> None:
-    """同类题检测（P3.2）：发起 → 作答判分 → 降级/回升联动展示。"""
+    """同类题检测（P3.2）：发起 → 作答判分 → 降级/回升联动展示。
+
+    连续刷题流：判分后「🔄 再来一道」直接为同一原错题内联发起新一轮
+    （走去重随机推题），无需返回重新发起；「🏁 结束检测」返回入口视图。
+    """
     st.markdown("**🎯 同类题检测**")
     challenge_key = f"det_challenge_{q.id}"
     result_key = f"det_result_{q.id}"
@@ -405,9 +417,33 @@ def _render_detection(service, q, user) -> None:
         st.info(describe_detection_outcome(result))
         if result.get("result") == "wrong" and result.get("expected_answer"):
             st.caption(f"参考答案：{result['expected_answer']}")
-        if st.button("🔄 再测一题", key=f"det_again_{q.id}", width="stretch"):
-            st.session_state.pop(result_key, None)
-            st.rerun()
+        st.caption(
+            detection_progress_text(
+                result.get("streak", 0),
+                result.get("threshold") or service.settings.detection_pass_threshold,
+                result.get("state", "normal"),
+            )
+        )
+        if result.get("demoted"):
+            st.success("🏅 已达连续通过阈值，本题标记为掌握降级（复习间隔已拉长）。")
+        col_next, col_done = st.columns(2)
+        with col_next:
+            # 已降级后保留入口：继续巩固，答错会自动回升，语义自洽
+            if st.button(
+                "🔄 再来一道", key=f"det_next_{q.id}", type="primary", width="stretch"
+            ):
+                try:
+                    new_challenge = service.start_detection(q.id, user["id"])
+                except (LookupError, ValueError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state.pop(result_key, None)
+                    st.session_state[challenge_key] = new_challenge
+                    st.rerun()
+        with col_done:
+            if st.button("🏁 结束检测", key=f"det_done_{q.id}", width="stretch"):
+                st.session_state.pop(result_key, None)
+                st.rerun()
         return
 
     if challenge is not None:

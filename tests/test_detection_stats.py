@@ -74,7 +74,19 @@ def test_detection_overview_reflects_new_logs(question_service, student_user, mo
         student_user.id, content_markdown="统计通路·源题", answer="x=1", subject="math", grade=9
     )
     monkeypatch.setattr(
-        question_service, "vector_store", _StubStore(bank_hits=[_bank_hit()])
+        question_service,
+        "vector_store",
+        _StubStore(bank_hits=[
+            _bank_hit(),
+            RagHit(  # 去重随机推题：第二次发起推另一道，答案相同便于判分
+                question_id=-2,
+                distance=0.5,
+                snippet="统计通路·公共题库题二",
+                source="bank",
+                bank_id="bank-stats-002",
+                metadata={"subject": "math", "grade": 9, "answer": "x=1", "difficulty": "medium"},
+            ),
+        ]),
     )
     before = question_service.detection_overview(student_user.id)
 

@@ -278,6 +278,20 @@ class DemotionService:
                 for log in logs
             ]
 
+    def tested_refs(self, question_id: int, user_id: int) -> set[str]:
+        """本题检测历史中出现过的 tested_ref 集合（含 pending 与 bank:/gen: 前缀）。
+
+        供发起检测时去重：已推过的题不再重复推（候选耗尽时由调用方放宽）。
+        """
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(DetectionLog.tested_ref).where(
+                    DetectionLog.question_id == question_id,
+                    DetectionLog.user_id == user_id,
+                )
+            ).scalars()
+            return {ref for ref in rows if ref}
+
     def logs_for_user(self, user_id: int) -> list[DetectionLog]:
         """用户全部检测记录（报表统计口径：含 pending，由调用方过滤）。"""
         with self._session_factory() as session:
