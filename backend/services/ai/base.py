@@ -108,7 +108,8 @@ class AIMessageError(RuntimeError):
 
 SEGMENT_SYSTEM_PROMPT = (
     "你是一位严谨的试卷切题助手。学生会上传一页试卷的图片，"
-    "请识别本页所有完整或部分的题目，按题号顺序输出。"
+    "请识别本页所有完整或部分的题目，按题号顺序输出；"
+    "同时留意卷面上的作答与批改痕迹，判断哪些题疑似被做错。"
     "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
 )
 
@@ -118,12 +119,15 @@ SEGMENT_INSTRUCTION = """请只输出一个 JSON 数组，每个元素结构如�
     "number": "题号（阿拉伯数字字符串，如 \\"1\\"）",
     "text": "该题在本页的题干文本（含选项；公式用 LaTeX）",
     "continued_from_prev": false,
-    "continues_to_next": false
+    "continues_to_next": false,
+    "likely_wrong": false
   }
 ]
 规则：
 - continued_from_prev=true 表示本题是上一页末尾题目的延续（此时 number 沿用上一页题号）；
 - continues_to_next=true 表示本题题干在本页未结束、延续到下一页；
+- likely_wrong=true 表示本题卷面上有作答痕迹且疑似被判错（打叉、扣分、涂改、红笔批注等）；
+  没有作答痕迹或作答看似正确的题标 false；无法判断时一律标 false；
 - 页眉页脚、注意事项、答题区提示等非题目内容不要输出。"""
 
 
@@ -176,7 +180,9 @@ class BaseAIProvider(abc.ABC):
         """视觉切题（策略 A）：识别一页试卷图像中的题目列表。
 
         返回 [{"number": str, "text": str, "continued_from_prev": bool,
-        "continues_to_next": bool}, ...]；输出非法时抛 AIMessageError（调用方重试/降级）。
+        "continues_to_next": bool, "likely_wrong": bool}, ...]；
+        likely_wrong 为错题预判（卷面有作答痕迹且疑似被判错），模型不给该字段时默认 False；
+        输出非法时抛 AIMessageError（调用方重试/降级）。
         """
         with track_ai_call("segment_page"):
             raw = self._complete(image_bytes, mime_type, SEGMENT_INSTRUCTION, SEGMENT_SYSTEM_PROMPT)
@@ -193,6 +199,7 @@ class BaseAIProvider(abc.ABC):
                     "text": str(item.get("text", "") or "").strip(),
                     "continued_from_prev": bool(item.get("continued_from_prev", False)),
                     "continues_to_next": bool(item.get("continues_to_next", False)),
+                    "likely_wrong": bool(item.get("likely_wrong", False)),
                 }
             )
         return segments

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from backend.services.ai.base import AIProviderInfo
+from backend.services.ai.base import AIProviderInfo, BaseAIProvider
 from backend.services.ai.mock import MockProvider
 from backend.services.document import DocPage
 from backend.services.segment import (
@@ -171,3 +171,43 @@ def test_provider_failure_falls_back_to_rule(tmp_path):
     segments = segment_document([page], _BrokenProvider())
     assert [s.number for s in segments] == ["1", "2"]
     assert all(s.needs_review for s in segments)
+
+
+# ---------- 错题预判 likely_wrong ----------
+
+class _RawSegmentProvider(MockProvider):
+    """通过 _complete 返回预置原始 JSON，走 BaseAIProvider.segment_page 真实解析。"""
+
+    def __init__(self, raw: str):
+        super().__init__()
+        self.raw = raw
+
+    def _complete(self, image_bytes, mime_type, prompt, system_prompt=""):
+        return self.raw
+
+    def segment_page(self, image_bytes, mime_type="image/png"):
+        # MockProvider.segment_page 是固定演示数据，绕开 _complete；
+        # 这里显式走回基类实现，才能验证真实解析逻辑。
+        return BaseAIProvider.segment_page(self, image_bytes, mime_type)
+
+
+def test_segment_page_parses_likely_wrong():
+    provider = _RawSegmentProvider(
+        '[{"number": "1", "text": "题一", "likely_wrong": true},'
+        ' {"number": "2", "text": "题二", "likely_wrong": false}]'
+    )
+    segments = provider.segment_page(b"img")
+    assert [s["likely_wrong"] for s in segments] == [True, False]
+
+
+def test_segment_page_likely_wrong_defaults_false_when_missing():
+    """模型不给 likely_wrong 字段时默认 False，不报错。"""
+    provider = _RawSegmentProvider('[{"number": "1", "text": "题一"}]')
+    segments = provider.segment_page(b"img")
+    assert segments[0]["likely_wrong"] is False
+
+
+def test_mock_provider_segments_carry_likely_wrong():
+    """演示模式：第 1 题疑似做错（演示默认勾选），第 2 题正常。"""
+    segments = MockProvider().segment_page(b"img")
+    assert [s["likely_wrong"] for s in segments] == [True, False]
