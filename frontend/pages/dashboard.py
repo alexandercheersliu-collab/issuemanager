@@ -13,6 +13,15 @@ _BLUE = "#2563eb"
 _MASTERY_COLORS = {"weak": "#d97706", "mid": "#2563eb", "good": "#059669"}
 
 
+def _chart_text() -> str:
+    """图表文字色：跟随深色模式开关（plotly 不吃 CSS 变量，需手动适配）。"""
+    return "#e2e8f0" if st.session_state.get("dark_mode") else "#334155"
+
+
+def _chart_grid() -> str:
+    return "#334155" if st.session_state.get("dark_mode") else "#e2e8f0"
+
+
 def _picked_tag(event) -> str | None:
     """从 plotly on_select 事件里取被点击色条/扇区对应的标签。"""
     selection = getattr(event, "selection", None)
@@ -55,7 +64,7 @@ def _render_calendar(calendar: dict) -> None:
         margin=dict(t=10, b=10, l=10, r=10),
         height=210,
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="sans-serif", color="#334155"),
+        font=dict(family="sans-serif", color=_chart_text()),
     )
     fig.update_xaxes(tickangle=0, tickfont=dict(size=9))
     fig.update_yaxes(tickfont=dict(size=9))
@@ -78,8 +87,8 @@ def _render_accuracy_trend(trend: list[dict]) -> None:
         height=210,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="sans-serif", color="#334155"),
-        yaxis=dict(range=[0, 105], gridcolor="#e2e8f0"),
+        font=dict(family="sans-serif", color=_chart_text()),
+        yaxis=dict(range=[0, 105], gridcolor=_chart_grid()),
         xaxis=dict(showgrid=False),
     )
     st.plotly_chart(line, width="stretch", config={"displayModeBar": False})
@@ -102,7 +111,7 @@ def _render_difficulty(dist: dict) -> None:
         margin=dict(t=10, b=10, l=10, r=10),
         height=240,
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="sans-serif", color="#334155"),
+        font=dict(family="sans-serif", color=_chart_text()),
     )
     st.plotly_chart(pie, width="stretch", config={"displayModeBar": False})
 
@@ -123,8 +132,8 @@ def _render_mastery_trend(trend: list[dict]) -> None:
         height=200,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="sans-serif", color="#334155"),
-        yaxis=dict(range=[0, 105], gridcolor="#e2e8f0"),
+        font=dict(family="sans-serif", color=_chart_text()),
+        yaxis=dict(range=[0, 105], gridcolor=_chart_grid()),
         xaxis=dict(showgrid=False),
     )
     st.plotly_chart(line, width="stretch", config={"displayModeBar": False})
@@ -167,22 +176,26 @@ def render_dashboard(user: dict) -> None:
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        stat_card(stats["total"], "累计错题", accent=True)
+        stat_card(stats["total"], "累计错题", icon="📚", variant="accent")
     with col2:
-        stat_card(len(stats["tag_stats"]), "涉及知识点")
+        stat_card(len(stats["tag_stats"]), "涉及知识点", icon="🧩", variant="teal")
     with col3:
-        stat_card(stats["reviewed"], "已复习错题")
+        stat_card(stats["reviewed"], "已复习错题", icon="✅", variant="ok")
     with col4:
-        stat_card(stats["due"], "待复习", accent=True)
+        stat_card(stats["due"], "待复习", icon="⏰", variant="warn")
 
     # P3.3 检测报表：同类题通过率 + 本周降级错题数
     detection = service.detection_overview(user["id"])
     det_col1, det_col2, _, _ = st.columns(4)
     with det_col1:
         pass_rate = detection["detection_pass_rate"]
-        stat_card(f"{pass_rate}%" if pass_rate is not None else "—", "同类题通过率")
+        stat_card(
+            f"{pass_rate}%" if pass_rate is not None else "—",
+            "同类题通过率",
+            icon="🎯",
+        )
     with det_col2:
-        stat_card(detection["week_demotions"], "本周降级错题数")
+        stat_card(detection["week_demotions"], "本周降级错题数", icon="🏅")
 
     action_col1, action_col2, action_col3, _ = st.columns([1, 1, 1, 1])
     with action_col1:
@@ -218,93 +231,99 @@ def render_dashboard(user: dict) -> None:
 
     chart_col, weak_col = st.columns([3, 2])
     with chart_col:
-        page_header("知识点分布", "错题按标签聚合 · 点击色条直达该知识点的错题")
-        if stats["tag_stats"]:
-            top = stats["tag_stats"][:8]
-            bar_fig = px.bar(
-                x=[s.count for s in top],
-                y=[s.tag for s in top],
-                orientation="h",
-                labels={"x": "错题数", "y": ""},
-                color=[s.count for s in top],
-                color_continuous_scale=["#bfdbfe", "#2563eb"],
-            )
-            bar_fig.update_layout(
-                showlegend=False,
-                coloraxis_showscale=False,
-                margin=dict(t=10, b=10, l=10, r=20),
-                height=max(280, 44 * len(top)),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(family="sans-serif", color="#334155"),
-                xaxis=dict(showgrid=False, title=""),
-            )
-            bar_fig.update_yaxes(autorange="reversed")
-            event = st.plotly_chart(
-                bar_fig,
-                width="stretch",
-                on_select="rerun",
-                key="tag_bar",
-                config={"displayModeBar": False},
-            )
-            clicked = _picked_tag(event)
-            if clicked:
-                go_to("notebook", tag=clicked)
-        else:
-            st.info("还没有错题，去「AI 录题」上传第一张错题图片吧。")
+        with st.container(border=True):
+            page_header("知识点分布", "错题按标签聚合 · 点击色条直达该知识点的错题")
+            if stats["tag_stats"]:
+                top = stats["tag_stats"][:8]
+                bar_fig = px.bar(
+                    x=[s.count for s in top],
+                    y=[s.tag for s in top],
+                    orientation="h",
+                    labels={"x": "错题数", "y": ""},
+                    color=[s.count for s in top],
+                    color_continuous_scale=["#bfdbfe", "#2563eb"],
+                )
+                bar_fig.update_layout(
+                    showlegend=False,
+                    coloraxis_showscale=False,
+                    margin=dict(t=10, b=10, l=10, r=20),
+                    height=max(280, 44 * len(top)),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(family="sans-serif", color=_chart_text()),
+                    xaxis=dict(showgrid=False, title=""),
+                )
+                bar_fig.update_yaxes(autorange="reversed")
+                event = st.plotly_chart(
+                    bar_fig,
+                    width="stretch",
+                    on_select="rerun",
+                    key="tag_bar",
+                    config={"displayModeBar": False},
+                )
+                clicked = _picked_tag(event)
+                if clicked:
+                    go_to("notebook", tag=clicked)
+            else:
+                st.info("还没有错题，去「AI 录题」上传第一张错题图片吧。")
 
     with weak_col:
-        page_header("薄弱知识点", "按掌握度升序，建议优先复习")
-        if stats["weak_tags"]:
-            for tag_stat in stats["weak_tags"]:
-                color = mastery_color(tag_stat.mastery)
-                st.markdown(
-                    f"""
-                    <div class="mm-mastery">
-                        <div class="mm-mastery__row">
-                            <span>{tag_stat.tag} <span class="mm-muted">({tag_stat.count} 题)</span></span>
-                            <span>{int(tag_stat.mastery * 100)}%</span>
+        with st.container(border=True):
+            page_header("薄弱知识点", "按掌握度升序，建议优先复习")
+            if stats["weak_tags"]:
+                for tag_stat in stats["weak_tags"]:
+                    color = mastery_color(tag_stat.mastery)
+                    st.markdown(
+                        f"""
+                        <div class="mm-mastery">
+                            <div class="mm-mastery__row">
+                                <span>{tag_stat.tag} <span class="mm-muted">({tag_stat.count} 题)</span></span>
+                                <span>{int(tag_stat.mastery * 100)}%</span>
+                            </div>
+                            <div class="mm-mastery__track">
+                                <div class="mm-mastery__fill" style="width:{max(tag_stat.mastery * 100, 3)}%;background:{color}"></div>
+                            </div>
                         </div>
-                        <div class="mm-mastery__track">
-                            <div class="mm-mastery__fill" style="width:{max(tag_stat.mastery * 100, 3)}%;background:{color}"></div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            if st.button("📚 去错题本复习最薄弱的知识点", width="stretch"):
-                go_to("notebook", tag=stats["weak_tags"][0].tag)
-        else:
-            st.caption("复习几道题后，这里会生成掌握度分析。")
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                if st.button("📚 去错题本复习最薄弱的知识点", width="stretch"):
+                    go_to("notebook", tag=stats["weak_tags"][0].tag)
+            else:
+                st.caption("复习几道题后，这里会生成掌握度分析。")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    page_header("近 14 天录入趋势")
-    activity = stats["activity"]
-    bar = px.bar(
-        x=[a["date"] for a in activity],
-        y=[a["count"] for a in activity],
-        labels={"x": "日期", "y": "新增错题"},
-    )
-    bar.update_traces(marker_color=_BLUE)
-    bar.update_layout(
-        margin=dict(t=10, b=20, l=20, r=20),
-        height=260,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="sans-serif", color="#334155"),
-        xaxis=dict(type="category", showgrid=False),
-        yaxis=dict(dtick=1, range=[0, max(3, max(a["count"] for a in activity) + 1)], gridcolor="#e2e8f0"),
-    )
-    st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
+    with st.container(border=True):
+        page_header("近 14 天录入趋势")
+        activity = stats["activity"]
+        bar = px.bar(
+            x=[a["date"] for a in activity],
+            y=[a["count"] for a in activity],
+            labels={"x": "日期", "y": "新增错题"},
+        )
+        bar.update_traces(marker_color=_BLUE)
+        bar.update_layout(
+            margin=dict(t=10, b=20, l=20, r=20),
+            height=260,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="sans-serif", color=_chart_text()),
+            xaxis=dict(type="category", showgrid=False),
+            yaxis=dict(dtick=1, range=[0, max(3, max(a["count"] for a in activity) + 1)], gridcolor=_chart_grid()),
+        )
+        st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
 
     cal_col, trend_col = st.columns([3, 2])
     with cal_col:
-        page_header("学习日历", "近 90 天 · 颜色越深，当天学得越多")
-        _render_calendar(stats["calendar"])
+        with st.container(border=True):
+            page_header("学习日历", "近 90 天 · 颜色越深，当天学得越多")
+            _render_calendar(stats["calendar"])
     with trend_col:
-        page_header("复习正确率", "近 30 天 · 记得/秒懂占比")
-        _render_accuracy_trend(stats["accuracy_trend"])
+        with st.container(border=True):
+            page_header("复习正确率", "近 30 天 · 记得/秒懂占比")
+            _render_accuracy_trend(stats["accuracy_trend"])
 
     st.markdown("<br>", unsafe_allow_html=True)
-    page_header("难度分布", "easy / medium / hard 错题构成")
-    _render_difficulty(stats.get("difficulty", {}))
+    with st.container(border=True):
+        page_header("难度分布", "easy / medium / hard 错题构成")
+        _render_difficulty(stats.get("difficulty", {}))

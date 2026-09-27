@@ -37,10 +37,20 @@ def get_question_service() -> QuestionService:
     return QuestionService()
 
 
-def stat_card(value, label: str, accent: bool = False) -> None:
+def stat_card(
+    value,
+    label: str,
+    accent: bool = False,
+    icon: str = "",
+    variant: str = "",
+) -> None:
+    """统计卡：大数字 + 标签；可选图标与 accent 色变体（accent/teal/ok/warn）。"""
+    variant_class = f" mm-stat--{variant}" if variant else (" mm-stat--accent" if accent else "")
+    icon_html = f'<div class="mm-stat__icon">{icon}</div>' if icon else ""
     st.markdown(
         f"""
-        <div class="mm-stat{' mm-stat--accent' if accent else ''}">
+        <div class="mm-stat{variant_class}">
+            {icon_html}
             <div class="mm-stat__value">{value}</div>
             <div class="mm-stat__label">{label}</div>
         </div>
