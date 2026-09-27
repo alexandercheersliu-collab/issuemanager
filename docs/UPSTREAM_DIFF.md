@@ -274,6 +274,36 @@
    全量回归以 `-m "not e2e"` 执行（325 passed）；装 Playwright 后
    `pytest -m e2e` 需自行验证。
 
+## P5 阶段（拍照录入切题优先 + 错题预判，2026-09-27）
+
+### 修改的基座已有文件（P5）
+
+| 文件 | 说明 |
+| --- | --- |
+| `backend/services/ai/base.py` | `SEGMENT_SYSTEM_PROMPT` / `SEGMENT_INSTRUCTION` 增加 `likely_wrong` 错题预判字段（卷面有作答痕迹且疑似被判错标 true）；`segment_page` 解析容忍字段缺失（默认 False） |
+| `backend/services/ai/mock.py` | 演示切题数据带 `likely_wrong`（第 1 题 true、第 2 题 false），演示默认勾选行为 |
+| `backend/services/question_mixins.py` | EntryMixin 新增 `analyze_text_and_save`：题干文本走 `analyze_text` 解构入库，一图多题共享调用方落盘的 `image_path`，source 保持 "ai"；content = 题干原文 + 分隔线 + AI 解析 |
+| `frontend/pages/tutor.py` | 拍照录入改为切题优先：上传后先逐张 `segment_page`，切出 ≥2 题的图展示候选清单（标注来源图、题干摘要、🟥疑似做错徽标），`likely_wrong` 题默认勾选，确认后逐题解构入库；单题/空结果/切题异常的图自动回退原整图 `analyze_and_save_dedup` 流程；多图合并为统一候选清单；结果渲染抽出 `_render_entry_results` 两路复用 |
+| `tests/test_segment.py` | 新增 3 例：`likely_wrong` 解析、字段缺失默认 False、MockProvider 演示数据 |
+| `README.md` | 功能导览「AI 录题」补一句多题混拍的切题勾选流程 |
+
+### 新增文件（P5）
+
+| 文件 | 说明 |
+| --- | --- |
+| `tests/test_photo_segment.py` | 12 例：回退判定（≥2 题才走切题）、候选整形与摘要、默认勾选、多图合并、单题/异常回退、勾选题逐题入库（题目数 / source=ai / 共享原图路径 / K12 元数据）、部分勾选、空题干拒绝 |
+
+### P5 合入上游注意事项
+
+1. **界面层纯函数约定**：`should_use_segmentation` / `build_candidates` /
+   `default_checked` / `summarize_stem` / `_plan_photo_entry` /
+   `_save_checked_candidates` 均不依赖 Streamlit，测试直接 import；
+   上游若改 tutor.py 请保持这一可测性边界。
+2. **切题计划存 session_state（`photo_plan`）**：上传集合（文件名列表）
+   变化即作废重建；确认入库或全部回退后立即弹出，避免重复入库。
+3. **likely_wrong 只是预判**：仅影响勾选框默认值，不入库、不影响解析；
+   模型不返回该字段时全链路按 False 处理，无破坏性变更。
+
 ## 合入上游注意事项
 
 1. **入口文件首行顺序敏感**：`app.py` / `api/main.py` / `mcp_server.py` 的
