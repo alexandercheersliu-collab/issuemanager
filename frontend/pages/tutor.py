@@ -4,9 +4,13 @@ from __future__ import annotations
 import streamlit as st
 
 from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
+from backend.services.entry_types import EntryResult
 from backend.services.question_service import sanitize_tags
+from backend.utils.logging import get_logger
 from frontend.common import followup_chat, get_question_service, go_to, page_header
 from frontend.components import save_followup_button
+
+logger = get_logger("tutor")
 
 _GRADE_OPTIONS = ["不限"] + [f"{g} 年级" for g in range(1, 13)]
 
@@ -78,8 +82,33 @@ def render_tutor_page(user: dict) -> None:
                     height=68,
                 )
 
+            # 切题计划跨 rerun 存于 session_state；上传集合变化即作废
+            plan = st.session_state.get("photo_plan")
+            current_names = [u.name for u in uploads] if uploads else []
+            if plan is not None and plan.get("upload_names") != current_names:
+                plan = None
+                st.session_state.pop("photo_plan", None)
+
             if uploads and st.button("开始 AI 解析", type="primary", width="stretch"):
-                _process_uploads(service, user, uploads, sanitize_tags(tags_input), hint, context)
+                with st.spinner("正在从图中找题…"):
+                    plan = _plan_photo_entry(
+                        service.ai,
+                        [(u.name, u.getvalue(), u.type or "image/jpeg") for u in uploads],
+                    )
+                    plan["upload_names"] = current_names
+                st.session_state["photo_plan"] = plan
+
+            if plan is not None:
+                if not plan["candidates"]:
+                    # 所有图片都只切出单题或切题失败：行为与原整图解析完全一致
+                    _process_uploads(
+                        service, user, uploads, sanitize_tags(tags_input), hint, context
+                    )
+                    st.session_state.pop("photo_plan", None)
+                else:
+                    _render_candidate_review(
+                        service, user, plan, tags_input, hint, context
+                    )
 
     with tab_manual:
         _render_manual_entry(service, user)
@@ -174,6 +203,166 @@ def _collect_entries(results: list) -> list[dict]:
     return entries
 
 
+# ---------- 拍照切题（从图中找题）----------
+# 以下函数均不依赖 Streamlit，可单测：切题判定 / 候选整形 / 默认勾选 / 批量入库。
+
+
+def should_use_segmentation(segments) -> bool:
+    """切出 ≥2 道题才走逐题勾选；单题、空结果或异常（None）回退整图解析。"""
+    return isinstance(segments, list) and len(segments) >= 2
+
+
+def summarize_stem(text: str, limit: int = 50) -> str:
+    """题干摘要：压缩空白后截断，供候选清单展示。"""
+    clean = " ".join((text or "").split())
+    return clean if len(clean) <= limit else clean[:limit] + "…"
+
+
+def build_candidates(image_name: str, segments: list[dict]) -> list[dict]:
+    """把一张图的切题结果整形成候选清单条目（标注来源图片）。"""
+    return [
+        {
+            "image": image_name,
+            "number": str(s.get("number", "")).strip() or "?",
+            "text": str(s.get("text", "") or "").strip(),
+            "summary": summarize_stem(str(s.get("text", "") or "")),
+            "likely_wrong": bool(s.get("likely_wrong", False)),
+        }
+        for s in segments
+    ]
+
+
+def default_checked(candidate: dict) -> bool:
+    """勾选框默认值：疑似做错的题（likely_wrong）默认勾选。"""
+    return bool(candidate.get("likely_wrong", False))
+
+
+def _plan_photo_entry(ai, images: list[tuple[str, bytes, str]]) -> dict:
+    """逐张切题并合并候选清单；单题/空结果/切题异常的图进 fallbacks 走整图解析。
+
+    images: [(文件名, 字节, MIME), ...]。返回 {"candidates": [...], "fallbacks": [...]}。
+    """
+    candidates: list[dict] = []
+    fallbacks: list[dict] = []
+    for name, data, mime in images:
+        try:
+            segments = ai.segment_page(data, mime)
+        except Exception as exc:  # noqa: BLE001 - 切题失败回退整图解析
+            logger.info("切题失败，回退整图解析 image=%s: %s", name, exc)
+            segments = None
+        if should_use_segmentation(segments):
+            for cand in build_candidates(name, segments):
+                candidates.append({**cand, "image_bytes": data})
+        else:
+            fallbacks.append({"name": name, "bytes": data, "mime": mime})
+    return {"candidates": candidates, "fallbacks": fallbacks}
+
+
+def _save_checked_candidates(
+    service,
+    user_id: int,
+    candidates: list[dict],
+    tags: list[str],
+    hint: str,
+    context: dict,
+    on_progress=None,
+) -> list:
+    """勾选题逐题解构入库（同一图片的多题共享同一份落盘原图）。
+
+    返回 _collect_entries 兼容的 (名称, EntryResult|None, 错误) 三元组列表。
+    """
+    results = []
+    path_cache: dict[str, str] = {}
+    for cand in candidates:
+        name = f"{cand['image']} · 第 {cand['number']} 题"
+        try:
+            if cand["image"] not in path_cache:
+                path_cache[cand["image"]] = str(
+                    service._persist_image(user_id, cand["image_bytes"])
+                )
+            out, analysis = service.analyze_text_and_save(
+                user_id,
+                cand["text"],
+                user_tags=tags,
+                hint=hint,
+                image_path=path_cache[cand["image"]],
+                subject=context["subject"],
+                grade=context["grade"],
+                region=context["region"],
+                textbook_version=context["textbook_version"],
+            )
+            results.append(
+                (name, EntryResult(question=out, analysis=analysis, duplicated=False), None)
+            )
+        except Exception as exc:  # noqa: BLE001 - 单题失败不影响其余
+            results.append((name, None, str(exc)))
+        if on_progress is not None:
+            on_progress(name)
+    return results
+
+
+def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: str, context: dict) -> None:
+    """候选清单勾选界面：疑似做错的题默认勾选，确认后批量解构入库。"""
+    candidates = plan["candidates"]
+    wrong_count = sum(1 for c in candidates if c["likely_wrong"])
+    st.success(
+        f"从图中识别出 {len(candidates)} 道题"
+        + (f"，其中 {wrong_count} 道疑似做错已默认勾选。" if wrong_count else "。")
+        + "请勾选要录入的错题："
+    )
+    checked: list[dict] = []
+    for i, cand in enumerate(candidates):
+        mark = " 🟥疑似做错" if cand["likely_wrong"] else ""
+        label = f"[{cand['image']}] 第 {cand['number']} 题：{cand['summary']}{mark}"
+        if st.checkbox(label, value=default_checked(cand), key=f"photo_seg_{i}"):
+            checked.append(cand)
+    if plan["fallbacks"]:
+        names = "、".join(f["name"] for f in plan["fallbacks"])
+        st.caption(f"以下图片未切出多题，将按整图单题解析：{names}")
+
+    if st.button(f"确认录入（{len(checked)} 题）", type="primary", width="stretch"):
+        if not checked and not plan["fallbacks"]:
+            st.warning("请至少勾选一道题。")
+            return
+        _process_plan(service, user, plan, checked, sanitize_tags(tags_input), hint, context)
+        st.session_state.pop("photo_plan", None)
+
+
+def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str], hint: str, context: dict) -> None:
+    """批量入库：勾选题逐题解构 + 回退图整图解析，统一渲染结果。"""
+    total = len(checked) + len(plan["fallbacks"])
+    progress = st.progress(0.0, text="准备解析…")
+    state = {"done": 0}
+
+    def _tick(label: str) -> None:
+        state["done"] += 1
+        progress.progress(state["done"] / total, text=label)
+
+    results = _save_checked_candidates(
+        service, user["id"], checked, tags, hint, context,
+        on_progress=lambda name: _tick(f"正在解构 {name}"),
+    )
+    for fb in plan["fallbacks"]:
+        try:
+            entry = service.analyze_and_save_dedup(
+                user["id"],
+                fb["bytes"],
+                mime_type=fb["mime"],
+                user_tags=tags,
+                hint=hint,
+                subject=context["subject"],
+                grade=context["grade"],
+                region=context["region"],
+                textbook_version=context["textbook_version"],
+            )
+            results.append((fb["name"], entry, None))
+        except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
+            results.append((fb["name"], None, str(exc)))
+        _tick(f"正在解析 {fb['name']}")
+    progress.progress(1.0, text="解析完成")
+    _render_entry_results(service, user, _collect_entries(results), unit="项")
+
+
 def _process_uploads(service, user, uploads, tags: list[str], hint: str, context: dict) -> None:
     progress = st.progress(0.0, text="准备解析…")
     results = []
@@ -199,10 +388,12 @@ def _process_uploads(service, user, uploads, tags: list[str], hint: str, context
         except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
             results.append((upload.name, None, str(exc)))
     progress.progress(1.0, text="解析完成")
+    _render_entry_results(service, user, _collect_entries(results), unit="张")
 
-    entries = _collect_entries(results)
+
+def _render_entry_results(service, user, entries: list[dict], unit: str = "张") -> None:
     ok_count = sum(1 for e in entries if e["error"] is None)
-    st.success(f"完成：成功 {ok_count} / {len(entries)} 张，已自动归档入错题本。")
+    st.success(f"完成：成功 {ok_count} / {len(entries)} {unit}，已自动归档入错题本。")
 
     if ok_count:
         nav_col, _ = st.columns([1, 2])

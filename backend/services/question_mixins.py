@@ -398,6 +398,66 @@ class EntryMixin:
         )
         return EntryResult(question=out, analysis=analysis, duplicated=False)
 
+    def analyze_text_and_save(
+        self,
+        user_id: int,
+        text: str,
+        *,
+        user_tags: list[str] | None = None,
+        hint: str = "",
+        image_path: str | None = None,
+        subject: str = "math",
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+    ) -> tuple[QuestionOut, QuestionAnalysis]:
+        """拍照切题后的逐题解构入库：题干文本走 analyze_text，原图路径共享落库。
+
+        与 analyze_and_save 的差别：解析输入是切出的题干文本而非整图，
+        图片由调用方统一落盘（一图多题共享同一 image_path），source 保持 "ai"。
+        content_markdown = 题干原文 + 分隔线 + AI 解析，方便错题本里回溯原题。
+        """
+        if not text or not text.strip():
+            raise ValueError("题干文本不能为空")
+        from backend.services.ai.base import AnalysisContext
+
+        analysis = self.ai.analyze_text(
+            text.strip()[:4000],
+            hint,
+            context=AnalysisContext(
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+            ),
+        )
+        tags = analysis.merged_tags(user_tags or [])
+        content = f"{text.strip()}\n\n---\n\n{analysis.analysis}"
+
+        with self._session() as repo:
+            question = repo.create(
+                user_id,
+                content_markdown=content,
+                answer=analysis.answer,
+                knowledge_points=analysis.knowledge_points,
+                tags=tags,
+                difficulty=analysis.difficulty,
+                followup_question=analysis.followup_question,
+                image_path=image_path,
+                subject=subject,
+                grade=grade,
+                region=region,
+                textbook_version=textbook_version,
+                question_type=analysis.question_type or None,
+                chapter=analysis.chapter or None,
+                error_category=analysis.error_category,
+            )
+            out = QuestionOut.from_orm_model(question)
+
+        embed_text = f"{text.strip()} {self._embeddable_text(analysis)}"
+        self._upsert_index(out, embed_text)
+        return out, analysis
+
 
 class QueryMixin:
     """错题查询：关键词 + 语义双路检索、计数、详情、相似题。"""
