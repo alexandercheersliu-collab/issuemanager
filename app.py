@@ -13,7 +13,12 @@ import streamlit as st
 
 from backend.config import get_settings
 from backend.utils.logging import get_logger
-from frontend.common import current_user, load_css, logout_user
+from frontend.common import (
+    current_user,
+    inject_iframe_responsive,
+    load_css,
+    logout_user,
+)
 from frontend.pages.auth import render_auth_page
 from frontend.pages.dashboard import render_dashboard
 from frontend.pages.notebook import render_notebook_page
@@ -74,6 +79,7 @@ from frontend.i18n import t  # noqa: E402
 from frontend.theme import apply_theme  # noqa: E402  需在基础样式之后注入
 
 apply_theme()
+inject_iframe_responsive()  # sac 评分按钮窄屏 2×2 换行（同源 iframe 补丁）
 
 # PWA：manifest 与 Service Worker（静态目录 static/，Streamlit 只认项目根下的 static）
 st.markdown(

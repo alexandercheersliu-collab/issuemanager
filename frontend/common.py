@@ -281,3 +281,50 @@ def keyboard_shortcuts() -> None:
 """,
         height=0,
     )
+
+
+_IFRAME_RESPONSIVE_JS = """
+<script>
+(function () {
+  // sac 评分按钮在同源 iframe 里，外层 CSS 媒体查询够不到；
+  // 借同源脚本向 iframe 注入窄屏样式：按钮 2×2 换行 + 44px 触控目标。
+  var CSS =
+    "@media (max-width: 520px){" +
+    ".ant-space-horizontal{flex-wrap:wrap!important;row-gap:10px!important}" +
+    ".ant-space-item.flex-fill{flex:1 1 42%!important}" +
+    ".ant-btn{min-height:44px!important;font-size:1rem!important}}";
+  var patch = function () {
+    try {
+      window.parent.document
+        .querySelectorAll('iframe[title*="streamlit_antd_components"]')
+        .forEach(function (f) {
+          try {
+            var doc = f.contentDocument;
+            if (!doc || !doc.head || doc.getElementById("mm-rfs-fix")) return;
+            var s = doc.createElement("style");
+            s.id = "mm-rfs-fix";
+            s.textContent = CSS;
+            doc.head.appendChild(s);
+          } catch (e) {}
+        });
+    } catch (e) {}
+  };
+  try {
+    new MutationObserver(patch).observe(window.parent.document.body, {
+      childList: true,
+      subtree: true,
+    });
+  } catch (e) {}
+  patch();
+  setTimeout(patch, 500);
+  setTimeout(patch, 2000);
+})();
+</script>
+"""
+
+
+def inject_iframe_responsive() -> None:
+    """同源 iframe（sac 评分按钮）响应式补丁：窄屏下按钮 2×2 换行、≥44px 触控。"""
+    import streamlit.components.v1 as components
+
+    components.html(_IFRAME_RESPONSIVE_JS, height=0)

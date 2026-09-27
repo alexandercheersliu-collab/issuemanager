@@ -459,3 +459,51 @@
    （own+bank）真空时出现；库内有候选时发起检测为纯检索，秒级返回。
 3. **其他调用方保持旧行为**：`generate_min_pool` 默认 None ≡ 不足 top_k 即
    补位，举一反三 API 与 tutor 页的推荐丰富度不变。
+
+
+## P5.6 侧边栏首次切换卡顿：后台预热 + 渲染计时日志（2026-09-27）
+
+### 修改的基座已有文件（P5.6）
+
+| 文件 | 说明 |
+| --- | --- |
+| `app.py` | 路由分发抽 `_dispatch` 并加每页渲染耗时日志（logger `mathmaster.app`，格式 `render page=%s sidebar/page_render`）；新增 `_start_warmup_once()`（`@st.cache_resource` 进程级单例）在登录成功后启动后台线程：预 import 懒加载页面模块（import_doc/graph/students/assistant）、构造 `get_question_service()`（触发 chromadb/AI 客户端初始化）、发一次 `user_ids=[-1]` 的微小 `constrained_similar` 触发 ONNX 嵌入模型加载 |
+
+### P5.6 合入上游注意事项
+
+1. **预热线程先 sleep 2s**：曾试过模块顶层启动预热，与登录首屏渲染争抢
+   GIL/事件循环导致首屏 2.2s→5.2s 回归；改为登录后启动且线程开头
+   `time.sleep(2.0)`，实测首屏 2.2s 无回归、看板回访 2.5s→0.6s。
+2. **预热必须是进程级单例**：`@st.cache_resource` 保证每个 Streamlit
+   进程只起一次线程；不要用 `st.session_state`（每会话一次会重复预热）。
+3. **「今日复习」首切 ~2.7s 不可服务端消除**：耗时在客户端一次性加载
+   keyboard_shortcuts / sac 组件 iframe 的 JS bundle，服务端渲染 0.00s，
+   预热对此无效，属已知限制。
+4. **微小检索用 `user_ids=[-1]`**：保证命中空结果，仅为触发嵌入模型
+   加载，不依赖任何真实用户数据。
+
+## P5.7 移动端/平板响应式适配（2026-09-27）
+
+### 修改的基座已有文件（P5.7）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/assets/style.css` | 末尾追加响应式层：平板 768–1024px（闪卡 padding、stat 字号、welcome 收窄）；手机 <768px（主容器 padding 收窄、标题字号收窄、按钮/输入框/下拉 min-height 44px 触控目标、侧边栏 radio 行加高、`.mm-flashcard` 全宽紧凑、`.mm-login` 收窄、dropzone 130px、横向溢出防护 `overflow-wrap:anywhere` + 媒体 `max-width:100%`、sac iframe min-height 132px） |
+| `frontend/common.py` | 新增 `_IFRAME_RESPONSIVE_JS` + `inject_iframe_responsive()`：通过 `components.html` 注入同源脚本，向 sac 组件 iframe 写入 `@media (max-width:520px)` 补丁（`.ant-space-horizontal` 允许换行、`.ant-space-item` `flex:1 1 42%`、`.ant-btn` min-height 44px），使复习页评分按钮在窄屏呈 2×2 网格 |
+| `app.py` | import 并在 `apply_theme()` 后调用 `inject_iframe_responsive()` |
+
+### P5.7 合入上游注意事项
+
+1. **iframe 内媒体查询按 iframe 自身宽度匹配**：注入的 `max-width:520px`
+   针对的是 sac iframe 宽度（约等于内容列宽），不是视口宽度，因此桌面端
+   宽屏下不会误触发 2×2；`inject_iframe_responsive` 注入的元素 id 为
+   `mm-rfs-fix`，与深色文字补丁 `mm-dark-fix` 并存不冲突。
+2. **补丁依赖 sac iframe 的 title 命名**：同源脚本按 iframe title 定位
+   sac 组件 iframe，若上游更换组件或 title 需同步调整选择器。
+3. **断点约定 768/1024**：<768 手机、768–1024 平板、>1024 桌面；
+   `st.columns` 在窄屏自动堆叠是 Streamlit 原生行为，无需额外处理，
+   本项目只兜底自定义 HTML 卡片与触控目标尺寸。
+4. **已用 playwright 截图回归**：phone 390×844 与 tablet 834×1194 两种
+   视口覆盖 auth/dashboard/tutor/notebook/review（含深色模式抽查），
+   两种设备 `document.documentElement.scrollWidth > clientWidth` 均为
+   False（无横向溢出）。

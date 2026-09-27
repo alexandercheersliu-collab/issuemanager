@@ -467,3 +467,72 @@ section[data-testid="stSidebar"] [data-baseweb] a { transition: background-color
   .mm-features { flex-direction: column; }
   .mm-stat__value { font-size: 1.7rem; }
 }
+
+/* ================= 响应式层 =================
+   断点：手机 <768px；平板 768–1024px。
+   Streamlit 的 st.columns 在窄屏会自动纵向堆叠，本层负责：
+   触控目标（≥44px）、自定义组件尺寸、间距与字体收窄、横向溢出防护。 */
+
+/* ---------- 平板 768–1024px ---------- */
+@media (max-width: 1024px) and (min-width: 768px) {
+  .mm-flashcard { padding: 1.5rem 1.4rem; }
+  .mm-stat__value { font-size: 1.5rem; }
+  .mm-welcome { padding: 1.2rem 1.4rem; }
+}
+
+/* ---------- 手机 <768px ---------- */
+@media (max-width: 768px) {
+  /* 主区内边距收窄，内容吃满宽度 */
+  div[data-testid="stMainBlockContainer"] {
+    padding-left: 0.9rem !important;
+    padding-right: 0.9rem !important;
+  }
+
+  /* 标题与正文字体收窄 */
+  .stMain h1 { font-size: 1.55rem !important; }
+  .stMain h2 { font-size: 1.3rem !important; }
+  .stMain h3 { font-size: 1.12rem !important; }
+
+  /* 触控目标 ≥44px：按钮 / 表单按钮 / 下载按钮 / 输入框 / 下拉 */
+  .stButton > button,
+  .stFormSubmitButton > button,
+  .stDownloadButton > button {
+    min-height: 44px;
+    font-size: 0.95rem;
+  }
+  .stTextInput input,
+  div[data-baseweb="select"] > div {
+    min-height: 44px;
+  }
+  /* 侧边栏导航整行加大 */
+  section[data-testid="stSidebar"] label[data-testid="stRadioOption"] {
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+
+  /* 复习闪卡：全宽 + 紧凑内边距（columns 窄屏自动堆叠后闪卡即全宽） */
+  .mm-flashcard { padding: 1.2rem 1rem; border-radius: 14px; }
+
+  /* 欢迎区收窄 */
+  .mm-welcome { padding: 1rem 1.1rem; }
+  .mm-welcome h1 { font-size: 1.35rem !important; }
+
+  /* 登录页：logo 与标题略缩，外边距收窄 */
+  .mm-login { margin-top: 1.6rem; }
+  .mm-login__title { font-size: 1.6rem; }
+  .mm-login__logo { width: 56px; height: 56px; font-size: 1.7rem; }
+
+  /* 统计卡数值略缩 */
+  .mm-stat__value { font-size: 1.55rem; }
+  .mm-stat { padding: 0.8rem 0.9rem; }
+
+  /* 上传 dropzone 略降高度 */
+  section[data-testid="stFileUploaderDropzone"] { min-height: 130px; }
+
+  /* 横向溢出防护：长公式/长链接强制折行，媒体不撑破 */
+  div[data-testid="stMarkdownContainer"] { overflow-wrap: anywhere; }
+  .stMain img, .stMain video, .stMain canvas { max-width: 100%; }
+
+  /* sac 评分按钮 iframe 给足两行高度（内部 2×2 换行由 iframe 注入脚本负责） */
+  iframe[title*="streamlit_antd_components"] { min-height: 132px; }
+}
