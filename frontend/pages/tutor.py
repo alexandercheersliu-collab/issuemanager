@@ -59,28 +59,29 @@ def render_tutor_page(user: dict) -> None:
 
     with tab_photo:
         with st.container(border=True):
-            col_upload, col_meta = st.columns([3, 2])
-            with col_upload:
-                uploads = st.file_uploader(
-                    "错题图片（支持多选）",
-                    type=["jpg", "jpeg", "png", "webp"],
-                    accept_multiple_files=True,
-                )
-                if uploads:
-                    preview_cols = st.columns(min(len(uploads), 4))
-                    for i, upload in enumerate(uploads[:4]):
-                        with preview_cols[i]:
-                            st.image(upload.getvalue(), width="stretch", caption=upload.name)
-                    if len(uploads) > 4:
-                        st.caption(f"已选择 {len(uploads)} 张图片")
-            with col_meta:
-                context = _k12_context_inputs("photo")
+            uploads = st.file_uploader(
+                "📸 点击或拖拽上传错题图片（支持多选）",
+                type=["jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+            )
+            if uploads:
+                preview_cols = st.columns(min(len(uploads), 4))
+                for i, upload in enumerate(uploads[:4]):
+                    with preview_cols[i]:
+                        st.image(upload.getvalue(), width="stretch", caption=upload.name)
+                if len(uploads) > 4:
+                    st.caption(f"已选择 {len(uploads)} 张图片")
+
+            meta_col1, meta_col2 = st.columns(2)
+            with meta_col1:
                 tags_input = st.text_input("标签（可选，逗号分隔）", placeholder="例如：期末复习, 几何", key="photo_tags")
-                hint = st.text_area(
+            with meta_col2:
+                hint = st.text_input(
                     "给老师的话（可选）",
                     placeholder="例如：第二问总是不知道从哪里下手",
-                    height=68,
                 )
+            with st.expander("🎓 学科 / 年级 / 教材等补充信息（可选）", expanded=False):
+                context = _k12_context_inputs("photo")
 
             # 切题计划跨 rerun 存于 session_state；上传集合变化即作废
             plan = st.session_state.get("photo_plan")
@@ -314,8 +315,9 @@ def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: s
     for i, cand in enumerate(candidates):
         mark = " 🟥疑似做错" if cand["likely_wrong"] else ""
         label = f"[{cand['image']}] 第 {cand['number']} 题：{cand['summary']}{mark}"
-        if st.checkbox(label, value=default_checked(cand), key=f"photo_seg_{i}"):
-            checked.append(cand)
+        with st.container(border=True):
+            if st.checkbox(label, value=default_checked(cand), key=f"photo_seg_{i}"):
+                checked.append(cand)
     if plan["fallbacks"]:
         names = "、".join(f["name"] for f in plan["fallbacks"])
         st.caption(f"以下图片未切出多题，将按整图单题解析：{names}")
