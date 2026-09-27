@@ -437,3 +437,25 @@
    只在 `with st.status(...)` 动态作用域内才会写入 status 容器；回调是同步
    调用，跨线程使用需另寻通道。
 4. **API 路由不受影响**：`api/routers/detection.py` 不传回调，默认 None 静默。
+
+## P5.5 检测出题路径懒生成：消除不必要的 AI 补位调用（2026-09-27）
+
+### 修改的基座已有文件（P5.5）
+
+| 文件 | 说明 |
+| --- | --- |
+| `backend/services/question_mixins.py` | `similar_questions` 新增可选 `generate_min_pool: int \| None = None`：仅当 own+bank 候选数低于该阈值才调 AI 生成变式；默认 None 保持旧行为（不足 top_k 即补位），其他调用方（举一反三 API / tutor 页）不受影响 |
+| `backend/services/detection.py` | `start_detection` 传 `generate_min_pool=1`：库内有候选就完全不调 AI（秒出题），库内真空才生成变式兜底 |
+| `tests/test_detection_progress.py` | bank 路径消息序列改 `[🔍, 📚, ✅]`；三条路径均加 `_generate_variant` 调用计数断言（own/bank 路径 0 次、真空路径 1 次） |
+| `tests/test_detection_variety.py` | 耗尽用例适配：库内 3 题不再补位变式，3 次不重复后第 4 次直接走放宽重考 |
+
+### P5.5 合入上游注意事项
+
+1. **两层过滤语义勿混淆**：`generate_min_pool` 控制召回层「是否生成」；
+   「排除已考 tested_ref」发生在 detection 层 pick 阶段。库内候选全部考过时
+   不会触发新生成（召回非空），而是走 pick 的放宽重考——想让「全考过就
+   生成新变式」需在 detection 层判断 tested_refs 后再次调用，属另一决策。
+2. **✨ 进度消息语义随之变化**：检测路径下「AI 生成变式题」步骤只在库内
+   （own+bank）真空时出现；库内有候选时发起检测为纯检索，秒级返回。
+3. **其他调用方保持旧行为**：`generate_min_pool` 默认 None ≡ 不足 top_k 即
+   补位，举一反三 API 与 tutor 页的推荐丰富度不变。

@@ -131,6 +131,8 @@ class DetectionMixin:
             knowledge_points=list(question.knowledge_points or []),
             top_k=DETECTION_CANDIDATE_TOP_K,
             on_progress=on_progress,
+            # 库内有候选就完全不调 AI（秒出题）；库内真空才生成变式兜底
+            generate_min_pool=1,
         )
         if not outcome.items:
             raise LookupError("暂无可用的同类题（召回与生成均失败）")

@@ -125,12 +125,12 @@ def test_start_detection_no_repeat_until_exhausted(
     )
 
     refs = []
-    for _ in range(4):  # 3 道库内 + 1 道 generated 变式
+    for _ in range(3):  # 3 道库内候选（lazy 生成：库内非空不调 AI，无变式补位）
         challenge = question_service.start_detection(source.id, student_user.id)
         refs.append(_ref(challenge["log_id"]))
-    assert len(set(refs)) == 4  # 候选充足：4 次推题互不重复
+    assert len(set(refs)) == 3  # 候选充足：3 次推题互不重复
 
-    # 第 5 次：候选全部考过 → 放宽重考，仍有题可推
+    # 第 4 次：候选全部考过 → 放宽重考，仍有题可推
     challenge = question_service.start_detection(source.id, student_user.id)
     assert _ref(challenge["log_id"]) in set(refs)
 

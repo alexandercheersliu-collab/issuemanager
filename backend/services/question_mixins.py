@@ -606,6 +606,7 @@ class QueryMixin:
         strict: bool = False,
         top_k: int | None = None,
         on_progress: Callable[[str], None] | None = None,
+        generate_min_pool: int | None = None,
     ) -> SimilarQuestionsOutcome:
         """「举一反三」同类题召回（P3.1）：三级回落编排。
 
@@ -614,6 +615,11 @@ class QueryMixin:
         ③ 仍不足时由 AI 生成变式题兜底（source="generated"，复用 followup_question 能力）。
         strict=True 只做第 ① 级全约束召回。旧调用（不传约束参数）语义不变。
         on_progress：可选进度回调，真实走到哪级报哪级（未走到的级别不报）。
+        generate_min_pool：生成兜底门槛。默认 None 保持旧行为（候选不足
+        top_k 即调 AI 补位）；传入整数时仅当 own+bank 候选数低于该阈值才
+        调 AI 生成——检测场景传 1：库内有候选就完全不调 AI（秒出题），
+        库内真空才生成变式兜底。注意与 detection 层的已考排除是两回事：
+        本层只控制「是否生成」，「排除已考 tested_ref」发生在 pick 阶段。
         """
         top_k = top_k or self.settings.rag_top_k
         query_text = " ".join(
@@ -659,7 +665,8 @@ class QueryMixin:
                 level = max(level, bank.level)
                 items.extend(self._bank_hit_as_question(hit, -1 - i) for i, hit in enumerate(bank.hits))
 
-        if not strict and len(items) < top_k:
+        gen_threshold = top_k if generate_min_pool is None else generate_min_pool
+        if not strict and len(items) < gen_threshold:
             emit_progress(on_progress, PROGRESS_RECALL_GENERATE)
             variant = self._generate_variant(question)
             if variant:

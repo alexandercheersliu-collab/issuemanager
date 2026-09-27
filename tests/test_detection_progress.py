@@ -53,8 +53,21 @@ def _start_with_spy(question_service, qid, uid):
     return challenge, messages
 
 
+def _count_generate(question_service, monkeypatch):
+    """给 _generate_variant 装调用计数器，返回计数 dict。"""
+    calls = {"n": 0}
+    original = question_service._generate_variant
+
+    def spy(question):
+        calls["n"] += 1
+        return original(question)
+
+    monkeypatch.setattr(question_service, "_generate_variant", spy)
+    return calls
+
+
 def test_progress_own_hit_path(question_service, student_user, monkeypatch):
-    """错题库候选充足：只报「检索错题库」与「完成」，不报公共题库/AI 生成。"""
+    """错题库候选充足：只报「检索错题库」与「完成」，不调 AI、不报后续步骤。"""
     source = _make(question_service, student_user, "进度回调·源题A")
     others = [
         _make(question_service, student_user, f"进度回调·同类题A{i}") for i in range(10)
@@ -64,34 +77,33 @@ def test_progress_own_hit_path(question_service, student_user, monkeypatch):
         "vector_store",
         _StubStore(own_hits=[RagHit(q.id, 0.4) for q in others]),
     )
+    ai_calls = _count_generate(question_service, monkeypatch)
 
     challenge, messages = _start_with_spy(question_service, source.id, student_user.id)
     assert challenge["tested"]["source"] == "manual"
     assert messages == [PROGRESS_RECALL_OWN, PROGRESS_DONE]
+    assert ai_calls["n"] == 0
 
 
 def test_progress_bank_fallback_path(question_service, student_user, monkeypatch):
-    """错题库为空、公共题库命中：报 错题库→公共题库→AI 补位→完成；不报参考答案生成。"""
+    """错题库为空、公共题库命中：报 错题库→公共题库→完成；不再调 AI 生成补位。"""
     source = _make(question_service, student_user, "进度回调·源题B")
     monkeypatch.setattr(
         question_service, "vector_store", _StubStore(bank_hits=[_bank_hit()])
     )
+    ai_calls = _count_generate(question_service, monkeypatch)
 
     challenge, messages = _start_with_spy(question_service, source.id, student_user.id)
     assert challenge["tested"]["source"] == "bank"
-    assert messages == [
-        PROGRESS_RECALL_OWN,
-        PROGRESS_RECALL_BANK,
-        PROGRESS_RECALL_GENERATE,  # 候选不足 top-k，仍走生成兜底补位
-        PROGRESS_DONE,
-    ]
-    assert PROGRESS_VARIANT_ANSWER not in messages  # 选中的是 bank 题，无需生成答案
+    assert messages == [PROGRESS_RECALL_OWN, PROGRESS_RECALL_BANK, PROGRESS_DONE]
+    assert ai_calls["n"] == 0  # 库内有候选：lazy 生成不调 AI（秒出题）
 
 
 def test_progress_generated_path(question_service, student_user, monkeypatch):
     """两级召回全空、AI 变式兜底：完整五步，含参考答案快照生成。"""
     source = _make(question_service, student_user, "进度回调·源题C")
     monkeypatch.setattr(question_service, "vector_store", _StubStore())
+    ai_calls = _count_generate(question_service, monkeypatch)
 
     challenge, messages = _start_with_spy(question_service, source.id, student_user.id)
     assert challenge["tested"]["source"] == "generated"
@@ -102,6 +114,7 @@ def test_progress_generated_path(question_service, student_user, monkeypatch):
         PROGRESS_VARIANT_ANSWER,
         PROGRESS_DONE,
     ]
+    assert ai_calls["n"] == 1  # 库内真空才生成一次兜底变式
 
 
 def test_progress_default_none_still_works(question_service, student_user, monkeypatch):
