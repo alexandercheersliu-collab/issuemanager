@@ -244,15 +244,36 @@ class BaseAIProvider(abc.ABC):
         raise AIMessageError(f"AI 解析失败（已重试 {self.settings.ai_max_retries} 次）: {last_error}")
 
 
+# 列表字段的宽松上限：与 QuestionAnalysis 的 max_length 保持一致。
+# 模型偶尔多给几个标签/知识点属正常波动，截断优于整题解析失败。
+_LIST_FIELD_LIMIT = 6
+
+
 def parse_analysis(raw: str) -> QuestionAnalysis:
     """从模型响应中稳健地提取 JSON 并校验为 QuestionAnalysis。
 
     兼容三类输出：纯 JSON、```json 围栏、前后夹杂说明文字。
+    列表字段（knowledge_points/tags）超出上限时先去重再截断，不判失败。
     """
     candidate = extract_json_block(raw)
     if candidate is None:
         raise AIMessageError("响应中未找到 JSON 结构")
+    _truncate_list_fields(candidate)
     return QuestionAnalysis.model_validate(candidate)
+
+
+def _truncate_list_fields(candidate: dict) -> None:
+    """把超限的列表字段去重后截断到 _LIST_FIELD_LIMIT（原地修改）。"""
+    for key in ("knowledge_points", "tags"):
+        value = candidate.get(key)
+        if isinstance(value, list) and len(value) > _LIST_FIELD_LIMIT:
+            seen: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    normalized = item.strip()
+                    if normalized and normalized not in seen:
+                        seen.append(normalized)
+            candidate[key] = seen[:_LIST_FIELD_LIMIT]
 
 
 def extract_json_block(raw: str) -> dict | None:

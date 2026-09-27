@@ -79,3 +79,26 @@ def test_mock_provider_returns_valid_analysis():
     assert analysis.knowledge_points
     info = provider.provider_info()
     assert info.demo_mode is True
+
+
+def test_parse_overlong_tags_truncated_not_failed():
+    # 回归：真实模型给 7 个 tags 曾导致整题解析失败（too_long），应去重截断而非报错
+    import json
+
+    over = dict(VALID, tags=["小数除法", "余数", "求余数", "除法", "小数", "计算", "应用题"])
+    analysis = parse_analysis(json.dumps(over, ensure_ascii=False))
+    assert len(analysis.tags) == 6
+    assert analysis.tags[0] == "小数除法"
+
+
+def test_parse_overlong_knowledge_points_dedup_then_truncate():
+    import json
+
+    over = dict(
+        VALID,
+        knowledge_points=["除法", " 除法 ", "余数", "小数", "竖式", "近似数", "单位换算", "估算"],
+    )
+    analysis = parse_analysis(json.dumps(over, ensure_ascii=False))
+    assert len(analysis.knowledge_points) == 6
+    assert analysis.knowledge_points[0] == "除法"
+    assert len(set(analysis.knowledge_points)) == 6
