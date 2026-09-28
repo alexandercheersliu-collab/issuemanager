@@ -45,18 +45,33 @@ def stat_card(
     variant: str = "",
 ) -> None:
     """统计卡：大数字 + 标签；可选图标与 accent 色变体（accent/teal/ok/warn）。"""
+    st.markdown(_stat_card_html(value, label, accent=accent, icon=icon, variant=variant), unsafe_allow_html=True)
+
+
+def _stat_card_html(value, label: str, accent: bool = False, icon: str = "", variant: str = "") -> str:
     variant_class = f" mm-stat--{variant}" if variant else (" mm-stat--accent" if accent else "")
     icon_html = f'<div class="mm-stat__icon">{icon}</div>' if icon else ""
-    st.markdown(
-        f"""
+    return f"""
         <div class="mm-stat{variant_class}">
             {icon_html}
             <div class="mm-stat__value">{value}</div>
             <div class="mm-stat__label">{label}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        </div>"""
+
+
+def stat_grid(cards: list[dict]) -> None:
+    """统计卡网格：一次渲染多张卡，桌面 4 列 / 手机 2 列（CSS grid 自适应）。
+
+    cards: [{"value": ..., "label": ..., "icon": "", "variant": ""}, ...]
+    相比 st.columns + stat_card，窄屏下不会逐张整行堆叠，主操作按钮保持一屏可见。
+    """
+    inner = "".join(
+        _stat_card_html(
+            c["value"], c["label"], icon=c.get("icon", ""), variant=c.get("variant", "")
+        )
+        for c in cards
     )
+    st.markdown(f'<div class="mm-stat-grid">{inner}</div>', unsafe_allow_html=True)
 
 
 def provider_badges() -> str:

@@ -27,7 +27,7 @@ _PAGE_SIZE = 8
 
 def render_notebook_page(user: dict) -> None:
     service = get_question_service()
-    page_header("错题本", "支持关键词与语义搜索；教师可查看全部学生错题")
+    page_header("错题本", "输入自然语言即可搜索；更多筛选在下方折叠区")
 
     incoming = pop_params("tag", "keyword", "student")
     preset_tag = incoming.get("tag")
@@ -80,72 +80,73 @@ def render_notebook_page(user: dict) -> None:
             view_user_id = user["id"]
             include_others = False
 
-        # 第二行：开关一行排布
-        tog1, tog2, tog3, _tog_pad = st.columns([1.2, 1.2, 1.4, 3])
-        with tog1:
-            semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
-        with tog2:
-            only_due = st.toggle("仅看待复习", value=False, help="隐藏已掌握和尚未到期的错题")
-        with tog3:
-            only_mastered = st.toggle("仅看已掌握 🏆", value=False, help="只显示已归档的熟题")
-
-        # 第三行：筛选器紧凑网格（标签 / 学科 / 年级 / 错因 / 来源文档）
+        # 低频筛选（开关 + 标签/学科/年级/错因/来源文档）收进折叠区：
+        # 学生日常只用搜索框，全部平铺会把题目列表挤到一屏之外
         all_questions = service.list_questions(
             view_user_id, include_others=include_others, semantic=False
         )
         all_tags = sorted({t for q in all_questions for t in q.tags})
-        filt1, filt2, filt3, filt4, filt5 = st.columns(5)
-        with filt1:
-            default_index = (
-                (["全部"] + all_tags).index(preset_tag) if preset_tag in all_tags else 0
-            )
-            tag_filter = st.selectbox(
-                "按标签筛选", ["全部"] + all_tags, index=default_index, key="notebook_tag"
-            )
-        with filt2:
-            # K12 元数据筛选：学科（SQL 下推）
-            present_subjects = sorted({q.subject for q in all_questions if q.subject})
-            subject_options = ["全部"] + [
-                SUBJECT_NAMES.get(s, s) for s in present_subjects
-            ]
-            subject_label = st.selectbox(
-                "按学科筛选", subject_options, index=0, key="notebook_subject"
-            )
-            subject_filter = None
-            if subject_label != "全部":
-                subject_filter = next(
-                    (k for k, v in SUBJECT_NAMES.items() if v == subject_label),
-                    subject_label,
+        with st.expander("🔎 更多筛选（语义搜索 · 标签 · 学科 · 年级 · 错因 · 来源）", expanded=False):
+            tog1, tog2, tog3, _tog_pad = st.columns([1.2, 1.2, 1.4, 3])
+            with tog1:
+                semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
+            with tog2:
+                only_due = st.toggle("仅看待复习", value=False, help="隐藏已掌握和尚未到期的错题")
+            with tog3:
+                only_mastered = st.toggle("仅看已掌握 🏆", value=False, help="只显示已归档的熟题")
+
+            filt1, filt2, filt3, filt4, filt5 = st.columns(5)
+            with filt1:
+                default_index = (
+                    (["全部"] + all_tags).index(preset_tag) if preset_tag in all_tags else 0
                 )
-        with filt3:
-            present_grades = sorted({q.grade for q in all_questions if q.grade is not None})
-            grade_label = st.selectbox(
-                "按年级筛选",
-                ["全部"] + [f"{g} 年级" for g in present_grades],
-                index=0,
-                key="notebook_grade",
-            )
-            grade_filter = (
-                int(grade_label.split()[0]) if grade_label != "全部" else None
-            )
-        with filt4:
-            category_label = st.selectbox(
-                "按错因筛选", ["全部", *ERROR_CATEGORIES], index=0, key="notebook_errcat"
-            )
-            category_filter = None if category_label == "全部" else category_label
-        with filt5:
-            # 来源文档筛选：整卷导入题落库为 source_doc=文档名#页码，按文档名前缀过滤
-            doc_names = sorted(
-                {
-                    q.source_doc.split("#")[0]
-                    for q in all_questions
-                    if getattr(q, "source_doc", None)
-                }
-            )
-            doc_label = st.selectbox(
-                "按来源文档筛选", ["全部"] + doc_names, index=0, key="notebook_source_doc"
-            )
-            source_doc_filter = None if doc_label == "全部" else doc_label
+                tag_filter = st.selectbox(
+                    "按标签筛选", ["全部"] + all_tags, index=default_index, key="notebook_tag"
+                )
+            with filt2:
+                # K12 元数据筛选：学科（SQL 下推）
+                present_subjects = sorted({q.subject for q in all_questions if q.subject})
+                subject_options = ["全部"] + [
+                    SUBJECT_NAMES.get(s, s) for s in present_subjects
+                ]
+                subject_label = st.selectbox(
+                    "按学科筛选", subject_options, index=0, key="notebook_subject"
+                )
+                subject_filter = None
+                if subject_label != "全部":
+                    subject_filter = next(
+                        (k for k, v in SUBJECT_NAMES.items() if v == subject_label),
+                        subject_label,
+                    )
+            with filt3:
+                present_grades = sorted({q.grade for q in all_questions if q.grade is not None})
+                grade_label = st.selectbox(
+                    "按年级筛选",
+                    ["全部"] + [f"{g} 年级" for g in present_grades],
+                    index=0,
+                    key="notebook_grade",
+                )
+                grade_filter = (
+                    int(grade_label.split()[0]) if grade_label != "全部" else None
+                )
+            with filt4:
+                category_label = st.selectbox(
+                    "按错因筛选", ["全部", *ERROR_CATEGORIES], index=0, key="notebook_errcat"
+                )
+                category_filter = None if category_label == "全部" else category_label
+            with filt5:
+                # 来源文档筛选：整卷导入题落库为 source_doc=文档名#页码，按文档名前缀过滤
+                doc_names = sorted(
+                    {
+                        q.source_doc.split("#")[0]
+                        for q in all_questions
+                        if getattr(q, "source_doc", None)
+                    }
+                )
+                doc_label = st.selectbox(
+                    "按来源文档筛选", ["全部"] + doc_names, index=0, key="notebook_source_doc"
+                )
+                source_doc_filter = None if doc_label == "全部" else doc_label
 
         questions = service.list_questions(
             view_user_id,
@@ -184,40 +185,41 @@ def render_notebook_page(user: dict) -> None:
                 reverse=True,
             )
 
-        st.markdown("<br>", unsafe_allow_html=True)
         if questions:
-            exp_col1, exp_col2, exp_col3 = st.columns(3)
-            with exp_col1:
-                redo_io = generate_word_exam(questions, "错题复习卷", mode="redo", answer_key=True)
-                st.download_button(
-                    "导出重做版（原图+留白+卷末答案）",
-                    data=redo_io,
-                    file_name=f"错题复习卷_重做版_{dt.date.today():%Y%m%d}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    width="stretch",
-                    type="primary",
-                    help="只含题目与答题留白，卷末附参考答案，适合打印重做",
-                )
-            with exp_col2:
-                detail_io = generate_word_exam(questions, "错题详解卷", mode="detailed")
-                st.download_button(
-                    "导出详解版（含解析答案）",
-                    data=detail_io,
-                    file_name=f"错题详解卷_{dt.date.today():%Y%m%d}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    width="stretch",
-                    help="含完整解析、答案与变式练习",
-                )
-            with exp_col3:
-                pdf_io = generate_pdf_exam(questions, "错题复习卷")
-                st.download_button(
-                    "导出 PDF（打印友好）",
-                    data=pdf_io,
-                    file_name=f"错题复习卷_{dt.date.today():%Y%m%d}.pdf",
-                    mime="application/pdf",
-                    width="stretch",
-                    help="题目在前、卷末参考答案，任何设备可打开",
-                )
+            # 导出属于低频操作（打印/分享时才用），收进折叠区保持列表清爽
+            with st.expander("📤 导出（打印重做 / 详解 / PDF）", expanded=False):
+                exp_col1, exp_col2, exp_col3 = st.columns(3)
+                with exp_col1:
+                    redo_io = generate_word_exam(questions, "错题复习卷", mode="redo", answer_key=True)
+                    st.download_button(
+                        "导出重做版（原图+留白+卷末答案）",
+                        data=redo_io,
+                        file_name=f"错题复习卷_重做版_{dt.date.today():%Y%m%d}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        width="stretch",
+                        type="primary",
+                        help="只含题目与答题留白，卷末附参考答案，适合打印重做",
+                    )
+                with exp_col2:
+                    detail_io = generate_word_exam(questions, "错题详解卷", mode="detailed")
+                    st.download_button(
+                        "导出详解版（含解析答案）",
+                        data=detail_io,
+                        file_name=f"错题详解卷_{dt.date.today():%Y%m%d}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        width="stretch",
+                        help="含完整解析、答案与变式练习",
+                    )
+                with exp_col3:
+                    pdf_io = generate_pdf_exam(questions, "错题复习卷")
+                    st.download_button(
+                        "导出 PDF（打印友好）",
+                        data=pdf_io,
+                        file_name=f"错题复习卷_{dt.date.today():%Y%m%d}.pdf",
+                        mime="application/pdf",
+                        width="stretch",
+                        help="题目在前、卷末参考答案，任何设备可打开",
+                    )
 
     if not questions:
         st.markdown(

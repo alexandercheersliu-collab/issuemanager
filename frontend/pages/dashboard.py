@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from backend.models.schemas import SUBJECT_NAMES
-from frontend.common import get_question_service, go_to, page_header, provider_badges, stat_card
+from frontend.common import get_question_service, go_to, page_header, provider_badges, stat_grid
 
 _BLUE = "#2563eb"
 
@@ -174,29 +174,7 @@ def render_dashboard(user: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        stat_card(stats["total"], "累计错题", icon="📚", variant="accent")
-    with col2:
-        stat_card(len(stats["tag_stats"]), "涉及知识点", icon="🧩", variant="teal")
-    with col3:
-        stat_card(stats["reviewed"], "已复习错题", icon="✅", variant="ok")
-    with col4:
-        stat_card(stats["due"], "待复习", icon="⏰", variant="warn")
-
-    # P3.3 检测报表：同类题通过率 + 本周降级错题数
-    detection = service.detection_overview(user["id"])
-    det_col1, det_col2, _, _ = st.columns(4)
-    with det_col1:
-        pass_rate = detection["detection_pass_rate"]
-        stat_card(
-            f"{pass_rate}%" if pass_rate is not None else "—",
-            "同类题通过率",
-            icon="🎯",
-        )
-    with det_col2:
-        stat_card(detection["week_demotions"], "本周降级错题数", icon="🏅")
-
+    # 主操作前置：学生打开看板第一件事就是复习/录题，手机上不能被统计卡挤到二屏
     action_col1, action_col2, action_col3, _ = st.columns([1, 1, 1, 1])
     with action_col1:
         if st.button("🎬 开始复习", type="primary", width="stretch", disabled=stats["due"] == 0):
@@ -207,6 +185,14 @@ def render_dashboard(user: dict) -> None:
     with action_col3:
         if st.button("📒 打开错题本", width="stretch"):
             go_to("notebook")
+
+    # 统计卡网格：桌面 4 列 / 手机 2×2，避免窄屏逐张整行堆叠
+    stat_grid([
+        {"value": stats["total"], "label": "累计错题", "icon": "📚", "variant": "accent"},
+        {"value": len(stats["tag_stats"]), "label": "涉及知识点", "icon": "🧩", "variant": "teal"},
+        {"value": stats["reviewed"], "label": "已复习错题", "icon": "✅", "variant": "ok"},
+        {"value": stats["due"], "label": "待复习", "icon": "⏰", "variant": "warn"},
+    ])
 
     weekly = stats.get("weekly", {})
     if weekly:
@@ -292,38 +278,46 @@ def render_dashboard(user: dict) -> None:
             else:
                 st.caption("复习几道题后，这里会生成掌握度分析。")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    with st.container(border=True):
-        page_header("近 14 天录入趋势")
-        activity = stats["activity"]
-        bar = px.bar(
-            x=[a["date"] for a in activity],
-            y=[a["count"] for a in activity],
-            labels={"x": "日期", "y": "新增错题"},
-        )
-        bar.update_traces(marker_color=_BLUE)
-        bar.update_layout(
-            margin=dict(t=10, b=20, l=20, r=20),
-            height=260,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(family="sans-serif", color=_chart_text()),
-            xaxis=dict(type="category", showgrid=False),
-            yaxis=dict(dtick=1, range=[0, max(3, max(a["count"] for a in activity) + 1)], gridcolor=_chart_grid()),
-        )
-        st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
+    # 低频分析（检测报表 / 录入趋势 / 日历 / 正确率 / 难度分布）收进折叠区：
+    # 学生日常使用集中在复习与录题，这些图表属于「偶尔看看」的学情分析
+    with st.expander("📈 更多学情分析（检测报表 · 趋势 · 日历）", expanded=False):
+        detection = service.detection_overview(user["id"])
+        pass_rate = detection["detection_pass_rate"]
+        stat_grid([
+            {"value": f"{pass_rate}%" if pass_rate is not None else "—", "label": "同类题通过率", "icon": "🎯"},
+            {"value": detection["week_demotions"], "label": "本周降级错题数", "icon": "🏅"},
+        ])
 
-    cal_col, trend_col = st.columns([3, 2])
-    with cal_col:
         with st.container(border=True):
-            page_header("学习日历", "近 90 天 · 颜色越深，当天学得越多")
-            _render_calendar(stats["calendar"])
-    with trend_col:
-        with st.container(border=True):
-            page_header("复习正确率", "近 30 天 · 记得/秒懂占比")
-            _render_accuracy_trend(stats["accuracy_trend"])
+            page_header("近 14 天录入趋势")
+            activity = stats["activity"]
+            bar = px.bar(
+                x=[a["date"] for a in activity],
+                y=[a["count"] for a in activity],
+                labels={"x": "日期", "y": "新增错题"},
+            )
+            bar.update_traces(marker_color=_BLUE)
+            bar.update_layout(
+                margin=dict(t=10, b=20, l=20, r=20),
+                height=260,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="sans-serif", color=_chart_text()),
+                xaxis=dict(type="category", showgrid=False),
+                yaxis=dict(dtick=1, range=[0, max(3, max(a["count"] for a in activity) + 1)], gridcolor=_chart_grid()),
+            )
+            st.plotly_chart(bar, width="stretch", config={"displayModeBar": False})
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    with st.container(border=True):
-        page_header("难度分布", "easy / medium / hard 错题构成")
-        _render_difficulty(stats.get("difficulty", {}))
+        cal_col, trend_col = st.columns([3, 2])
+        with cal_col:
+            with st.container(border=True):
+                page_header("学习日历", "近 90 天 · 颜色越深，当天学得越多")
+                _render_calendar(stats["calendar"])
+        with trend_col:
+            with st.container(border=True):
+                page_header("复习正确率", "近 30 天 · 记得/秒懂占比")
+                _render_accuracy_trend(stats["accuracy_trend"])
+
+        with st.container(border=True):
+            page_header("难度分布", "easy / medium / hard 错题构成")
+            _render_difficulty(stats.get("difficulty", {}))
