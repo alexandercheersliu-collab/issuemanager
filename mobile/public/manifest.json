@@ -1,0 +1,11 @@
+{
+  "name": "智能错题本",
+  "short_name": "错题本",
+  "description": "拍照录题 · 间隔复习 · 错题检索",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8fafc",
+  "theme_color": "#2563eb",
+  "lang": "zh-CN"
+}

@@ -152,10 +152,14 @@ def render_review_page(user: dict) -> None:
     cursor = min(st.session_state[idx_key], len(due) - 1)
     question = due[cursor]
 
+    # 标签徽标最多露 5 个，多余折叠为 +n，避免窄屏被标签墙挤占闪卡空间
+    tags_html = "".join(f'<span class="mm-badge">{t}</span>' for t in question.tags[:5])
+    if len(question.tags) > 5:
+        tags_html += f'<span class="mm-badge">+{len(question.tags) - 5}</span>'
     st.markdown(
         f"""<div style="margin-bottom:0.6rem">
         <span class="mm-badge mm-badge--blue">{question.difficulty}</span>
-        {''.join(f'<span class="mm-badge">{t}</span>' for t in question.tags)}
+        {tags_html}
         </div>""",
         unsafe_allow_html=True,
     )

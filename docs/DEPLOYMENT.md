@@ -5,6 +5,7 @@
 | 形态 | 适用场景 | 说明 |
 |---|---|---|
 | 本地运行 | 演示 / 日常使用 | `streamlit run app.py`，SQLite + 内置嵌入模型，零外部依赖 |
+| 家庭局域网 | 电脑做服务端，手机/平板同 Wi-Fi 使用 | 见「1.5 家庭局域网部署」，移动端由 API 网关同源托管 |
 | Docker Compose | 云服务器 / 局域网 | Web + API 双服务，数据卷持久化 |
 | Streamlit Cloud | 纯前端演示 | 仅 Web 层；演示模式（无 Key）或配 Secret |
 
@@ -20,6 +21,64 @@ uvicorn api.main:app --port 8000   # API: http://localhost:8000/docs（可选）
 ```
 
 首次启动自动建表并创建种子账号（`SEED_*` 环境变量可改），请立即在「设置」中修改密码。
+
+## 1.5 家庭局域网部署（电脑做服务端，手机/平板同 Wi-Fi 使用）
+
+移动端是纯静态构建产物，**由 FastAPI 网关同源托管在 `/m`**：一个 8000 端口同时服务
+API 与移动端页面，天然免 CORS，手机浏览器直接访问即可。
+
+### 一次性准备（在电脑上）
+
+```bash
+# 1. 构建移动端（VITE_API_BASE=/api 已由 mobile/.env.production 固定，同源相对路径）
+cd mobile
+npm install
+npm run build          # 产物在 mobile/dist，网关启动时自动挂载到 /m
+cd ..
+```
+
+### 每次启动（在电脑上）
+
+```bash
+# API + 移动端（8000）：--host 0.0.0.0 允许局域网访问
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+# 教师端 Web（8501，可选，仅电脑上用）
+streamlit run app.py --server.address 0.0.0.0
+```
+
+### 手机 / 平板访问
+
+1. 查电脑局域网 IP：Windows 执行 `ipconfig`，取「IPv4 地址」（如 `192.168.1.100`）；
+2. 手机/平板连**同一 Wi-Fi**，浏览器打开 `http://192.168.1.100:8000/m/`；
+3. 首次访问若被 Windows 防火墙拦截：允许 `python.exe` 通过专用网络的入站连接
+   （弹出授权框直接勾选即可，或「高级安全防火墙」手动加 8000 入站规则）；
+4. 浏览器菜单选「添加到主屏幕」，之后像 App 一样全屏打开
+   （局域网 HTTP 下 PWA 离线缓存不可用，但图标与全屏模式可用）。
+
+### 固定电脑 IP（建议）
+
+路由器 DHCP 可能换 IP。二选一：
+
+- 路由器后台给电脑 MAC 地址做「地址绑定/静态租约」（推荐，不改电脑设置）；
+- 或 Windows 网络适配器手动设静态 IP。
+
+### 开机自启（可选）
+
+Windows「任务计划程序」建一个登录时触发的任务，操作填：
+
+```
+程序: <项目目录>\.venv\Scripts\python.exe
+参数: -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+起始于: <项目目录>
+```
+
+### 安全说明
+
+- 局域网 HTTP 明文传输，仅限家庭可信网络；**不要把 8000 端口映射到公网**（要公网用请走
+  Docker Compose + Nginx/Caddy TLS，见第 2 节）；
+- `AUTH_SECRET` 务必改成强随机值（令牌签名密钥），`API_CORS_ORIGINS` 同源部署下保持默认即可
+  （同源不需要 CORS 放行）。
 
 ## 2. Docker Compose（推荐）
 

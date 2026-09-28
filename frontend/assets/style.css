@@ -311,7 +311,6 @@ section[data-testid="stSidebar"] hr {
   display: inline-block;
 }
 
-
 /* ---------------- 后台管理：危险操作区 ---------------- */
 .mm-danger-zone {
   background: var(--mm-danger-bg);
@@ -339,7 +338,6 @@ section[data-testid="stSidebar"] hr {
   border-color: var(--mm-danger);
   filter: brightness(1.08);
 }
-
 
 /* ---------------- 知识点掌握条 ---------------- */
 .mm-mastery { margin-bottom: 0.85rem; }
@@ -373,6 +371,27 @@ section[data-testid="stSidebar"] hr {
   box-shadow: var(--mm-shadow-md);
 }
 .mm-flashcard__hint { color: var(--mm-muted); font-size: 0.9rem; }
+
+/* 闪卡正面题干（题面/解析分离后的文字题面）：可读性优先 */
+.st-key-review_stem_box {
+  font-size: 1.06rem;
+  line-height: 1.75;
+  padding: 0.3rem 0.2rem 0.6rem;
+}
+.st-key-review_stem_box p { margin-bottom: 0.5rem; }
+
+/* 旧版整图录入：限高居中，避免长图把「显示解析」挤出首屏 */
+.st-key-review_legacy_image [data-testid="stImage"] {
+  display: flex;
+  justify-content: center;
+}
+.st-key-review_legacy_image img {
+  max-height: 46vh;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  border-radius: var(--mm-radius-sm);
+}
 
 /* ---------------- 登录页 ---------------- */
 .mm-login {
@@ -665,6 +684,10 @@ section[data-testid="stSidebar"] [data-baseweb] a { transition: background-color
   /* 横向溢出防护：长公式/长链接强制折行，媒体不撑破 */
   div[data-testid="stMarkdownContainer"] { overflow-wrap: anywhere; }
   .stMain img, .stMain video, .stMain canvas { max-width: 100%; }
+
+  /* 闪卡题干字号略收；旧版整图再压低限高，保证评分动作一屏可达 */
+  .st-key-review_stem_box { font-size: 1rem; }
+  .st-key-review_legacy_image img { max-height: 38vh; }
 
   /* sac 评分按钮 iframe 给足两行高度（内部 2×2 换行由 iframe 注入脚本负责） */
   iframe[title*="streamlit_antd_components"] { min-height: 132px; }
