@@ -553,3 +553,33 @@
    选项行内容横向位移；改方案时注意保持选中/非选中行内容对齐。
 3. **深浅色全靠 CSS 变量**：本轮未动 theme.py；新增侧边栏样式请继续只引用
    `--mm-*` 变量，不要写死颜色。
+
+
+## P5.10 复习闪卡正面：题面文字优先，整页原图折叠收起（2026-09-28）
+
+### 修改的基座已有文件（P5.10）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/pages/review.py` | 新增纯函数 `split_stem_and_analysis(content_markdown)`：按 `\n\n---\n\n` 首个分隔符拆（题干, 解析），无分隔符返回（原文, None），解析段为空视为 None。闪卡正面三分支：① 切题录入（有分隔符且题干非空）→ 正面完整显示题干文字（keyed container `review_stem_box` 排版），原图收进默认收起的「📷 查看原图」expander；② 旧版整图录入（无分隔符有原图）→ 原图限高 320px 居中（keyed container `review_legacy_image`）+ caption 说明并引导去错题本编辑补录题干；③ 无图无分隔符 → 保持旧行为（截断 220 字 + caption）。揭示后：有分隔符只显示解析段 + 答案，无分隔符保持全文 + 答案 |
+| `frontend/assets/style.css` | 新增 `.st-key-review_stem_box`（题面默读排版：1.06rem/1.85 行高）与 `.st-key-review_legacy_image`（img max-height 320px、居中、object-fit contain） |
+
+### 新增文件（P5.10）
+
+| 文件 | 说明 |
+| --- | --- |
+| `tests/test_review_flashcard.py` | 6 例：有分隔符拆分 / 无分隔符回落 / 只拆首个分隔符 / 两端空白 strip / 空解析段返回 None / 空字符串 |
+
+### P5.10 合入上游注意事项
+
+1. **分隔符是数据契约**：`\n\n---\n\n` 与 `question_mixins.analyze_text_and_save`
+   的落库格式一致；上游若改落库格式，两处必须同步，且存量数据不迁移
+   （旧格式自动走「无分隔符」分支，行为安全）。
+2. **样式依赖 keyed container 的 `st-key-*` 类**：Streamlit ≥1.44 才支持
+   container key 生成类名；升级/降级 Streamlit 时留意该类名契约。
+3. **「一键提取题面文字」有意未做**：`analyze_question` 的 QuestionAnalysis
+   不含题干字段（题干只存在于切题管线 `segment_page` 的分段结果里），在复习页
+   重跑切题需要用户指定「哪一段是这道题」，交互与 AI 成本都高、且有覆盖用户
+   已编辑内容的风险；当前用 caption 引导去错题本「编辑」补录题干替代。
+4. **揭示态不再重复题干**：有分隔符时正面已展示题干，揭示只放解析段；
+   若上游想让揭示态题干+解析同屏，把 `analysis_part` 改回 `content_markdown` 即可。

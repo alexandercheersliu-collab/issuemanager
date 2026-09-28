@@ -25,6 +25,21 @@ _GOOD_GRADES = ("good", "easy")
 # 降级状态机终态：已降级的题不再推荐检测
 _TERMINAL_DEMOTION_STATES = ("demoted",)
 
+# 切题录入的题面/解析分隔符（与 question_mixins.analyze_text_and_save 落库格式一致）
+_STEM_SEP = "\n\n---\n\n"
+
+
+def split_stem_and_analysis(content_markdown: str) -> tuple[str, str | None]:
+    """把 content_markdown 拆成（题干, 解析）；无分隔符的旧题返回（原文, None）。
+
+    只按第一个分隔符拆分（解析里若再出现 --- 归解析段）；两段各自 strip，
+    解析段为空视为无解析（返回 None），由调用方回落到全文展示。
+    """
+    if _STEM_SEP not in content_markdown:
+        return content_markdown.strip(), None
+    stem, _, analysis = content_markdown.partition(_STEM_SEP)
+    return stem.strip(), analysis.strip() or None
+
 
 def pick_detection_candidates(
     items: list[dict],
@@ -89,7 +104,7 @@ def _render_detection_recommendations(service, user: dict, summary: dict) -> Non
 
 def render_review_page(user: dict) -> None:
     service = get_question_service()
-    page_header("今日复习", "SM-2 间隔重复调度 · 按记忆掌握程度评分，自动安排下次复习时间")
+    page_header("今日复习", "按记忆掌握程度评分，自动安排下次复习时间")
 
     due = service.due_questions(user["id"])
     if not due:
@@ -156,18 +171,37 @@ def render_review_page(user: dict) -> None:
                     last = last.replace(tzinfo=dt.timezone.utc)
                 days_ago = (dt.datetime.now(dt.timezone.utc) - last).days
                 st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
-            if question.image_path and os.path.exists(question.image_path):
-                st.image(question.image_path, width=460)
+            stem, analysis_part = split_stem_and_analysis(question.content_markdown)
+            has_image = bool(question.image_path and os.path.exists(question.image_path))
+            if stem and analysis_part is not None:
+                # 切题录入：题面文字优先（完整可读、LaTeX 可渲染），原图折叠收起
+                with st.container(key="review_stem_box"):
+                    st.markdown(stem)
+                if has_image:
+                    with st.expander("📷 查看原图", expanded=False):
+                        st.image(question.image_path)
+            elif has_image:
+                # 旧版整图录入：题面只在图片里，限高居中展示
+                with st.container(key="review_legacy_image"):
+                    st.image(question.image_path)
+                st.caption(
+                    "本题来自整图录入，未提取题面文字；"
+                    "如需文字题面，请到「错题本」对应题目点「编辑」补录题干。"
+                )
             else:
                 st.markdown(question.content_markdown[:220], unsafe_allow_html=True)
                 st.caption("（本题无原图，请根据题面回忆解法）")
 
-            if st.button("显示解析", type="secondary", width="stretch"):
+            if st.button("显示解析", type="primary", width="stretch"):
                 st.session_state[reveal_key] = True
 
             if st.session_state.get(reveal_key):
                 st.divider()
-                st.markdown(question.content_markdown, unsafe_allow_html=True)
+                # 有分隔符：正面已展示题干，这里只放解析段；无分隔符保持全文
+                st.markdown(
+                    analysis_part if analysis_part is not None else question.content_markdown,
+                    unsafe_allow_html=True,
+                )
                 st.markdown(f"**答案**：{question.answer}")
                 # 各档评分的下次间隔预览（一行紧凑展示）
                 previews = []

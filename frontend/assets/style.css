@@ -220,6 +220,16 @@ section[data-testid="stSidebar"] hr {
 .mm-stat--ok { border-top: 3px solid var(--mm-ok); }
 .mm-stat--warn { border-top: 3px solid var(--mm-warn); }
 
+/* 统计卡网格：一次 markdown 渲染多张卡，桌面 4 列 / 手机 2 列，
+   避免 st.columns 在窄屏逐张整行堆叠（手机要翻近两屏才看到主操作）。 */
+.mm-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+.mm-stat-grid .mm-stat { height: 100%; }
+
 /* ---------------- 欢迎区 ---------------- */
 .mm-welcome {
   background: linear-gradient(135deg, var(--mm-navy) 0%, #234a7d 60%, #155e75 100%);
@@ -280,6 +290,26 @@ section[data-testid="stSidebar"] hr {
 .mm-pair__tags .mm-badge { margin-right: 0; }
 .mm-pair__x { flex: none; color: var(--mm-muted); font-size: 0.8rem; }
 .mm-pair__count { flex: none; margin-right: 0; white-space: nowrap; }
+
+/* ---------------- 复习闪卡：题面文字与旧题原图 ---------------- */
+/* 题面：默读作答排版（keyed container → st-key-* 类） */
+.st-key-review_stem_box {
+  font-size: 1.06rem;
+  line-height: 1.85;
+  padding: 0.2rem 0.1rem;
+}
+.st-key-review_stem_box p { margin-bottom: 0.6rem; }
+/* 旧版整图录入的原图：限高约 320px、居中、保持比例 */
+.st-key-review_legacy_image [data-testid="stImage"] {
+  text-align: center;
+}
+.st-key-review_legacy_image [data-testid="stImage"] img {
+  max-height: 320px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  display: inline-block;
+}
 
 /* ---------------- 知识点掌握条 ---------------- */
 .mm-mastery { margin-bottom: 0.85rem; }
@@ -583,6 +613,21 @@ section[data-testid="stSidebar"] [data-baseweb] a { transition: background-color
   /* 统计卡数值略缩 */
   .mm-stat__value { font-size: 1.55rem; }
   .mm-stat { padding: 0.8rem 0.9rem; }
+
+  /* 统计卡网格：手机 2×2 排布，一屏内同时露出主操作按钮 */
+  .mm-stat-grid { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+  .mm-stat-grid .mm-stat { padding: 0.7rem 0.85rem; }
+  .mm-stat-grid .mm-stat__icon { font-size: 1.05rem; margin-bottom: 0.3rem; }
+  .mm-stat-grid .mm-stat__value { font-size: 1.45rem; }
+
+  /* Streamlit 自带顶部工具条里的 Deploy / ⋮ 菜单对学生是噪声，窄屏隐藏；
+     不能整条 stToolbar 隐藏——侧边栏 » 展开按钮也在 stToolbar 里 */
+  div[data-testid="stToolbarActions"],
+  div[data-testid="stAppDeployButton"],
+  span[data-testid="stMainMenu"] {
+    display: none !important;
+  }
+  header[data-testid="stHeader"] { background: transparent; }
 
   /* 上传 dropzone 略降高度 */
   section[data-testid="stFileUploaderDropzone"] { min-height: 130px; }
