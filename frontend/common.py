@@ -20,6 +20,13 @@ def current_user() -> dict | None:
     return st.session_state.get("user")
 
 
+def is_admin(user: dict | None) -> bool:
+    """当前用户是否在 admin 名单（ADMIN_USERNAMES；与 role 独立）。"""
+    from backend.services.auth import is_admin_username
+
+    return bool(user) and is_admin_username(user.get("username"))
+
+
 def login_user(user_id: int, username: str, role: str) -> None:
     st.session_state["user"] = {"id": user_id, "username": username, "role": role}
 

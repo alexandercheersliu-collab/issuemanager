@@ -847,6 +847,57 @@ class EditTagMixin:
         return deleted
 
 
+class AdminMixin:
+    """后台管理（危险操作）：全系统口径的数据维护，仅 admin_usernames 名单可调。"""
+
+    def _require_admin(self, user_id: int) -> None:
+        from backend.services.auth import is_admin_username
+
+        with self._user_session() as users:
+            caller = users.get_by_id(user_id)
+        if caller is None:
+            raise ValueError("用户不存在")
+        if not is_admin_username(caller.username):
+            raise PermissionError("仅管理员可执行后台管理操作")
+
+    def admin_subject_overview(self, user_id: int) -> list[dict]:
+        """全系统各学科错题数（跨用户），供后台管理页预览。仅 admin。"""
+        from backend.models.schemas import SUBJECT_NAMES
+
+        self._require_admin(user_id)
+        with self._session() as repo:
+            counts = repo.subject_counts_all()
+        return [
+            {
+                "subject": subject,
+                "name": SUBJECT_NAMES.get(subject, subject),
+                "count": count,
+            }
+            for subject, count in counts
+        ]
+
+    def purge_subject(self, user_id: int, subject: str) -> dict:
+        """按学科清空错题本（全系统口径）：删除该学科所有错题及其
+        复习/检测/批注记录（FK 级联），并同步删除向量库嵌入。仅 admin。
+
+        关系型删除在一个事务内完成，异常整体回滚；向量库删除在事务提交后
+        执行（best-effort，rag 层自带告警不抛），避免向量残留阻碍事务。
+        返回 {"subject": ..., "deleted": 题数}。
+        """
+        subject = (subject or "").strip()
+        if not subject:
+            raise ValueError("学科不能为空")
+        self._require_admin(user_id)
+
+        with self._session() as repo:
+            ids = repo.ids_by_subject_all(subject)
+            deleted = repo.delete_by_subject_all(subject)
+        if ids:
+            self.vector_store.delete_questions(ids)
+        logger.warning("admin user=%s 清空学科 subject=%s：删除 %s 道错题", user_id, subject, deleted)
+        return {"subject": subject, "deleted": deleted}
+
+
 class ReviewMixin:
     """复习调度与追问对话。"""
 

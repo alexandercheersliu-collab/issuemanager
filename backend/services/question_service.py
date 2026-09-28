@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from backend.services.detection import DetectionMixin
 from backend.services.question_mixins import (
+    AdminMixin,
     BackupMixin,
     CoreMixin,
     EditTagMixin,
@@ -28,6 +29,7 @@ class QuestionService(
     QueryMixin,
     DetectionMixin,
     EditTagMixin,
+    AdminMixin,
     ReviewMixin,
     BackupMixin,
     StatsMixin,

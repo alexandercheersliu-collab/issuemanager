@@ -311,6 +311,36 @@ section[data-testid="stSidebar"] hr {
   display: inline-block;
 }
 
+
+/* ---------------- 后台管理：危险操作区 ---------------- */
+.mm-danger-zone {
+  background: var(--mm-danger-bg);
+  border: 1px solid var(--mm-danger-border);
+  border-left: 4px solid var(--mm-danger);
+  border-radius: var(--mm-radius-sm);
+  padding: 0.9rem 1.1rem;
+  margin: 0.8rem 0;
+  font-size: 0.92rem;
+  color: var(--mm-text);
+  line-height: 1.7;
+}
+.mm-danger-zone__title {
+  font-weight: 700;
+  color: var(--mm-danger);
+  margin-bottom: 0.3rem;
+}
+/* 危险确认按钮：红色实心（keyed button → st-key-* 类） */
+.st-key-admin_purge_btn button:not(:disabled) {
+  background: var(--mm-danger);
+  border-color: var(--mm-danger);
+}
+.st-key-admin_purge_btn button:not(:disabled):hover {
+  background: var(--mm-danger);
+  border-color: var(--mm-danger);
+  filter: brightness(1.08);
+}
+
+
 /* ---------------- 知识点掌握条 ---------------- */
 .mm-mastery { margin-bottom: 0.85rem; }
 .mm-mastery__row {

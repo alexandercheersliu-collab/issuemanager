@@ -143,6 +143,32 @@ class QuestionRepository:
         )
         return int(result.rowcount or 0)
 
+    # ---------- 后台管理（全系统口径，调用方负责 admin 鉴权） ----------
+    def subject_counts_all(self) -> list[tuple[str, int]]:
+        """全系统各学科错题数（跨用户），按数量降序。"""
+        rows = self.session.execute(
+            select(Question.subject, func.count(Question.id))
+            .where(Question.subject.is_not(None), Question.subject != "")
+            .group_by(Question.subject)
+            .order_by(func.count(Question.id).desc())
+        ).all()
+        return [(str(subject), int(count)) for subject, count in rows]
+
+    def ids_by_subject_all(self, subject: str) -> list[int]:
+        """全系统某学科全部错题 id（跨用户），供向量库同步删除。"""
+        return list(
+            self.session.execute(
+                select(Question.id).where(Question.subject == subject)
+            ).scalars()
+        )
+
+    def delete_by_subject_all(self, subject: str) -> int:
+        """全系统删除某学科错题（跨用户）。关联表靠 FK ondelete CASCADE 级联。"""
+        result = self.session.execute(
+            delete(Question).where(Question.subject == subject)
+        )
+        return int(result.rowcount or 0)
+
     # ---------- 查询 ----------
     def get_owned(self, question_id: int, user_id: int) -> Question | None:
         return self._get_owned(question_id, user_id)

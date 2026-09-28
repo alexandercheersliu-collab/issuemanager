@@ -20,6 +20,18 @@ _FAIL_DELAY_SECONDS = 1.0  # 失败时固定延迟，抑制暴力枚举
 _login_limiter: RateLimiter = InMemoryRateLimiter()
 
 
+def is_admin_username(username: str | None) -> bool:
+    """admin 判定：用户名在 settings.admin_usernames 名单内即视为管理员。
+
+    与 users.role（student/teacher 业务角色）完全独立：种子里 admin 是
+    teacher 角色，同时拥有后台管理权；把某教师加成管理员只需改
+    ADMIN_USERNAMES，不动其业务角色。
+    """
+    if not username:
+        return False
+    return username.strip() in get_settings().admin_usernames
+
+
 class AuthService:
     def __init__(self, session: Session, limiter: RateLimiter | None = None):
         self.repo = UserRepository(session)

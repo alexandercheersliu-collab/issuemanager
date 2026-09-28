@@ -606,3 +606,55 @@
 4. **playwright 验收结论**：桌面 1440 统计卡一行 4 列、手机 390 为 2×2，
    两页均无横向溢出；深浅色均正常。切页瞬间旧页元素有淡出动画，
    截图断言需等动画结束（约 1s）避免误报残影。
+
+
+## P5.12 后台管理：按学科清空错题本（admin 名单制）（2026-09-28）
+
+### 修改的基座已有文件（P5.12）
+
+| 文件 | 说明 |
+| --- | --- |
+| `backend/config.py` | 新增 `admin_usernames: Annotated[list[str], NoDecode]` 配置（env `ADMIN_USERNAMES`，逗号分隔，默认 `["admin"]`）+ `_split_admin_usernames` before-validator 做拆分/去空白/去空项。**NoDecode 必须保留**：pydantic-settings 对 `list[str]` 会先按 JSON 解码 env 值，`admin,ops` 这类逗号串会直接抛 `SettingsError` |
+| `backend/services/auth.py` | 新增模块级纯函数 `is_admin_username(username)`：strip 后精确匹配 admin 名单，None/空串返回 False。admin 判定与用户 `role`（student/teacher）完全独立，是并列的名单制身份 |
+| `backend/repositories/questions.py` | 新增 `subject_counts_all()`（全库 group by subject 降序）、`ids_by_subject_all(subject)`、`delete_by_subject_all(subject)`；删除依赖模型层 FK `ondelete="CASCADE"` 级联 `review_logs` / `detection_logs` / `comments`，`database.py` 已开 `PRAGMA foreign_keys=ON`（SQLite/MySQL 均生效） |
+| `backend/services/question_mixins.py` | 新增 `AdminMixin`：`_require_admin` 通过 `_user_session` 查 username → `is_admin_username`，非 admin 抛 `PermissionError`、未知用户抛 `ValueError`；`admin_subject_overview` 返回 `[{subject, name, count}]`（name 用 `SUBJECT_NAMES` 回退代码本身）；`purge_subject`：空学科 `ValueError` → 一个事务删 SQL → **提交后** best-effort `vector_store.delete_questions(ids)`（失败只记日志不回滚）→ `logger.warning` 审计 → 返回 `{"subject", "deleted"}` |
+| `backend/services/question_service.py` | `QuestionService` 组合进 `AdminMixin` |
+| `api/deps.py` | 新增 `get_admin_user` 依赖：非 admin 直接 403 |
+| `api/main.py` | 注册 admin router |
+| `frontend/common.py` | 新增 `is_admin(user)` |
+| `frontend/i18n.py` | 新增 `"nav.admin": "后台管理"` |
+| `app.py` | 新增 `_ADMIN_PAGES`、`🛡️` 图标、admin 用户导航项插到「设置」之前、`_dispatch` admin 分支懒加载、warmup 预 import admin 页 |
+| `frontend/assets/style.css` | 新增 `.mm-danger-zone`（红边红底警示卡）与 `.st-key-admin_purge_btn button:not(:disabled)`（红色实心按钮） |
+| `.env.example` | 新增 `ADMIN_USERNAMES` 注释示例（逗号分隔名单、与 role 独立、默认仅 admin） |
+
+### 新增文件（P5.12）
+
+| 文件 | 说明 |
+| --- | --- |
+| `api/routers/admin.py` | `GET /api/admin/subjects`（学科+数量清单）、`DELETE /api/admin/questions?subject=xxx`（清空指定学科），均挂 `get_admin_user` |
+| `frontend/pages/admin.py` | 后台管理页：学科下拉（带计数）→ danger-zone 红卡明示「全系统口径、含其他用户数据、不可恢复」→ `st.text_input` 输入学科全名确认（纯函数 `purge_confirmed(input, expected)` strip 后精确匹配）→ 按钮 disabled 直到确认通过 |
+| `tests/test_admin_purge.py` | 19 例：is_admin 4 例 / purge_confirmed 3 例 / 服务层权限矩阵（demo PermissionError、未知用户 ValueError、空学科 ValueError）/ 全链路集成（专用学科代码 `alchemy` 隔离其他测试：四表清空、他学科保留、向量库同步清空）/ API（401/403/200 与 403 不执行删除） |
+
+### P5.12 合入上游注意事项
+
+1. **admin 是名单制、与 role 解耦**：判定只查 `ADMIN_USERNAMES` env 名单，
+   不读 `users.role`；种子用户 admin 同时是 teacher + admin 双重身份。若上游
+   想改成角色制（新增 `role=admin`），只改 `is_admin_username` 与
+   `get_admin_user` 两处，服务层与 UI 无需动。
+2. **级联删除靠数据库 FK**：`delete_by_subject_all` 自身只删 `questions` 一行，
+   `review_logs` / `detection_logs` / `comments` 清理由模型层 `ondelete="CASCADE"`
+   完成；新增挂到 Question 的子表时必须带 `ondelete="CASCADE"`，否则清空会残留
+   孤儿行（SQLite 需保持 `PRAGMA foreign_keys=ON`，MySQL 外键默认生效）。
+3. **向量库删除在事务提交后 best-effort**：SQL 是权威数据源，Chroma 删失败
+   只记 `logger.warning`，不回滚 SQL；残留向量会在下次检索时被 SQL 侧过滤
+   （检索结果均回查 SQL），不会出现幽灵题。重写时勿把向量删除挪进事务内。
+4. **清空是全系统口径**：`purge_subject` 删除该学科下**所有用户**的错题，
+   服务层 Docstring、API 描述与 UI 红卡均已明示；若上游要改为「仅清操作者
+   本人」，把 `ids_by_subject_all`/`delete_by_subject_all` 换成按 user_id
+   过滤的版本即可，但 UI 文案与测试断言需同步改。
+5. **确认输入用 `st.text_input` 需回车/失焦才触发 rerun**：自动化验收时
+   键入学科名后必须按 Enter 再断言按钮状态；直接断言会误判 disabled。
+6. **导航图标 nth-child 风险同 P5.9**：admin 项插在「设置」前会使其后
+   项的 DOM 序号位移，保留 emoji 内联方案，勿改 CSS nth-child。
+7. **API 未挂限流**：当前 admin 端点只鉴权未挂 rate_limit（本项目限流设施
+   在并行任务中），上游若有限流器建议给 DELETE 端点补一档严格限流。

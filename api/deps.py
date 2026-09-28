@@ -40,3 +40,12 @@ def get_current_user(
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在")
     return user
+
+
+def get_admin_user(user: User = Depends(get_current_user)) -> User:
+    """后台管理端点鉴权：用户名需在 ADMIN_USERNAMES 名单内（与 role 独立）。"""
+    from backend.services.auth import is_admin_username
+
+    if not is_admin_username(user.username):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可执行该操作")
+    return user

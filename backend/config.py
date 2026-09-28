@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     seed_demo_username: str = "demo"
     seed_demo_password: str = "demo123"
 
+    # 后台管理（危险操作）名单：与 users.role 独立，名单内用户名即 admin。
+    # env: ADMIN_USERNAMES=admin,ops（逗号分隔；NoDecode 跳过 JSON 解码交给下方 validator）
+    admin_usernames: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
     # ---------- API 网关 (JWT) ----------
     # 生产环境务必通过 .env 设置强随机密钥（>= 32 字节）
     auth_secret: str = "dev-only-secret-change-me-0123456789abcdef"
@@ -122,6 +125,15 @@ class Settings(BaseSettings):
     detection_pass_threshold: int = Field(default=2, ge=1, le=10)
     # 降级时 SM-2 间隔拉长系数（在 quality=5 调度结果上再乘该系数）
     demotion_interval_factor: float = Field(default=1.5, ge=1.0, le=10.0)
+
+
+    @field_validator("admin_usernames", mode="before")
+    @classmethod
+    def _split_admin_usernames(cls, value: object) -> object:
+        """ADMIN_USERNAMES 支持逗号分隔字符串（pydantic-settings 对 list 默认按 JSON 解析）。"""
+        if isinstance(value, str):
+            return [name.strip() for name in value.split(",") if name.strip()]
+        return value
 
     @field_validator("chroma_model_dir", "share_card_font_path", "doc_upload_path", mode="before")
     @classmethod

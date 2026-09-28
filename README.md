@@ -191,8 +191,9 @@ EMBEDDING_MODEL=BAAI/bge-m3
 3. **同类题检测与降级** — 录题时检测公共题库 / 本人历史中的同类题（`detection`）；公共题库命中即复用解析并降级为「引用入库」，避免重复消耗 AI 额度（`demotion`）。
 4. **约束检索与公共题库** — 向量检索支持按学段 / 年级 / 学科等元数据约束过滤（`RAG_FILTER_OVERSAMPLE` 过采样后过滤）；内置公共题库集合（`RAG_BANK_COLLECTION`，默认 `question_bank`），用 `python scripts/seed_question_bank.py` 灌入。
 5. **数据整体迁移** — `python scripts/migrate_data.py --new-data-dir <绝对路径>` 把 SQLite 库 / uploads / 散落日志 / Chroma 向量库 / 内置模型缓存整体复制到新数据目录并逐项校验（文件数、字节数、DB 表行数），不删旧数据；MySQL 部署会提示改用 mysqldump。
-6. **新配置项** — `CHROMA_MODEL_DIR`（内置嵌入模型缓存目录）、`RAG_LEAK_THRESHOLD` / `RAG_FILTER_OVERSAMPLE` / `RAG_BANK_COLLECTION`、`SHARE_CARD_FONT_PATH`（分享卡片字体，可配置避免系统路径硬编码）、`DOC_UPLOAD_PATH`、`OCR_ENABLED` 等，详见 `backend/config.py` 注释与 `.env.example`。
-7. **语音模块** — 语音录入 / 播报（原 4.1 规划）**已明确延后**，不在本分支交付范围。
+6. **新配置项** — `CHROMA_MODEL_DIR`（内置嵌入模型缓存目录）、`RAG_LEAK_THRESHOLD` / `RAG_FILTER_OVERSAMPLE` / `RAG_BANK_COLLECTION`、`SHARE_CARD_FONT_PATH`（分享卡片字体，可配置避免系统路径硬编码）、`DOC_UPLOAD_PATH`、`OCR_ENABLED`、`ADMIN_USERNAMES`（后台管理员名单，逗号分隔，默认 `admin`）等，详见 `backend/config.py` 注释与 `.env.example`。
+7. **后台管理** — `ADMIN_USERNAMES` 名单内的用户侧边栏出现「🛡️ 后台管理」页：查看各学科错题量，并可按学科**一键清空全系统错题**（SQL 事务级联清理复习/检测/评论记录，向量库同步删除；需输入学科全名二次确认）。REST 侧对应 `GET /api/admin/subjects` 与 `DELETE /api/admin/questions`。
+8. **语音模块** — 语音录入 / 播报（原 4.1 规划）**已明确延后**，不在本分支交付范围。
 
 ## 🧪 测试与质量
 

@@ -40,7 +40,7 @@ def _warmup() -> None:
     t0 = time.perf_counter()
     time.sleep(2.0)  # 让登录首屏先渲染完，预热再抢 CPU（首屏优先）
     try:
-        from frontend.pages import assistant, graph, import_doc, students  # noqa: F401
+        from frontend.pages import admin, assistant, graph, import_doc, students  # noqa: F401
 
         from frontend.common import get_question_service
 
@@ -119,6 +119,11 @@ _TEACHER_PAGES = {
     t("nav.students"): "students",
 }
 
+# 管理员专属页（ADMIN_USERNAMES 名单，与 role 独立）
+_ADMIN_PAGES = {
+    t("nav.admin"): "admin",
+}
+
 # 侧边栏导航图标（emoji，深浅色通吃；自定义组件 iframe 无法跟随主题故弃用 sac.menu）
 _NAV_ICONS = {
     "dashboard": "🏠",
@@ -128,24 +133,31 @@ _NAV_ICONS = {
     "review": "🔁",
     "graph": "🧠",
     "students": "👥",
+    "admin": "🛡️",
     "assistant": "🤖",
     "settings": "⚙️",
 }
 
 
 def _render_sidebar(user: dict) -> str:
-    from frontend.common import initials
+    from frontend.common import initials, is_admin
 
-    visible = dict(_PAGES)
+    ordered = list(_PAGES.items())
     if user.get("role") == "teacher":
         # 教师专属页插在「知识图谱」之前
-        ordered = list(visible.items())
         insert_at = next(
             (i for i, (label, key) in enumerate(ordered) if key == "graph"),
             len(ordered),
         )
         ordered[insert_at:insert_at] = list(_TEACHER_PAGES.items())
-        visible = dict(ordered)
+    if is_admin(user):
+        # 管理员专属页插在「设置」之前
+        insert_at = next(
+            (i for i, (label, key) in enumerate(ordered) if key == "settings"),
+            len(ordered),
+        )
+        ordered[insert_at:insert_at] = list(_ADMIN_PAGES.items())
+    visible = dict(ordered)
 
     with st.sidebar:
         st.markdown(
@@ -211,6 +223,10 @@ def _dispatch(page: str, user: dict) -> None:
         from frontend.pages.students import render_students_page
 
         render_students_page(user)
+    elif page == "admin":
+        from frontend.pages.admin import render_admin_page
+
+        render_admin_page(user)
     elif page == "assistant":
         from frontend.pages.assistant import render_assistant_page
 
