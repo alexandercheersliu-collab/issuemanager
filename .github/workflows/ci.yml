@@ -58,7 +58,7 @@ jobs:
       - name: Install Playwright & pytest
         run: pip install pytest playwright && playwright install --with-deps chromium
       - name: Print frontend dep versions
-        run: pip show streamlit streamlit-antd-components streamlit-agraph | grep -E "Name|Version"
+        run: pip show streamlit streamlit-antd-components plotly networkx | grep -E "Name|Version"
       - name: Run E2E smoke (against running app)
         env:
           MM_E2E: "1"

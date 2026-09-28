@@ -223,6 +223,38 @@ section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:
 .mm-badge--ok   { color: var(--mm-ok); border-color: var(--mm-ok-border); background: var(--mm-ok-bg); }
 .mm-badge--danger { color: var(--mm-danger); border-color: var(--mm-danger-border); background: var(--mm-danger-bg); }
 
+/* ---------------- 知识图谱：关联知识点对列表 ---------------- */
+.mm-pair {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--mm-card);
+  border: 1px solid var(--mm-border);
+  border-radius: var(--mm-radius-sm);
+  padding: 0.4rem 0.65rem;
+  margin-bottom: 0.45rem;
+  box-shadow: var(--mm-shadow-sm);
+}
+.mm-pair__rank {
+  flex: none;
+  width: 1.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--mm-muted);
+  text-align: center;
+}
+.mm-pair__tags {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.mm-pair__tags .mm-badge { margin-right: 0; }
+.mm-pair__x { flex: none; color: var(--mm-muted); font-size: 0.8rem; }
+.mm-pair__count { flex: none; margin-right: 0; white-space: nowrap; }
+
 /* ---------------- 知识点掌握条 ---------------- */
 .mm-mastery { margin-bottom: 0.85rem; }
 .mm-mastery__row {
