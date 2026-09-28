@@ -178,7 +178,7 @@ def _render_sidebar(user: dict) -> str:
                 <div class="mm-user-card__role">{"教师" if user['role'] == "teacher" else "学生"}</div>
               </div>
             </div>
-            <div class="mm-version">v{settings.app_version}</div>
+            <div class="mm-version"><span>v{settings.app_version}</span></div>
             """,
             unsafe_allow_html=True,
         )

@@ -83,11 +83,11 @@ section[data-testid="stSidebar"] {
 }
 
 /* 品牌区 */
-.mm-brand { text-align: center; padding: 1.1rem 0 0.4rem 0; }
+.mm-brand { text-align: center; padding: 0.9rem 0 0.9rem 0; }
 .mm-brand__logo {
   width: 52px;
   height: 52px;
-  margin: 0 auto 0.5rem auto;
+  margin: 0 auto 0.55rem auto;
   border-radius: 16px;
   display: flex;
   align-items: center;
@@ -98,27 +98,40 @@ section[data-testid="stSidebar"] {
 }
 .mm-brand__title { font-size: 1.12rem; font-weight: 700; color: var(--mm-navy); }
 .mm-brand__tag { font-size: 0.8rem; color: var(--mm-text-2); margin-top: 0.15rem; }
+/* 品牌区与导航之间：细分隔线 + 节奏留白 */
+.mm-brand::after {
+  content: "";
+  display: block;
+  width: 56%;
+  margin: 0.85rem auto 0 auto;
+  border-bottom: 1px solid var(--mm-border);
+}
 
 /* 侧边栏导航（st.radio 菜单化：隐藏圆圈、整行 hover/active 态）
    DOM：stRadioGroup > div[data-selected] > label[stRadioOption] > span(隐藏 input) + div > [圆圈, 文本] */
 section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] {
-  gap: 2px;
+  gap: 4px;
+  margin-top: 0.35rem;
 }
 section[data-testid="stSidebar"] label[data-testid="stRadioOption"] {
   width: 100%;
-  padding: 0.5rem 0.85rem;
-  border-radius: var(--mm-radius-sm);
+  min-height: 40px;
+  padding: 0.5rem 0.9rem;
+  border-radius: 10px;
   cursor: pointer;
-  color: var(--mm-text);
-  transition: background-color 0.12s ease;
+  color: var(--mm-text-2);
+  font-size: 0.92rem;
+  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:hover {
   background: var(--mm-bg);
+  color: var(--mm-text);
 }
 section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] > div[data-selected="true"] > label {
   background: var(--mm-primary-soft);
   color: var(--mm-primary);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--mm-primary);  /* 左侧指示条 */
 }
 section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:first-child {
   display: none;  /* 单选圆圈 */
@@ -131,16 +144,29 @@ section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:
   gap: 0.65rem;
   background: var(--mm-bg);
   border: 1px solid var(--mm-border);
-  border-radius: var(--mm-radius-sm);
+  border-radius: 12px;
   padding: 0.6rem 0.75rem;
 }
 .mm-user-card__name { font-weight: 600; font-size: 0.92rem; color: var(--mm-text); }
 .mm-user-card__role { font-size: 0.78rem; color: var(--mm-text-2); }
-.mm-version {
-  text-align: center;
-  margin-top: 0.7rem;
-  font-size: 0.75rem;
+/* 版本号：小徽标 */
+.mm-version { text-align: center; margin-top: 0.6rem; }
+.mm-version > span {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--mm-muted);
+  background: var(--mm-bg);
+  border: 1px solid var(--mm-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+}
+
+/* 侧边栏细分隔线节奏 */
+section[data-testid="stSidebar"] hr {
+  margin: 0.9rem 0;
+  border-color: var(--mm-border);
 }
 
 /* ---------------- 卡片体系 ---------------- */

@@ -507,3 +507,49 @@
    视口覆盖 auth/dashboard/tutor/notebook/review（含深色模式抽查），
    两种设备 `document.documentElement.scrollWidth > clientWidth` 均为
    False（无横向溢出）。
+
+
+## P5.8 知识图谱：移除 streamlit-agraph，改用 plotly 重实现（2026-09-28）
+
+### 修改的基座已有文件（P5.8）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/pages/graph.py` | 删除 `streamlit_agraph` 依赖，力导向共现图改用 networkx `spring_layout`（`seed=42` 固定布局）+ plotly 散点/线段：节点大小=错题数、边粗=共现频率、hover 显示错题数与最强关联 Top3；深浅色文字/边色手动适配（沿用 dashboard 先例，plotly 不吃 CSS 变量）；右侧「关联最强的知识点对」改紧凑卡片列表（排名 + 成对 chips + 次数徽标一行一组） |
+| `frontend/assets/style.css` | 新增 `.mm-pair` 系列样式（关联对紧凑卡片行，flex 布局，CSS 变量深浅色自适应） |
+| `requirements.txt` | 移除 `streamlit-agraph>=0.0.45`，显式声明 `networkx>=3.0`（此前为传递依赖，graph.py 直接 import 需显式声明） |
+| `.github/workflows/ci.yml` | 版本打印步骤同步：去掉 streamlit-agraph，改打 plotly/networkx |
+
+### P5.8 合入上游注意事项
+
+1. **为什么放弃 agraph**：streamlit-agraph 0.0.45 最后发布于 2022 年，其 CRA
+   构建的组件静态资源在 streamlit 1.64 下部分 404（浏览器控制台
+   `Custom Component streamlit_agraph.agraph source error - 404`），图谱区
+   整片空白；且所有自定义组件 iframe 都有一次性 JS bundle 加载开销。
+2. **布局确定性**：`spring_layout(seed=42)` 保证每次渲染节点位置一致，
+   换 seed 或 `k` 值会改变构图；节点上限 15 个（`_TOP_TAGS`），超过时共现边
+   只在 top 集合内绘制（`visible_edges` 过滤），与旧版行为一致。
+3. **无边界的防御**：共现边全部落在 top15 之外时会触发 `max()` 空序列，
+   已先过滤 `visible_edges` 再判空返回提示，重写时勿回退成直接判 `edge_count`。
+4. **点击节点跳转未实现**：plotly `on_select` 对散点图的点选事件与力导向图
+   交互不匹配（拖动框选语义），点击跳错题本筛选暂不支持，属有意省略。
+
+## P5.9 侧边栏二轮精修（2026-09-28）
+
+### 修改的基座已有文件（P5.9）
+
+| 文件 | 说明 |
+| --- | --- |
+| `frontend/assets/style.css` | 侧边栏精修：导航项间距 2→4px、min-height 40px、圆角 10px、字号 0.92rem、非选中项降为 `--mm-text-2`；active 项新增左侧 3px 指示条（`box-shadow: inset 3px 0 0`）+ 底色 + 加粗；hover 态背景+文字加深；品牌区底部加 56% 宽细分隔线、padding 节奏调整；用户卡片圆角 12px；版本号改为胶囊小徽标；侧边栏 hr 边距收紧 |
+| `app.py` | 版本号 markup 包 `<span>` 以支持胶囊徽标样式（`<div class="mm-version"><span>v…</span></div>`） |
+
+### P5.9 合入上游注意事项
+
+1. **导航图标仍是 emoji 内联文本**：st.radio 的 `format_func` 输出会被 HTML
+   转义，无法注入图标 chip；按 DOM 序号的 CSS `nth-child` 方案会在教师角色
+   插入「学生管理」项后错位，故保留 emoji（目标平台 Segoe UI Emoji 渲染一致）。
+   若上游要改统一图标 chip，需先把导航换成自建按钮组（业务交互改动，谨慎）。
+2. **active 指示条用 inset box-shadow 而非 border**：避免 3px border 引起
+   选项行内容横向位移；改方案时注意保持选中/非选中行内容对齐。
+3. **深浅色全靠 CSS 变量**：本轮未动 theme.py；新增侧边栏样式请继续只引用
+   `--mm-*` 变量，不要写死颜色。
