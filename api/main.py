@@ -5,10 +5,14 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，必须在其他 import 之前
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.routers import (
     admin,
@@ -59,9 +63,10 @@ def create_app() -> FastAPI:
             "所有受保护端点使用 Bearer JWT。"
         ),
     )
+    cors_origins = [o.strip() for o in settings.api_cors_origins.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 部署时通过反向代理收紧
+        allow_origins=cors_origins or ["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -80,6 +85,19 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["meta"])
     def health() -> dict:
         return {"status": "ok", "version": settings.app_version}
+
+    # 移动端静态站点：mobile/dist 存在时挂到 /m，与 API 同源（免 CORS、单一端口）。
+    # 应用无客户端路由（Tab 是状态而非路由），html=True 的目录回退足够。
+    mobile_dist = Path(__file__).resolve().parent.parent / "mobile" / "dist"
+    if mobile_dist.is_dir():
+        app.mount("/m", StaticFiles(directory=mobile_dist, html=True), name="mobile")
+        logger.info("移动端静态站点已挂载: /m -> %s", mobile_dist)
+
+        @app.get("/", include_in_schema=False)
+        def index() -> RedirectResponse:
+            return RedirectResponse("/m/")
+    else:
+        logger.info("mobile/dist 不存在，跳过移动端静态托管（先执行 npm run build）")
 
     return app
 

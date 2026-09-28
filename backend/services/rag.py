@@ -56,6 +56,7 @@ class SimilarConstraints:
     region: str | None = None
     knowledge_points: list[str] = field(default_factory=list)
     difficulty: str | None = None
+    question_type: str | None = None  # 题型（应用题/计算题…）：同知识点不同题型不算同类
 
     def is_empty(self) -> bool:
         return not (
@@ -64,6 +65,7 @@ class SimilarConstraints:
             or self.region
             or self.knowledge_points
             or self.difficulty
+            or self.question_type
         )
 
 
@@ -84,16 +86,35 @@ def _dim_match(meta_value, target) -> bool:
     return target is None or meta_value is None or meta_value == target
 
 
+# 题型相容组：同组内互为同类。应用题本质上是带情境的解答题，AI 标注常在两者间摇摆；
+# 但计算题与应用题/解答题绝不互为同类（纯运算 vs 情境建模，考查能力不同）。
+_TYPE_COMPAT_GROUPS = ({"应用题", "解答题"},)
+
+
+def _type_match(meta_value, target) -> bool:
+    """题型匹配：键缺失/未约束放行；相等或同属相容组放行。"""
+    if target is None or meta_value is None or meta_value == target:
+        return True
+    return any(target in group and meta_value in group for group in _TYPE_COMPAT_GROUPS)
+
+
 def matches_constraints(meta: dict, constraints: SimilarConstraints, level: int) -> bool:
     """元数据是否满足指定层级的约束（键缺失放行，保证 P1 前的旧向量文档不被误排）。
 
-    层级：0=学科+年级+地区+知识点+难度；1=放地区；2=再放年级；
-    3=仅学科；4=无约束。约束为空时任意层级都通过。
+    层级：0=学科+年级+地区+知识点+题型+难度；1=放地区；2=再放年级；
+    3=仅学科+题型；4=仅学科+题型（其余全放）。约束为空时任意层级都通过。
+    题型与学科为全程硬过滤（所有层级生效）：应用题/计算题不互为同类，
+    即使其余维度全放宽也绝不跨题型召回；库内无同题型候选时宁可返回空，
+    由上层回落公共题库或 AI 生成（生成提示词同样锁题型）。
     """
-    if level >= 4 or constraints.is_empty():
+    if constraints.is_empty():
         return True
     if not _dim_match(meta.get("subject"), constraints.subject):
         return False
+    if not _type_match(meta.get("question_type"), constraints.question_type):
+        return False
+    if level >= 4:
+        return True
     if level <= 2:
         if not _dim_match(meta.get("grade"), constraints.grade):
             return False
@@ -233,8 +254,9 @@ class QuestionVectorStore:
         region: str | None = None,
         knowledge_points: list[str] | None = None,
         difficulty: str | None = None,
+        question_type: str | None = None,
     ) -> bool:
-        """错题向量入库；K12 元数据（学科/年级/地区/知识点/难度）随文档写入，
+        """错题向量入库；K12 元数据（学科/年级/地区/知识点/难度/题型）随文档写入，
         供 P3 同类题检索做元数据硬过滤。ChromaDB 元数据值不接受 None，
         未提供的字段直接省略。"""
         collection = self._ensure_collection()
@@ -255,6 +277,8 @@ class QuestionVectorStore:
             metadata["knowledge_points"] = ",".join(knowledge_points)
         if difficulty:
             metadata["difficulty"] = difficulty
+        if question_type:
+            metadata["question_type"] = question_type
         try:
             collection.upsert(
                 ids=[str(question_id)],

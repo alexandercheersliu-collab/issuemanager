@@ -12,9 +12,10 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from api.deps import get_current_user
+from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.models.schemas import QuestionAnalysis, QuestionOut
 from backend.services.export import generate_word_exam
@@ -61,6 +62,13 @@ class AnalyzeResult(BaseModel):
     analysis: QuestionAnalysis
 
 
+class ImportPayload(BaseModel):
+    """备份恢复请求体：format 标识 + questions 列表（逐条字段由服务层校验）。"""
+
+    format: str = Field(min_length=1)
+    questions: list[dict] = Field(min_length=1)
+
+
 class ImportResult(BaseModel):
     imported: int
 
@@ -85,6 +93,8 @@ def list_questions(
     """分页列出错题（按创建时间倒序）；X-Total-Count 为过滤后的总数。
 
     支持 K12 元数据过滤：subject（学科代码）/ grade（1-12）/ error_category（错因枚举）。
+    注意：keyword + semantic=true 时走向量召回，结果数与 SQL 计数口径不一致，
+    此时不返回 X-Total-Count，客户端应改用「返回数 < limit 即到底」判断分页终止。
     """
     service = _service()
     items = service.list_questions(
@@ -100,21 +110,28 @@ def list_questions(
         limit=limit,
     )
     total = len(items)
-    if offset or total == limit:
-        total = service.count_for_user(
-            user.id,
-            include_others=user.role == "teacher",
-            tag=tag,
-            keyword=keyword,
-            subject=subject,
-            grade=grade,
-            error_category=error_category,
-        )
-    response.headers["X-Total-Count"] = str(total)
+    if not (semantic and keyword):
+        # 非语义检索时计数口径一致，返回精确总数
+        if offset or total == limit:
+            total = service.count_for_user(
+                user.id,
+                include_others=user.role == "teacher",
+                tag=tag,
+                keyword=keyword,
+                subject=subject,
+                grade=grade,
+                error_category=error_category,
+            )
+        response.headers["X-Total-Count"] = str(total)
     return items
 
 
-@router.post("/analyze", response_model=AnalyzeResult, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/analyze",
+    response_model=AnalyzeResult,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("questions:analyze", 20))],
+)
 async def analyze_question(
     image: UploadFile = File(...),
     tags: str = Form(default=""),
@@ -184,17 +201,21 @@ def create_text_question(
 
 @router.post("/import", response_model=ImportResult)
 def import_questions(
-    payload: dict, user: User = Depends(get_current_user)
+    payload: ImportPayload, user: User = Depends(get_current_user)
 ) -> ImportResult:
-    """从备份 JSON 恢复错题（按手动错题处理）。"""
+    """从备份 JSON 恢复错题（按手动错题处理）；缺 format/questions 字段直接 422。"""
     try:
-        imported = _service().import_user_data(user.id, payload)
+        imported = _service().import_user_data(user.id, payload.model_dump())
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return ImportResult(imported=imported)
 
 
-@router.post("/analyze/async", status_code=202)
+@router.post(
+    "/analyze/async",
+    status_code=202,
+    dependencies=[Depends(rate_limit("questions:analyze", 20))],
+)
 async def analyze_question_async(
     image: UploadFile = File(...),
     tags: str = Form(default=""),
@@ -271,6 +292,21 @@ def export_word_exam(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": 'attachment; filename="mathmaster_exam.docx"'},
     )
+
+
+@router.get("/{question_id}/image")
+def question_image(question_id: int, user: User = Depends(get_current_user)) -> FileResponse:
+    """错题原图（移动端/第三方客户端按 id 拉取，鉴权后不落公开目录）。"""
+    import os
+
+    question = _service().get_question(question_id, user.id)
+    if (
+        question is None
+        or not question.image_path
+        or not os.path.exists(question.image_path)
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图片不存在")
+    return FileResponse(question.image_path)
 
 
 @router.get("/{question_id}", response_model=QuestionOut)

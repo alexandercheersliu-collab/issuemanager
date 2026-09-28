@@ -21,6 +21,11 @@ logger = get_logger("ai")
 SYSTEM_PROMPT = (
     "你是一位经验丰富、讲解亲切的数学老师。学生会上传一张写有数学错题的图片，"
     "请严谨地识别题目（包括手写内容与 LaTeX 公式），分析错误原因并给出逐步讲解。"
+    "识别时先检查题目是否拍全（题干、选项、各小问有无缺失），再留意卷面上的"
+    "批改痕迹（打叉、扣分、红笔批注）：若图片是一道含多道小题的大题，且只有部分"
+    "小题被判错或学生指明了做错的小题，只提取做错的那道小题作为错题，"
+    "把该小题的完整题干填入 focused_sub_question 字段，"
+    "解析、答案与错因都紧紧围绕该小题，不要复述无关小题。"
     "所有讲解使用简体中文，公式使用 LaTeX（$...$ 行内，$$...$$ 独立）。"
     "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
 )
@@ -39,11 +44,20 @@ JSON_INSTRUCTION = f"""请只输出一个 JSON 对象，结构如下：
   "difficulty": "easy | medium | hard",
   "tags": ["2-4 个归档标签，如：几何, 相似三角形"],
   "mistake_cause": "这类题常见的出错原因",
-  "followup_question": "一道考查相同知识点的变式练习题（只给题目，不给答案）",
+  "followup_question": "一道考查相同知识点、题型与原题一致的变式练习题（只给题目，不给答案；原题是应用题/解答题时必须保留情境与设问形式，不得退化为纯计算题）",
   "question_type": "题型，如：选择题/填空题/判断题/计算题/解答题/证明题（判断不出留空串）",
   "chapter": "所属教材章节，如：一元二次方程（判断不出留空串）",
-  "error_category": "学生错因分类，必须是以下枚举之一：{' / '.join(ERROR_CATEGORIES)}；无法判断用 null"
-}}"""
+  "error_category": "学生错因分类，必须是以下枚举之一：{' / '.join(ERROR_CATEGORIES)}；无法判断用 null",
+  "is_complete": true 或 false,
+  "completeness_note": "题目没拍全时的说明（如「第(2)问只拍到一半」）；拍全了留空串",
+  "focused_sub_question": "若这是一道含多道小题的大题，且只有部分小题做错（按批改痕迹或学生说明判断）：只填做错那道小题的完整题干（含必要的大题公共条件）；否则留空串"
+}}
+
+规则：
+- is_complete=false 只在题干/选项/小问明确缺失时使用，拿不准视为完整；
+- focused_sub_question 非空时，analysis、answer、mistake_cause 都必须只针对这道小题；
+  反过来，只要你的 analysis/answer 只围绕某一道小题展开，focused_sub_question 就必须填该小题的题干，不得留空；
+- 学生说明里指明小题（如「第 2 问错了」）时优先按学生说明聚焦。"""
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,10 @@ def build_system_prompt(context: AnalysisContext | None = None) -> str:
     return (
         f"{teacher}学生会上传一张写有{subject_name}错题的图片，"
         "请严谨地识别题目（包括手写内容与 LaTeX 公式），分析错误原因并给出逐步讲解。"
+        "识别时先检查题目是否拍全（题干、选项、各小问有无缺失），再留意卷面上的"
+        "批改痕迹（打叉、扣分、红笔批注）：若图片是一道含多道小题的大题，且只有部分"
+        "小题被判错或学生指明了做错的小题，只提取做错的那道小题作为错题，"
+        "解析、答案与错因都紧紧围绕该小题，不要复述无关小题。"
         "所有讲解使用简体中文，公式使用 LaTeX（$...$ 行内，$$...$$ 独立）。"
         "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
     )
@@ -97,6 +115,11 @@ def build_user_prompt(hint: str, context: AnalysisContext | None = None) -> str:
         SUBJECT_NAMES.get(context.subject, context.subject) if context else "数学"
     ) or "数学"
     prompt = f"请分析这张图片中的{subject_name}错题。\n"
+    prompt += (
+        "特别注意：若图中是一道含多道小题的大题，且只有部分小题被判错"
+        "（打叉、扣分、红笔批注等）或学生指明了做错的小题，"
+        "必须把做错小题的完整题干填入 focused_sub_question 字段。\n"
+    )
     if hint:
         prompt += f"学生的补充说明：{hint}\n"
     return prompt + JSON_INSTRUCTION

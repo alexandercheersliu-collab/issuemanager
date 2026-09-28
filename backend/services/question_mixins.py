@@ -202,6 +202,7 @@ class CoreMixin:
             region=out.region,
             knowledge_points=out.knowledge_points,
             difficulty=out.difficulty,
+            question_type=out.question_type,
         )
 
     def _reindex_owned(self, question) -> None:  # noqa: ANN001 - ORM 实例
@@ -334,10 +335,16 @@ class EntryMixin:
         from backend.services.ocr import extract_text
 
         ocr_text = extract_text(str(image_path))
+        # 大题只错一道小题时，AI 提取的做错小题题干作为题面（与文本路径格式一致：
+        # 题面 + 分隔线 + 解析），复习闪卡与错题本才能题面/解析分离展示
+        if analysis.focused_sub_question.strip():
+            content = f"{analysis.focused_sub_question.strip()}\n\n---\n\n{analysis.analysis}"
+        else:
+            content = analysis.analysis
         with self._session() as repo:
             question = repo.create(
                 user_id,
-                content_markdown=analysis.analysis,
+                content_markdown=content,
                 answer=analysis.answer,
                 knowledge_points=analysis.knowledge_points,
                 tags=tags,
@@ -444,7 +451,9 @@ class EntryMixin:
             ),
         )
         tags = analysis.merged_tags(user_tags or [])
-        content = f"{text.strip()}\n\n---\n\n{analysis.analysis}"
+        # 大题只错一道小题时，以 AI 聚焦的小题题干替换整题题干入库
+        stem = analysis.focused_sub_question.strip() or text.strip()
+        content = f"{stem}\n\n---\n\n{analysis.analysis}"
 
         with self._session() as repo:
             question = repo.create(
@@ -603,6 +612,7 @@ class QueryMixin:
         region: str | None = None,
         difficulty: str | None = None,
         knowledge_points: list[str] | None = None,
+        question_type: str | None = None,
         strict: bool = False,
         top_k: int | None = None,
         on_progress: Callable[[str], None] | None = None,
@@ -623,7 +633,12 @@ class QueryMixin:
         """
         top_k = top_k or self.settings.rag_top_k
         query_text = " ".join(
-            [*(question.knowledge_points or []), *(question.tags or []), question.content_markdown]
+            [
+                *([f"题型:{question_type}"] if question_type else []),
+                *(question.knowledge_points or []),
+                *(question.tags or []),
+                question.content_markdown,
+            ]
         )
         constraints = SimilarConstraints(
             subject=subject,
@@ -631,6 +646,7 @@ class QueryMixin:
             region=region,
             knowledge_points=list(knowledge_points or []),
             difficulty=difficulty,
+            question_type=question_type,
         )
 
         emit_progress(on_progress, PROGRESS_RECALL_OWN)

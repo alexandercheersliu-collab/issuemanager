@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from api.deps import get_current_user
+from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.services.document_service import DocumentService
 
@@ -19,7 +19,11 @@ def _service() -> DocumentService:
     return DocumentService()
 
 
-@router.post("/import", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/import",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("documents:import", 10))],
+)
 async def import_document(
     document: UploadFile = File(...),
     subject: str = Form(default="math"),

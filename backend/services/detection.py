@@ -129,6 +129,7 @@ class DetectionMixin:
             region=question.region,
             difficulty=question.difficulty,
             knowledge_points=list(question.knowledge_points or []),
+            question_type=question.question_type or None,
             top_k=DETECTION_CANDIDATE_TOP_K,
             on_progress=on_progress,
             # 库内有候选就完全不调 AI（秒出题）；库内真空才生成变式兜底

@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### 修复
+- **同类题检测跨题型误配**：应用题错题的同类题检测会出计算题。三处根因并修：
+  ① 召回不过滤题型——`SimilarConstraints` 新增 `question_type`，`matches_constraints`
+  中学科与题型升为全程硬过滤（放宽阶梯所有层级含 level 4 均生效），同知识点的
+  计算题/应用题不再互认为同类；题型匹配带相容组 {应用题, 解答题} 互认，
+  元数据键缺失放行（旧向量兼容），既有向量用新增脚本 `scripts/reindex_vectors.py`
+  一次性补写题型元数据，错题入库/编辑路径同步写入 `question_type`；
+  ② AI 变式兜底不锁题型——`followup_question` 提示词改为「题型与原题一致，
+  应用题必须保留情境，不得退化为纯计算题」；
+  ③ 公共种子题库题型标注造假——`seed_question_bank.py` 原先全部硬编码「解答题」，
+  现按模板标注真实题型（计算题/应用题），并新增购物总价、行程问题两个真实
+  应用题模板。
+
 ### 新增
 - `scripts/install_onnx_model.py`：ChromaDB 内置嵌入模型（all-MiniLM-L6-v2 ONNX）安装器，
   支持断点续传、官方 SHA256 校验、自动解压与嵌入自检（官方下载无续传，弱网容易反复下一半）。

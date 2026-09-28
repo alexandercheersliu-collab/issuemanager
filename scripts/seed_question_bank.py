@@ -96,41 +96,59 @@ def concentration_item(k: int, v: int) -> tuple[str, str]:
     )
 
 
+def shopping_item(price: int, n: int) -> tuple[str, str]:
+    return (
+        f"超市里每盒牛奶 {price} 元，妈妈买了 {n} 盒，一共需要付多少元？",
+        f"{price * n} 元",
+    )
+
+
+def trip_item(v: int, t: int) -> tuple[str, str]:
+    return (
+        f"一辆汽车以每小时 {v} 千米的速度行驶了 {t} 小时，一共行驶了多少千米？",
+        f"{v * t} 千米",
+    )
+
+
 # ---------- 年级×学科覆盖表 ----------
 
-# (学科, 年级范围, 知识点, 难度池, 参数采样器 → (题干, 答案))
+# (学科, 年级范围, 知识点, 难度池, 题型, 参数采样器 → (题干, 答案))
 _TEMPLATES = [
-    ("math", range(1, 3), ["加法", "100以内加减法"], ["easy"],
+    ("math", range(1, 3), ["加法", "100以内加减法"], ["easy"], "计算题",
      lambda r: add_item(r.randint(2, 60), r.randint(2, 39))),
-    ("math", range(1, 3), ["减法", "100以内加减法"], ["easy"],
+    ("math", range(1, 3), ["减法", "100以内加减法"], ["easy"], "计算题",
      lambda r: sub_item(r.randint(2, 60), r.randint(2, 60))),
-    ("math", range(3, 5), ["乘法", "多位数乘法"], ["easy", "medium"],
+    ("math", range(3, 5), ["乘法", "多位数乘法"], ["easy", "medium"], "计算题",
      lambda r: mul_item(r.randint(3, 25), r.randint(3, 19))),
-    ("math", range(3, 5), ["除法", "除数是一位数"], ["easy", "medium"],
+    ("math", range(3, 5), ["除法", "除数是一位数"], ["easy", "medium"], "计算题",
      lambda r: div_item(r.randint(3, 20), r.randint(2, 12))),
-    ("math", range(5, 7), ["百分数", "百分数应用"], ["medium"],
+    ("math", range(3, 7), ["单价×数量=总价", "小数乘法", "应用题"], ["easy", "medium"], "应用题",
+     lambda r: shopping_item(r.randint(2, 15), r.randint(2, 9))),
+    ("math", range(4, 7), ["路程=速度×时间", "行程问题", "应用题"], ["medium"], "应用题",
+     lambda r: trip_item(r.choice([40, 45, 50, 55, 60, 65, 70, 80]), r.randint(2, 6))),
+    ("math", range(5, 7), ["百分数", "百分数应用"], ["medium"], "计算题",
      lambda r: percent_item(r.choice([40, 60, 80, 120, 150, 200]), r.choice([5, 10, 15, 20, 25, 30]))),
-    ("math", range(5, 7), ["分数运算"], ["medium"],
+    ("math", range(5, 7), ["分数运算"], ["medium"], "计算题",
      lambda r: mul_item(r.randint(2, 9), r.randint(2, 9))),
-    ("math", range(7, 8), ["一元一次方程"], ["medium"],
+    ("math", range(7, 8), ["一元一次方程"], ["medium"], "计算题",
      lambda r: linear_eq_item(r.randint(2, 9), r.randint(-6, 8), r.randint(-9, 9))),
-    ("math", range(8, 9), ["平方根", "实数"], ["easy", "medium"],
+    ("math", range(8, 9), ["平方根", "实数"], ["easy", "medium"], "计算题",
      lambda r: sqrt_item(r.randint(2, 20))),
-    ("math", range(9, 10), ["一元二次方程", "求根公式"], ["medium", "hard"],
+    ("math", range(9, 10), ["一元二次方程", "求根公式"], ["medium", "hard"], "计算题",
      lambda r: quadratic_item(r.randint(-5, 6), r.randint(-5, 6))),
-    ("math", range(10, 11), ["一次函数", "函数值"], ["medium"],
+    ("math", range(10, 11), ["一次函数", "函数值"], ["medium"], "计算题",
      lambda r: linear_func_item(r.randint(2, 7), r.randint(-8, 8), r.randint(-5, 6))),
-    ("math", range(11, 12), ["导数", "导数运算"], ["medium", "hard"],
+    ("math", range(11, 12), ["导数", "导数运算"], ["medium", "hard"], "计算题",
      lambda r: derivative_item(r.randint(-6, 7), r.randint(-4, 5))),
-    ("math", range(12, 13), ["等差数列", "数列通项"], ["medium", "hard"],
+    ("math", range(12, 13), ["等差数列", "数列通项"], ["medium", "hard"], "计算题",
      lambda r: arithmetic_seq_item(r.randint(1, 9), r.randint(2, 7), r.randint(5, 15))),
-    ("physics", range(7, 10), ["速度", "匀速直线运动"], ["easy", "medium"],
+    ("physics", range(7, 10), ["速度", "匀速直线运动"], ["easy", "medium"], "应用题",
      lambda r: speed_item(r.randint(2, 20), r.randint(2, 12))),
-    ("physics", range(10, 13), ["牛顿第二定律"], ["medium", "hard"],
+    ("physics", range(10, 13), ["牛顿第二定律"], ["medium", "hard"], "应用题",
      lambda r: newton_item(r.randint(1, 10), r.randint(1, 9))),
-    ("chemistry", range(9, 10), ["物质的量", "摩尔质量"], ["medium"],
+    ("chemistry", range(9, 10), ["物质的量", "摩尔质量"], ["medium"], "计算题",
      lambda r: mole_mass_item(r.randint(1, 8))),
-    ("chemistry", range(10, 13), ["物质的量浓度"], ["medium", "hard"],
+    ("chemistry", range(10, 13), ["物质的量浓度"], ["medium", "hard"], "计算题",
      lambda r: concentration_item(r.randint(1, 4), r.choice([1, 2]))),
 ]
 
@@ -143,7 +161,7 @@ def generate_bank_items(seed: int = 42) -> list[dict]:
     rng = random.Random(seed)
     items: list[dict] = []
     counters: dict[tuple[str, int], int] = {}
-    for subject, grades, points, difficulties, sampler in _TEMPLATES:
+    for subject, grades, points, difficulties, question_type, sampler in _TEMPLATES:
         for grade in grades:
             for _ in range(_VARIANTS_PER_CELL[subject]):
                 content, answer = sampler(rng)
@@ -158,7 +176,7 @@ def generate_bank_items(seed: int = 42) -> list[dict]:
                         "grade": grade,
                         "knowledge_points": list(points),
                         "difficulty": rng.choice(difficulties),
-                        "question_type": "解答题",
+                        "question_type": question_type,
                         "chapter": points[0],
                     }
                 )

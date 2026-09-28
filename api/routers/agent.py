@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.deps import get_current_user
+from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.services.agent import AgentSession
 
@@ -19,7 +19,10 @@ class ChatRequest(BaseModel):
     history: list[dict] = Field(default_factory=list, max_length=40)
 
 
-@router.post("/chat/stream")
+@router.post(
+    "/chat/stream",
+    dependencies=[Depends(rate_limit("agent:chat", 20))],
+)
 def chat_stream(payload: ChatRequest, user: User = Depends(get_current_user)):
     """SSE 流式对话：text/event-stream，data 为 {"delta": "..."} 片段，[DONE] 结束。"""
 

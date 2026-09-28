@@ -7,7 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from api.deps import get_current_user
+from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.services.question_service import QuestionService
 
@@ -22,7 +22,11 @@ class DetectionAnswer(BaseModel):
     answer: str = Field(min_length=1, max_length=2000)
 
 
-@router.post("/questions/{question_id}/detection/start", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/questions/{question_id}/detection/start",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("detection:start", 30))],
+)
 def start_detection(question_id: int, user: User = Depends(get_current_user)) -> dict:
     """发起同类题检测：约束召回一道同类题（宽松模式三级回落），返回 log_id 与题干。"""
     try:

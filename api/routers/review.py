@@ -1,10 +1,10 @@
 """复习路由：到期错题 / 评分调度 / 追问对话。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from api.deps import get_current_user
+from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.models.schemas import QuestionOut
 from backend.services.question_service import QuestionService
@@ -32,9 +32,9 @@ def _service() -> QuestionService:
 
 @router.get("/history")
 def review_history(
-    limit: int = 20, user: User = Depends(get_current_user)
+    limit: int = Query(default=20, ge=1, le=100), user: User = Depends(get_current_user)
 ) -> list[dict]:
-    """最近的复习记录（新→旧）。"""
+    """最近的复习记录（新→旧），limit 上限 100。"""
     from backend.services.question_service import QuestionService
 
     return QuestionService().recent_reviews(user.id, limit=limit)
@@ -57,7 +57,11 @@ def grade_question(
     return updated
 
 
-@router.post("/{question_id}/followup", response_model=FollowupResponse)
+@router.post(
+    "/{question_id}/followup",
+    response_model=FollowupResponse,
+    dependencies=[Depends(rate_limit("review:followup", 30))],
+)
 def followup(
     question_id: int, payload: FollowupRequest, user: User = Depends(get_current_user)
 ) -> FollowupResponse:

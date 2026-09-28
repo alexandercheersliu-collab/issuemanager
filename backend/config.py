@@ -49,15 +49,20 @@ class Settings(BaseSettings):
     seed_admin_password: str = "admin123"
     seed_demo_username: str = "demo"
     seed_demo_password: str = "demo123"
-
     # 后台管理（危险操作）名单：与 users.role 独立，名单内用户名即 admin。
     # env: ADMIN_USERNAMES=admin,ops（逗号分隔；NoDecode 跳过 JSON 解码交给下方 validator）
     admin_usernames: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["admin"])
+
     # ---------- API 网关 (JWT) ----------
     # 生产环境务必通过 .env 设置强随机密钥（>= 32 字节）
     auth_secret: str = "dev-only-secret-change-me-0123456789abcdef"
     access_token_expire_minutes: int = Field(default=7 * 24 * 60, ge=1)
     api_prefix: str = "/api"
+    # 允许跨域来源，逗号分隔；默认 * 仅适合本机/内网，部署到公网时应收紧为具体域名，
+    # 例如 API_CORS_ORIGINS=https://app.example.com,https://admin.example.com
+    api_cors_origins: str = "*"
+    # API 限流总开关：测试/内网压测可通过 API_RATE_LIMIT_ENABLED=false 关闭
+    api_rate_limit_enabled: bool = True
 
     # ---------- AI 提供商 ----------
     # openai_compatible: 任何兼容 OpenAI Chat Completions 的服务
@@ -125,7 +130,6 @@ class Settings(BaseSettings):
     detection_pass_threshold: int = Field(default=2, ge=1, le=10)
     # 降级时 SM-2 间隔拉长系数（在 quality=5 调度结果上再乘该系数）
     demotion_interval_factor: float = Field(default=1.5, ge=1.0, le=10.0)
-
 
     @field_validator("admin_usernames", mode="before")
     @classmethod

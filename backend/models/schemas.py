@@ -47,6 +47,17 @@ class QuestionAnalysis(BaseModel):
     error_category: ErrorCategory | None = Field(
         default=None, description="结构化错因分类（枚举值之一）"
     )
+    # 题目完整性与小题聚焦（模型给不出时用默认值，不阻断解析）
+    is_complete: bool = Field(
+        default=True, description="图片中的题目是否拍全（题干/选项/小题无缺失）"
+    )
+    completeness_note: str = Field(
+        default="", description="不完整时的说明，如「第(2)问被裁掉」（完整时留空串）"
+    )
+    focused_sub_question: str = Field(
+        default="",
+        description="大题含多道小题且仅部分做错时，提取出的做错小题题干（否则留空串）",
+    )
 
     @field_validator("knowledge_points", "tags")
     @classmethod
