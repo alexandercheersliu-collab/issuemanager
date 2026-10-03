@@ -25,9 +25,9 @@ def _login(page, username: str, password: str) -> None:
 
 
 def _goto(page, label: str, marker: str | None = None, timeout: int = 30000) -> None:
+    """点击侧边栏导航（st.radio，选项文本为「emoji + 标签」），并等待目标页标志出现。"""
     page.wait_for_timeout(1200)
-    frame = page.frame_locator("iframe[title*='streamlit_antd_components']").first
-    frame.get_by_text(label, exact=True).click()
+    page.locator("section[data-testid='stSidebar'] label", has_text=label).first.click()
     if marker:
         deadline = time.monotonic() + timeout / 1000
         while time.monotonic() < deadline:
@@ -51,12 +51,15 @@ def _sample_jpeg(tmp_path_factory):
 def test_full_tutor_flow(page, _sample_jpeg):
     """上传 → AI 解析（mock）→ 归档 → 错题本可见。"""
     _login(page, "demo", "demo123")
-    _goto(page, "Ai 录题", "拍照录题")  # 菜单 format_func='title' 渲染为「Ai 录题」
+    _goto(page, "AI 录题", "拍照录题")
 
     file_input = page.locator('input[type="file"]').first
     file_input.set_input_files(_sample_jpeg)
     page.get_by_role("button", name="开始 AI 解析").first.click()
 
+    # 切题候选确认（mock 固定切出多题）→ 确认录入后逐题解构归档
+    page.wait_for_selector("text=从图中识别出", timeout=30000)
+    page.get_by_role("button", name="确认录入").first.click()
     # mock 提供商固定返回含这些字段的解析
     page.wait_for_selector("text=已自动归档入错题本", timeout=30000)
     page.wait_for_selector("text=去错题本查看", timeout=15000)
@@ -69,10 +72,12 @@ def test_full_tutor_flow(page, _sample_jpeg):
 def test_followup_chat_on_question(page, _sample_jpeg):
     """先确保有一道题（录题流程），再在错题本里发一条追问。"""
     _login(page, "demo", "demo123")
-    _goto(page, "Ai 录题", "拍照录题")
+    _goto(page, "AI 录题", "拍照录题")
     file_input = page.locator('input[type="file"]').first
     file_input.set_input_files(_sample_jpeg)
     page.get_by_role("button", name="开始 AI 解析").first.click()
+    page.wait_for_selector("text=从图中识别出", timeout=30000)
+    page.get_by_role("button", name="确认录入").first.click()
     page.wait_for_selector("text=已自动归档入错题本", timeout=30000)
 
     _goto(page, "错题本", "语义搜索")
