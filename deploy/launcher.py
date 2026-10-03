@@ -206,7 +206,7 @@ def lan_ip() -> str:
         return "127.0.0.1"
 
 
-def start_api_server() -> "object":
+def start_api_server() -> object:
     """后台线程启动 uvicorn（8000：API + 移动端 /m），返回 server 便于退出。"""
     import uvicorn
 
@@ -233,7 +233,7 @@ def main() -> None:
 
     ip = lan_ip()
     print("\n===== Issues Manager 已启动 =====")
-    print(f"  桌面端（本机）:  http://localhost:8501")
+    print("  桌面端（本机）:  http://localhost:8501")
     print(f"  手机端（同 Wi-Fi）: http://{ip}:8000/m/")
     print("  首次手机访问若弹防火墙提示，请允许专用网络访问。按 Ctrl+C 停止。\n")
     threading.Timer(2.0, lambda: webbrowser.open("http://localhost:8501")).start()
