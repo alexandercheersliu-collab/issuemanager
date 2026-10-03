@@ -34,6 +34,19 @@ jobs:
       - name: 生成用户手册 PDF（微软雅黑）
         run: python scripts/build_user_manual_pdf.py --font C:\Windows\Fonts\msyh.ttc
 
+      # mobile/dist 被 mobile/.gitignore 排除（标准 Vite 约定），CI 检出里没有，必须现场构建
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: 构建移动端（mobile/dist → 打包进 /m）
+        working-directory: mobile
+        run: |
+          npm ci
+          npm run build
+
       - name: PyInstaller 构建 onedir
         run: pyinstaller deploy/issues_manager.spec --noconfirm
 

@@ -7,7 +7,7 @@
 产物：dist/IssuesManager/（含 IssuesManager.exe 与 _internal/）。
 注意：PyInstaller 以 spec 所在目录为工作目录，本文件内所有路径基于 SPECPATH 换算。
 打包前准备：
-  - mobile/dist 已构建（仓库内现有，或先 npm run build）
+  - mobile/dist 已构建（mobile/.gitignore 排除 dist，CI 中由 setup-node + npm run build 现场生成）
   - 嵌入模型已下载到 deploy/bundle/models/onnx（scripts/install_onnx_model.py --dir，
     CI 自动完成；无该目录时跳过，便于快速烟测）
   - 用户手册 docs/USER_MANUAL.md；PDF 由 scripts/build_user_manual_pdf.py 生成
