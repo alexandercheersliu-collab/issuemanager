@@ -18,6 +18,13 @@ os.environ["AI_PROVIDER"] = "mock"
 os.environ["BCRYPT_ROUNDS"] = "4"  # 加速测试
 os.environ["API_RATE_LIMIT_ENABLED"] = "false"  # 测试大量复用同 IP 登录，关闭限流
 
+# httpx/httpcore 不认 curl 风格的 socks:// 代理，统一改写为 socks5://
+#（与 bootstrap.normalize_proxy_scheme 相同，测试不经过入口文件故需重复）
+for _var in ("ALL_PROXY", "all_proxy"):
+    _value = os.environ.get(_var)
+    if _value and _value.startswith("socks://"):
+        os.environ[_var] = "socks5://" + _value.removeprefix("socks://")
+
 
 def _reusable_model_cache() -> Path | None:
     """复用已安装好的 ONNX 嵌入模型，避免测试期间现下 83MB（弱网下等于卡死）。

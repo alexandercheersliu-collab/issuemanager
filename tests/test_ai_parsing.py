@@ -102,3 +102,33 @@ def test_parse_overlong_knowledge_points_dedup_then_truncate():
     assert len(analysis.knowledge_points) == 6
     assert analysis.knowledge_points[0] == "除法"
     assert len(set(analysis.knowledge_points)) == 6
+
+
+def test_parse_normalizes_latex_delimiters():
+    # 模型偶发输出 \(...\) / \[...\] 定界符（真实案例：\(0.9\times19=(\quad)\)），
+    # 下游渲染只认 $...$，parse_analysis 必须归一化
+    import json
+
+    payload = dict(
+        VALID,
+        analysis="原题：\\(0.9\\times19=(\\quad)\\)，竖式：\\[9\\times19=171\\]",
+        answer="\\(17.1\\)",
+        followup_question="计算：\\(0.9\\times21=(\\quad)\\)",
+        focused_sub_question="\\(0.9\\times19=(\\quad)\\)",
+        mistake_cause="小数点位置错，如 \\(0.9\\times19=1.71\\)",
+    )
+    analysis = parse_analysis(json.dumps(payload, ensure_ascii=False))
+    assert analysis.analysis.startswith("原题：$0.9\\times19=(\\quad)$")
+    assert "$$9\\times19=171$$" in analysis.analysis
+    assert analysis.answer == "$17.1$"
+    assert analysis.followup_question == "计算：$0.9\\times21=(\\quad)$"
+    assert analysis.focused_sub_question == "$0.9\\times19=(\\quad)$"
+    assert "\\(" not in analysis.mistake_cause
+
+
+def test_parse_keeps_dollar_delimiters_untouched():
+    import json
+
+    payload = dict(VALID, analysis="行内 $0.9\\times19$，独立 $$a\\div b=0.5$$")
+    analysis = parse_analysis(json.dumps(payload, ensure_ascii=False))
+    assert analysis.analysis == "行内 $0.9\\times19$，独立 $$a\\div b=0.5$$"

@@ -219,7 +219,7 @@ class BaseAIProvider(abc.ABC):
             segments.append(
                 {
                     "number": str(item["number"]).strip(),
-                    "text": str(item.get("text", "") or "").strip(),
+                    "text": normalize_math_delimiters(str(item.get("text", "") or "").strip()),
                     "continued_from_prev": bool(item.get("continued_from_prev", False)),
                     "continues_to_next": bool(item.get("continues_to_next", False)),
                     "likely_wrong": bool(item.get("likely_wrong", False)),
@@ -279,6 +279,16 @@ class BaseAIProvider(abc.ABC):
 _LIST_FIELD_LIMIT = 6
 
 
+def normalize_math_delimiters(text: str) -> str:
+    """把模型偶发输出的 \\(...\\) / \\[...\\] 定界符归一为 $...$ / $$...$$。
+
+    下游渲染（Streamlit st.markdown、移动端 MathText）只认 $ 定界符；
+    提示词约束不可靠（模型时而混用），统一在解析边界归一化。
+    """
+    text = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", text, flags=re.DOTALL)
+    return re.sub(r"\\\((.*?)\\\)", r"$\1$", text, flags=re.DOTALL)
+
+
 def parse_analysis(raw: str) -> QuestionAnalysis:
     """从模型响应中稳健地提取 JSON 并校验为 QuestionAnalysis。
 
@@ -289,6 +299,10 @@ def parse_analysis(raw: str) -> QuestionAnalysis:
     if candidate is None:
         raise AIMessageError("响应中未找到 JSON 结构")
     _truncate_list_fields(candidate)
+    for key in ("analysis", "answer", "mistake_cause", "followup_question", "focused_sub_question"):
+        value = candidate.get(key)
+        if isinstance(value, str):
+            candidate[key] = normalize_math_delimiters(value)
     return QuestionAnalysis.model_validate(candidate)
 
 

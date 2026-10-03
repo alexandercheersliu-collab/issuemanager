@@ -158,3 +158,35 @@ def test_analyze_text_and_save_rejects_empty_text(question_service, student_user
 
     with pytest.raises(ValueError):
         question_service.analyze_text_and_save(student_user.id, "   ")
+
+
+def test_on_progress_fires_before_each_candidate_saved(question_service, student_user):
+    """进度回调在每题开始解构前触发（而非完成后）：回调发生时该题尚未入库。
+
+    录题等待体验依赖此语义——单题 AI 解构要 20–60 秒，回调若在最后才触发，
+    用户全程看不到任何进行中反馈（真实 bug：进度条定格在「准备解析…」像卡死）。
+    """
+    plan = _plan_photo_entry(
+        question_service.ai, [("p.jpg", _jpeg_bytes(), "image/jpeg")]
+    )
+    context = {"subject": "math", "grade": None, "region": None, "textbook_version": None}
+    baseline = len(question_service.list_questions(student_user.id))
+    seen: list[tuple[str, int]] = []
+
+    _save_checked_candidates(
+        question_service,
+        student_user.id,
+        plan["candidates"],
+        [],
+        "",
+        context,
+        on_progress=lambda name: seen.append(
+            (name, len(question_service.list_questions(student_user.id)))
+        ),
+    )
+
+    assert [name for name, _ in seen] == [
+        f"p.jpg · 第 {c['number']} 题" for c in plan["candidates"]
+    ]
+    # 第 1 题回调时该题尚未入库、第 2 题回调时仅第 1 题已入库 → 回调在开始解构前
+    assert [count for _, count in seen] == [baseline, baseline + 1]

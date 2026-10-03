@@ -85,3 +85,33 @@ def test_tools_bound_to_user_isolation(tools, service, db_session, student_user)
     other_tools = {t.name: t for t in build_tools(service, other.id)}
     other_hits = json.loads(other_tools["search_questions"].handler(keyword="隔离测试"))
     assert all(q["id"] != saved.id for q in other_hits["questions"])
+
+
+def test_search_results_include_stem_snippet(tools, student_user):
+    """搜索结果必须带题干摘要：否则 LLM 分不清哪道题是哪道，更无法取原题。"""
+    add = tools["add_text_question"].handler
+    add(content_markdown="计算 0.9×19 的竖式过程", answer="17.1", tags="小数乘法")
+
+    hits = json.loads(tools["search_questions"].handler(keyword="小数乘法"))
+    assert hits["count"] >= 1
+    stems = [q["stem"] for q in hits["questions"]]
+    assert any("0.9×19" in s for s in stems)
+
+
+def test_get_question_returns_full_content(tools, student_user):
+    """搜题后按 ID 取原题：完整题面 + 解析 + 答案都要返回。"""
+    add = tools["add_text_question"].handler
+    qid = json.loads(
+        add(content_markdown="已知 x+y=10，求 xy 最大值\n\n---\n\n用均值不等式推导", answer="25")
+    )["id"]
+
+    detail = json.loads(tools["get_question"].handler(question_id=qid))
+    assert detail["id"] == qid
+    assert "已知 x+y=10" in detail["content_markdown"]
+    assert "用均值不等式推导" in detail["content_markdown"]
+    assert detail["answer"] == "25"
+
+
+def test_get_question_missing_returns_message(tools, student_user):
+    result = tools["get_question"].handler(question_id=99999)
+    assert "不存在" in result

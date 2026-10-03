@@ -1,6 +1,7 @@
 /** FastAPI 网关客户端：JWT 会话、统一错误（含 429 Retry-After）、图片 blob 拉取。 */
 import type {
   AnalyzeResult,
+  ChatMessage,
   ConfirmResult,
   DashboardStats,
   DetectionAnswerResult,
@@ -147,5 +148,63 @@ export const api = {
     })
     if (!resp.ok) return null
     return URL.createObjectURL(await resp.blob())
+  },
+
+  /** AI 助手：POST /agent/chat/stream 的 SSE 流，逐 delta 回调，[DONE] 结束。 */
+  async agentChatStream(
+    message: string,
+    history: ChatMessage[],
+    onDelta: (delta: string) => void,
+  ): Promise<void> {
+    const token = getToken()
+    let resp: Response
+    try {
+      resp = await fetch(`${BASE}/agent/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ message, history }),
+      })
+    } catch {
+      throw new ApiError(0, '连不上服务端，请确认 API 网关已启动')
+    }
+    if (resp.status === 401) {
+      setToken(null)
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
+      throw new ApiError(401, '登录已过期，请重新登录')
+    }
+    if (resp.status === 429) {
+      const retry = Number(resp.headers.get('Retry-After') ?? '60')
+      throw new ApiError(429, `操作太频繁，请 ${retry} 秒后再试`, retry)
+    }
+    if (!resp.ok || !resp.body) {
+      throw new ApiError(resp.status, `请求失败（${resp.status}）`)
+    }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue
+        const data = line.slice(5).trim()
+        if (!data) continue
+        if (data === '[DONE]') return
+        let payload: { delta?: unknown; error?: unknown }
+        try {
+          payload = JSON.parse(data)
+        } catch {
+          continue // 非 JSON 行忽略
+        }
+        if (typeof payload.error === 'string') throw new ApiError(500, payload.error)
+        if (typeof payload.delta === 'string') onDelta(payload.delta)
+      }
+    }
   },
 }

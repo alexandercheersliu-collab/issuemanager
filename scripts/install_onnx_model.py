@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 import tarfile
 import time
@@ -28,6 +29,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# httpx/httpcore 不认 curl 风格的 socks:// 代理，统一改写为 socks5://
+#（与 bootstrap.normalize_proxy_scheme 相同；本脚本不 import bootstrap，
+#  避免其 apply() 改写 HOME 导致模型落到 data/home 下的默认缓存）
+for _var in ("ALL_PROXY", "all_proxy"):
+    _value = os.environ.get(_var)
+    if _value and _value.startswith("socks://"):
+        os.environ[_var] = "socks5://" + _value.removeprefix("socks://")
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 ARCHIVE_FILENAME = "onnx.tar.gz"

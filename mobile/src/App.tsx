@@ -1,19 +1,21 @@
 import { useEffect, useState } from 'react'
-import { BookOpen, Camera, Repeat, UserRound } from 'lucide-react'
+import { BookOpen, Bot, Camera, Repeat, UserRound } from 'lucide-react'
 import { Toaster } from '@/components/ui/sonner'
 import { api, AUTH_EXPIRED_EVENT, getToken, setToken } from '@/lib/api'
 import type { User } from '@/types'
+import Assistant from '@/pages/Assistant'
 import Capture from '@/pages/Capture'
 import Login from '@/pages/Login'
 import Notebook from '@/pages/Notebook'
 import Profile from '@/pages/Profile'
 import Review from '@/pages/Review'
 
-type Tab = 'review' | 'capture' | 'notebook' | 'me'
+type Tab = 'review' | 'capture' | 'assistant' | 'notebook' | 'me'
 
 const TABS: { key: Tab; label: string; icon: typeof Repeat }[] = [
   { key: 'review', label: '复习', icon: Repeat },
   { key: 'capture', label: '录题', icon: Camera },
+  { key: 'assistant', label: '助手', icon: Bot },
   { key: 'notebook', label: '错题本', icon: BookOpen },
   { key: 'me', label: '我的', icon: UserRound },
 ]
@@ -65,12 +67,13 @@ export default function App() {
     <div className="mx-auto min-h-dvh max-w-md bg-slate-50">
       {tab === 'review' && <Review />}
       {tab === 'capture' && <Capture onDone={() => setTab('notebook')} />}
+      {tab === 'assistant' && <Assistant />}
       {tab === 'notebook' && <Notebook />}
       {tab === 'me' && <Profile user={user} onLogout={logout} />}
 
-      {/* 底部主导航：四个高频功能，拇指可达 */}
+      {/* 底部主导航：五个高频功能，拇指可达 */}
       <nav className="fixed inset-x-0 bottom-0 z-10 mx-auto max-w-md border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)]">
-        <div className="grid grid-cols-4">
+        <div className="grid grid-cols-5">
           {TABS.map(({ key, label, icon: Icon }) => (
             <button
               key={key}

@@ -29,6 +29,7 @@ mcp>=1.2                # MCP Server：让 Claude Desktop / Cursor 等客户端�
 
 # RAG 向量检索
 chromadb>=0.5.15
+socksio>=1.0            # httpx SOCKS 代理支持（ALL_PROXY=socks5://... 环境下下载嵌入模型必需）
 
 # 文档与图像
 python-docx>=1.1

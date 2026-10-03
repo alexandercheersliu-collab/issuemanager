@@ -55,6 +55,13 @@ def _clean(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+def _stem_snippet(content_markdown: str, limit: int = 80) -> str:
+    """从 content_markdown 提取题干摘要（分隔线前为题面），供搜索结果辨识。"""
+    stem = content_markdown.split("\n\n---\n\n")[0]
+    clean = " ".join(stem.split())
+    return clean if len(clean) <= limit else clean[:limit] + "…"
+
+
 def build_tools(service: QuestionService, user_id: int) -> list[AgentTool]:
     """为指定用户构建工具集（归属绑定，LLM 无法越权）。"""
 
@@ -70,6 +77,7 @@ def build_tools(service: QuestionService, user_id: int) -> list[AgentTool]:
         items = [
             {
                 "id": q.id,
+                "stem": _stem_snippet(q.content_markdown),
                 "tags": q.tags,
                 "difficulty": q.difficulty,
                 "answer": q.answer,
@@ -78,6 +86,21 @@ def build_tools(service: QuestionService, user_id: int) -> list[AgentTool]:
             for q in results
         ]
         return _clean({"count": len(items), "questions": items})
+
+    def get_question(question_id: int) -> str:
+        """按 ID 取一道错题的完整内容：题面 + 解析 + 答案（搜题后提取原题用）。"""
+        q = service.get_question(int(question_id), user_id)
+        if q is None:
+            return "错题不存在或无权访问"
+        return _clean(
+            {
+                "id": q.id,
+                "content_markdown": q.content_markdown,
+                "answer": q.answer,
+                "tags": q.tags,
+                "difficulty": q.difficulty,
+            }
+        )
 
     def add_text_question(content_markdown: str, answer: str = "", tags: str = "") -> str:
         """录入一道文本错题（自动打标签、入向量库、进入复习循环）。"""
@@ -137,6 +160,18 @@ def build_tools(service: QuestionService, user_id: int) -> list[AgentTool]:
                 },
             },
             handler=search_questions,
+        ),
+        AgentTool(
+            name="get_question",
+            description="按 ID 获取一道错题的完整内容（题面 + 解析 + 答案）；搜题后用户要原题原文时调用",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "question_id": {"type": "integer", "description": "错题 ID"},
+                },
+                "required": ["question_id"],
+            },
+            handler=get_question,
         ),
         AgentTool(
             name="add_text_question",

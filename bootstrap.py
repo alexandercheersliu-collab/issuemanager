@@ -34,11 +34,20 @@ ENV_TARGETS: dict[str, Path] = {
 }
 
 
+def normalize_proxy_scheme() -> None:
+    """把 curl 风格的 ``socks://`` 代理改写为 httpx/httpcore 支持的 ``socks5://``。"""
+    for var in ("ALL_PROXY", "all_proxy"):
+        value = os.environ.get(var)
+        if value and value.startswith("socks://"):
+            os.environ[var] = "socks5://" + value.removeprefix("socks://")
+
+
 def apply() -> None:
     """创建目标目录并注入环境变量（幂等，可重复调用）。"""
     for name, path in ENV_TARGETS.items():
         path.mkdir(parents=True, exist_ok=True)
         os.environ[name] = str(path)
+    normalize_proxy_scheme()
 
 
 apply()

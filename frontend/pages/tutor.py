@@ -90,14 +90,28 @@ def render_tutor_page(user: dict) -> None:
                 plan = None
                 st.session_state.pop("photo_plan", None)
 
-            if uploads and st.button("开始 AI 解析", type="primary", width="stretch"):
-                with st.spinner("正在从图中找题…"):
-                    plan = _plan_photo_entry(
-                        service.ai,
-                        [(u.name, u.getvalue(), u.type or "image/jpeg") for u in uploads],
-                    )
-                    plan["upload_names"] = current_names
-                st.session_state["photo_plan"] = plan
+            # 切题期间禁用按钮防重复点击：点击后先置忙并重渲染（按钮变灰），
+            # 下一轮再执行真正的切题；忙态在结束/异常时都会解除
+            seg_busy = st.session_state.get("photo_seg_busy", False)
+            if uploads and st.button(
+                "开始 AI 解析", type="primary", width="stretch", disabled=seg_busy
+            ):
+                st.session_state["photo_seg_busy"] = True
+                st.rerun()
+            if seg_busy:
+                try:
+                    with st.spinner("正在从图中找题…"):
+                        plan = _plan_photo_entry(
+                            service.ai,
+                            [(u.name, u.getvalue(), u.type or "image/jpeg") for u in uploads],
+                        )
+                        plan["upload_names"] = current_names
+                    st.session_state["photo_plan"] = plan
+                    st.session_state["photo_seg_busy"] = False
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001 - 找题失败恢复可点击态
+                    st.session_state["photo_seg_busy"] = False
+                    st.error(f"从图中找题失败：{exc}")
 
             if plan is not None:
                 if not plan["candidates"]:
@@ -270,12 +284,16 @@ def _save_checked_candidates(
 ) -> list:
     """勾选题逐题解构入库（同一图片的多题共享同一份落盘原图）。
 
-    返回 _collect_entries 兼容的 (名称, EntryResult|None, 错误) 三元组列表。
+    on_progress 在每题开始解构前触发（单题 AI 调用要 20–60 秒，事后触发
+    用户全程看不到进行中反馈）。返回 _collect_entries 兼容的
+    (名称, EntryResult|None, 错误) 三元组列表。
     """
     results = []
     path_cache: dict[str, str] = {}
     for cand in candidates:
         name = f"{cand['image']} · 第 {cand['number']} 题"
+        if on_progress is not None:
+            on_progress(name)
         try:
             if cand["image"] not in path_cache:
                 path_cache[cand["image"]] = str(
@@ -297,8 +315,6 @@ def _save_checked_candidates(
             )
         except Exception as exc:  # noqa: BLE001 - 单题失败不影响其余
             results.append((name, None, str(exc)))
-        if on_progress is not None:
-            on_progress(name)
     return results
 
 
@@ -322,74 +338,114 @@ def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: s
         names = "、".join(f["name"] for f in plan["fallbacks"])
         st.caption(f"以下图片未切出多题，将按整图单题解析：{names}")
 
-    if st.button(f"确认录入（{len(checked)} 题）", type="primary", width="stretch"):
+    # 批量解构可能长达数分钟，确认期间禁用按钮防重复提交：
+    # 点击后先置忙并重渲染（按钮变灰），下一轮再执行入库
+    confirm_busy = st.session_state.get("photo_confirm_busy", False)
+    if st.button(
+        f"确认录入（{len(checked)} 题）",
+        type="primary",
+        width="stretch",
+        disabled=confirm_busy,
+    ):
         if not checked and not plan["fallbacks"]:
             st.warning("请至少勾选一道题。")
             return
-        _process_plan(service, user, plan, checked, sanitize_tags(tags_input), hint, context)
-        st.session_state.pop("photo_plan", None)
+        st.session_state["photo_confirm_busy"] = True
+        st.rerun()
+    if confirm_busy:
+        try:
+            _process_plan(service, user, plan, checked, sanitize_tags(tags_input), hint, context)
+        finally:
+            st.session_state["photo_confirm_busy"] = False
+            st.session_state.pop("photo_plan", None)
 
 
 def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str], hint: str, context: dict) -> None:
-    """批量入库：勾选题逐题解构 + 回退图整图解析，统一渲染结果。"""
+    """批量入库：勾选题逐题解构 + 回退图整图解析，统一渲染结果。
+
+    进度用 st.status 分步展示（与同类题检测同一模式）：单题 AI 调用要
+    20–60 秒，静态进度条在等待期间纹丝不动，用户会以为页面卡死。
+    """
     total = len(checked) + len(plan["fallbacks"])
-    progress = st.progress(0.0, text="准备解析…")
-    state = {"done": 0}
+    state = {"started": 0}
 
-    def _tick(label: str) -> None:
-        state["done"] += 1
-        progress.progress(state["done"] / total, text=label)
+    with st.status(f"正在录入 {total} 道题…", expanded=True) as status:
 
-    results = _save_checked_candidates(
-        service, user["id"], checked, tags, hint, context,
-        on_progress=lambda name: _tick(f"正在解构 {name}"),
-    )
-    for fb in plan["fallbacks"]:
-        try:
-            entry = service.analyze_and_save_dedup(
-                user["id"],
-                fb["bytes"],
-                mime_type=fb["mime"],
-                user_tags=tags,
-                hint=hint,
-                subject=context["subject"],
-                grade=context["grade"],
-                region=context["region"],
-                textbook_version=context["textbook_version"],
+        def _announce(msg: str) -> None:
+            state["started"] += 1
+            status.update(
+                label=f"正在录入…（第 {state['started']}/{total} 题，单题约需 20–60 秒）"
             )
-            results.append((fb["name"], entry, None))
-        except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
-            results.append((fb["name"], None, str(exc)))
-        _tick(f"正在解析 {fb['name']}")
-    progress.progress(1.0, text="解析完成")
+            st.write(msg)
+
+        results = _save_checked_candidates(
+            service, user["id"], checked, tags, hint, context,
+            on_progress=lambda name: _announce(f"🔍 正在解构 {name}…"),
+        )
+        for fb in plan["fallbacks"]:
+            _announce(f"🔍 正在解析 {fb['name']}（整图）…")
+            try:
+                entry = service.analyze_and_save_dedup(
+                    user["id"],
+                    fb["bytes"],
+                    mime_type=fb["mime"],
+                    user_tags=tags,
+                    hint=hint,
+                    subject=context["subject"],
+                    grade=context["grade"],
+                    region=context["region"],
+                    textbook_version=context["textbook_version"],
+                )
+                results.append((fb["name"], entry, None))
+            except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
+                results.append((fb["name"], None, str(exc)))
+                st.write(f"❌ {fb['name']} 解析失败：{exc}")
+        failures = sum(1 for _, _, err in results if err is not None)
+        if failures:
+            status.update(
+                label=f"⚠️ 录入完成，{failures}/{total} 项失败（详见下方）",
+                state="error",
+                expanded=False,
+            )
+        else:
+            status.update(label=f"✅ {total} 道题全部录入完成", state="complete", expanded=False)
     _render_entry_results(service, user, _collect_entries(results), unit="项")
 
 
 def _process_uploads(service, user, uploads, tags: list[str], hint: str, context: dict) -> None:
-    progress = st.progress(0.0, text="准备解析…")
     results = []
-    for idx, upload in enumerate(uploads, 1):
-        progress.progress(
-            (idx - 1) / len(uploads), text=f"正在解析 {upload.name}（{idx}/{len(uploads)}）"
-        )
-        try:
-            image_bytes = upload.getvalue()
-            mime = upload.type or "image/jpeg"
-            entry = service.analyze_and_save_dedup(
-                user["id"],
-                image_bytes,
-                mime_type=mime,
-                user_tags=tags,
-                hint=hint,
-                subject=context["subject"],
-                grade=context["grade"],
-                region=context["region"],
-                textbook_version=context["textbook_version"],
+    total = len(uploads)
+    with st.status(f"正在录入 {total} 张图片…", expanded=True) as status:
+        for idx, upload in enumerate(uploads, 1):
+            status.update(label=f"正在录入…（第 {idx}/{total} 张，单张约需 20–60 秒）")
+            st.write(f"🔍 正在解析 {upload.name}…")
+            try:
+                image_bytes = upload.getvalue()
+                mime = upload.type or "image/jpeg"
+                entry = service.analyze_and_save_dedup(
+                    user["id"],
+                    image_bytes,
+                    mime_type=mime,
+                    user_tags=tags,
+                    hint=hint,
+                    subject=context["subject"],
+                    grade=context["grade"],
+                    region=context["region"],
+                    textbook_version=context["textbook_version"],
+                )
+                results.append((upload.name, entry, None))
+            except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
+                results.append((upload.name, None, str(exc)))
+                st.write(f"❌ {upload.name} 解析失败：{exc}")
+        failures = sum(1 for _, _, err in results if err is not None)
+        if failures:
+            status.update(
+                label=f"⚠️ 录入完成，{failures}/{total} 张失败（详见下方）",
+                state="error",
+                expanded=False,
             )
-            results.append((upload.name, entry, None))
-        except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
-            results.append((upload.name, None, str(exc)))
-    progress.progress(1.0, text="解析完成")
+        else:
+            status.update(label=f"✅ {total} 张图片全部录入完成", state="complete", expanded=False)
     _render_entry_results(service, user, _collect_entries(results), unit="张")
 
 

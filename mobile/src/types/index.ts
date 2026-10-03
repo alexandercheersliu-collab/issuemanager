@@ -121,3 +121,9 @@ export function splitStem(content: string): { stem: string; analysis: string | n
   const [stem, rest] = content.split(STEM_SEP)
   return { stem: stem.trim(), analysis: rest?.trim() || null }
 }
+
+/** AI 助手对话消息（与 /agent/chat/stream 的 history 结构一致） */
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}

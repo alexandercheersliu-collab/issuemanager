@@ -28,3 +28,6 @@ pytest_*.log
 .DS_Store
 Thumbs.db
 .coverage 
+
+# codegraph tool cache
+.codegraph/
