@@ -174,6 +174,13 @@ def self_check() -> None:
 
 
 def main() -> int:
+    # Windows en-US 控制台（cp1252）打印中文会 UnicodeEncodeError，降级替换保证不崩
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:  # noqa: BLE001 - 非文本流时忽略
+            pass
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", default=None, help="模型缓存父目录（默认取 CHROMA_MODEL_DIR）")
     parser.add_argument("--check-only", action="store_true", help="只校验/解压，不下载")

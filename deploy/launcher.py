@@ -219,6 +219,14 @@ def start_api_server() -> object:
 
 
 def main() -> None:
+    # Windows 控制台默认 GBK；en-US 系统（cp1252）打印中文会直接 UnicodeEncodeError，
+    # 降级为替换字符保证不崩（中文系统不受影响）
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:  # noqa: BLE001 - 非文本流（重定向/管道）时忽略
+            pass
+
     parser = argparse.ArgumentParser(description="Issues Manager 一体化启动器")
     parser.add_argument("--reconfigure", action="store_true", help="重新运行大模型配置向导")
     args = parser.parse_args()

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -124,6 +125,13 @@ def render_pdf(md_path: Path, out_path: Path, font_path: str) -> None:
 
 
 def main() -> None:
+    # Windows en-US 控制台（cp1252）打印中文会 UnicodeEncodeError，降级替换保证不崩
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:  # noqa: BLE001 - 非文本流时忽略
+            pass
+
     parser = argparse.ArgumentParser(description="用户手册 Markdown → PDF")
     parser.add_argument("--md", default=str(DEFAULT_MD))
     parser.add_argument("--out", default=str(DEFAULT_OUT))
