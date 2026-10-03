@@ -35,7 +35,7 @@ socksio>=1.0            # httpx SOCKS 代理支持（ALL_PROXY=socks5://... 环�
 python-docx>=1.1
 pymupdf>=1.24          # PDF 解析与逐页渲染（整卷导入）
 Pillow>=10.3
-reportlab>=4.0
+reportlab>=5.0.1
 alembic>=1.13
 
 # 可选：OCR 原图文字识别（.env 设 OCR_ENABLED=true 并安装后启用）
