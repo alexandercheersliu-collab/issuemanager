@@ -53,7 +53,7 @@ jobs:
       - name: 拷入手册并打 zip
         shell: pwsh
         run: |
-          $version = (Select-String -Path backend/config.py -Pattern 'app_version[^"\d]*([\d.]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
+          $version = (Select-String -Path backend/config.py -Pattern 'app_version[^=]*=\s*["'']([\d.]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
           if (-not $version) { $version = "0.0.0" }
           Copy-Item docs/USER_MANUAL.md dist/IssuesManager/
           Copy-Item dist_assets/USER_MANUAL.pdf dist/IssuesManager/
