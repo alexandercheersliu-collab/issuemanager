@@ -9,7 +9,7 @@ networkx>=3.0            # 知识图谱力导向布局（spring_layout）
 
 # REST API 网关（多端复用）
 fastapi>=0.141.1
-uvicorn[standard]>=0.53.0
+uvicorn[standard]>=0.54.0
 python-multipart>=0.0.32
 PyJWT>=2.8
 
