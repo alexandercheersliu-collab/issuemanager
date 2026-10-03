@@ -126,7 +126,18 @@ docker compose up -d --build
 # 数据持久化于 named volume
 ```
 
-### 方式三：单独启动 API 网关
+### 方式三：Windows 免安装部署包（客户交付）
+
+面向无开发环境的 Windows 用户：解压即用、不含源码、首次启动引导配置大模型。
+
+- **客户侧**：解压 zip → 双击 `IssuesManager.exe` → 按控制台向导选择大模型
+  服务商并验证 Key → 浏览器自动打开桌面端（8501），手机同 Wi-Fi 访问
+  `http://<电脑IP>:8000/m/`。详见包内 `USER_MANUAL.md` / `.pdf`。
+- **构建侧**：GitHub Actions 手动触发 `build-windows-package` 工作流
+  （windows-latest + PyInstaller onedir，spec 见 `deploy/issues_manager.spec`），
+  产物 `IssuesManager-<version>-windows-x64.zip` 以 artifact 发布。
+
+### 方式四：单独启动 API 网关
 
 ```bash
 pip install -r requirements.txt

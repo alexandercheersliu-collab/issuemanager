@@ -5,6 +5,7 @@
 | 形态 | 适用场景 | 说明 |
 |---|---|---|
 | 本地运行 | 演示 / 日常使用 | `streamlit run app.py`，SQLite + 内置嵌入模型，零外部依赖 |
+| Windows 免安装包 | 客户交付（无开发环境） | PyInstaller onedir 单 exe，解压即用、首启配置向导，见「1.6 Windows 部署包」 |
 | 家庭局域网 | 电脑做服务端，手机/平板同 Wi-Fi 使用 | 见「1.5 家庭局域网部署」，移动端由 API 网关同源托管 |
 | Docker Compose | 云服务器 / 局域网 | Web + API 双服务，数据卷持久化 |
 | Streamlit Cloud | 纯前端演示 | 仅 Web 层；演示模式（无 Key）或配 Secret |
@@ -79,6 +80,43 @@ Windows「任务计划程序」建一个登录时触发的任务，操作填：
   Docker Compose + Nginx/Caddy TLS，见第 2 节）；
 - `AUTH_SECRET` 务必改成强随机值（令牌签名密钥），`API_CORS_ORIGINS` 同源部署下保持默认即可
   （同源不需要 CORS 放行）。
+
+
+## 1.6 Windows 免安装部署包（客户交付）
+
+面向无 Python 环境的 Windows 客户：**解压即用、无源码、首启引导配置大模型**。
+
+### 包内容
+
+```
+IssuesManager-<version>-windows-x64.zip
+├── IssuesManager.exe      # 一体化启动器（配置向导 + 双服务 + 自动开浏览器）
+├── _internal/             # PyInstaller onedir 依赖（含预置嵌入模型，离线可用）
+├── USER_MANUAL.md / .pdf  # 用户手册
+└── data/                  # 首次启动生成（SQLite / 原图 / 向量库 / 日志）
+```
+
+启动器行为（`deploy/launcher.py`，开发模式也可 `python -m deploy.launcher` 调试）：
+
+- 数据目录钉在 exe 同级 `data/`（`DATA_DIR`/`CHROMA_DIR`），嵌入模型用包内预置
+  （`CHROMA_MODEL_DIR=_internal/models/onnx`）；
+- `.env` 缺失或无 Key 时进入控制台配置向导：选服务商预设 → 填 Key → 真实调用验证 →
+  写 `.env`（含自动生成的强随机 `AUTH_SECRET`）；`--reconfigure` 可随时重配；
+- 同进程拉起 uvicorn（8000，API + 移动端 `/m`）与 Streamlit（8501），
+  打印本机/局域网地址并打开浏览器；Ctrl+C 优雅退出。
+
+### 构建（维护者）
+
+GitHub Actions 手动触发 `build-windows-package`（`.github/workflows/build-windows.yml`）：
+windows-latest → 预下载嵌入模型 → PyInstaller 按 `deploy/issues_manager.spec` 构建 →
+reportlab 生成手册 PDF（msyh）→ 打 zip 传 artifact。
+本地可先跑 Linux 烟测验证依赖收集（PyInstaller 不支持跨平台出 Windows exe）：
+
+```bash
+pip install pyinstaller
+pyinstaller deploy/issues_manager.spec --noconfirm --distpath dist_smoke --workpath build_smoke
+./dist_smoke/IssuesManager/IssuesManager   # 验证 8501/8000/m 均可达
+```
 
 ## 2. Docker Compose（推荐）
 

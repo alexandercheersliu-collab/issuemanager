@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，必须在其他 import 之前
 
@@ -55,6 +56,13 @@ def create_app() -> FastAPI:
     if settings.sentry_dsn:
         _init_sentry(settings)
 
+    # 网关独立启动（含部署包 exe、uvicorn api.main:app）时也要保证 schema 与
+    # 种子账号就位——此前只在 Streamlit 登录页 init_db，全新数据目录直连 API 会
+    # 报 no such table: users。init_db 幂等（create_all + 用户表为空才种子）。
+    from backend.database import init_db
+
+    init_db(seed_users=True)
+
     app = FastAPI(
         title=f"{settings.app_name} API",
         version=settings.app_version,
@@ -88,7 +96,11 @@ def create_app() -> FastAPI:
 
     # 移动端静态站点：mobile/dist 存在时挂到 /m，与 API 同源（免 CORS、单一端口）。
     # 应用无客户端路由（Tab 是状态而非路由），html=True 的目录回退足够。
-    mobile_dist = Path(__file__).resolve().parent.parent / "mobile" / "dist"
+    # PyInstaller 打包时 dist 作为 data 收进 bundle（sys._MEIPASS）。
+    if getattr(sys, "frozen", False):
+        mobile_dist = Path(sys._MEIPASS) / "mobile" / "dist"  # type: ignore[attr-defined]
+    else:
+        mobile_dist = Path(__file__).resolve().parent.parent / "mobile" / "dist"
     if mobile_dist.is_dir():
         app.mount("/m", StaticFiles(directory=mobile_dist, html=True), name="mobile")
         logger.info("移动端静态站点已挂载: /m -> %s", mobile_dist)
