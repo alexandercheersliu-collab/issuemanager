@@ -31,3 +31,9 @@ Thumbs.db
 
 # codegraph tool cache
 .codegraph/
+
+# ===== 部署包构建产物 =====
+dist_assets/
+dist_smoke/
+build_smoke/
+deploy/bundle/

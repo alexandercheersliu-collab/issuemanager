@@ -20,9 +20,15 @@ chromadb / huggingface_hub / torch 等库会把模型与缓存写进用户主目
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+# PyInstaller 打包（frozen）时 __file__ 指向临时解压目录，数据会随退出丢失；
+# 改用 exe 所在目录作为项目根，让 data/ 稳定落在 exe 同级。
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = PROJECT_ROOT / "data"
 
 ENV_TARGETS: dict[str, Path] = {

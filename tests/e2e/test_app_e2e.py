@@ -51,10 +51,9 @@ def _wait_any_text(page, markers: list[str], timeout_ms: int) -> None:
 
 
 def _goto(page, label: str, marker: str | None = None, timeout: int = 30000) -> None:
-    """点击侧边栏菜单（组件在 iframe 内），并等待目标页标志出现。"""
+    """点击侧边栏导航（st.radio，选项文本为「emoji + 标签」），并等待目标页标志出现。"""
     page.wait_for_timeout(1200)
-    frame = page.frame_locator("iframe[title*='streamlit_antd_components']").first
-    frame.get_by_text(label, exact=True).click()
+    page.locator("section[data-testid='stSidebar'] label", has_text=label).first.click()
     if marker:
         _wait_any_text(page, marker.split("|"), timeout)
 
