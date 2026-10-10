@@ -35,7 +35,7 @@ jobs:
         run: python scripts/build_user_manual_pdf.py --font C:\Windows\Fonts\msyh.ttc
 
       # mobile/dist 被 mobile/.gitignore 排除（标准 Vite 约定），CI 检出里没有，必须现场构建
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
