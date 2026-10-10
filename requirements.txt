@@ -4,7 +4,7 @@
 # Web 框架
 streamlit>=1.49
 streamlit-antd-components>=0.3.2
-plotly>=7.0.0
+plotly>=7.1.0
 networkx>=3.0            # 知识图谱力导向布局（spring_layout）
 
 # REST API 网关（多端复用）
