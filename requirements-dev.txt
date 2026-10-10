@@ -3,6 +3,6 @@
 pytest>=9.1.1
 ruff>=0.16.7
 pytest-cov
-locust>=2.30
+locust>=2.46.0
 playwright>=1.40
 psutil>=5.9
