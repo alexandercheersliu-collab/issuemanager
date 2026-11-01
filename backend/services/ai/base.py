@@ -207,25 +207,38 @@ class BaseAIProvider(abc.ABC):
         likely_wrong 为错题预判（卷面有作答痕迹且疑似被判错），模型不给该字段时默认 False；
         输出非法时抛 AIMessageError（调用方重试/降级）。
         """
-        with track_ai_call("segment_page"):
-            raw = self._complete(image_bytes, mime_type, SEGMENT_INSTRUCTION, SEGMENT_SYSTEM_PROMPT)
-        items = extract_json_list(raw)
-        if items is None:
-            raise AIMessageError("切题响应中未找到 JSON 数组")
-        segments: list[dict] = []
-        for item in items:
-            if not isinstance(item, dict) or not str(item.get("number", "")).strip():
-                raise AIMessageError(f"切题结果缺少题号: {item!r}")
-            segments.append(
-                {
-                    "number": str(item["number"]).strip(),
-                    "text": normalize_math_delimiters(str(item.get("text", "") or "").strip()),
-                    "continued_from_prev": bool(item.get("continued_from_prev", False)),
-                    "continues_to_next": bool(item.get("continues_to_next", False)),
-                    "likely_wrong": bool(item.get("likely_wrong", False)),
-                }
-            )
-        return segments
+        last_error: Exception | None = None
+        for attempt in range(1, self.settings.ai_max_retries + 1):
+            with track_ai_call("segment_page"):
+                try:
+                    raw = self._complete(
+                        image_bytes, mime_type, SEGMENT_INSTRUCTION, SEGMENT_SYSTEM_PROMPT
+                    )
+                    items = extract_json_list(raw)
+                    if items is None:
+                        raise AIMessageError("切题响应中未找到 JSON 数组")
+                    segments: list[dict] = []
+                    for item in items:
+                        if not isinstance(item, dict) or not str(item.get("number", "")).strip():
+                            raise AIMessageError(f"切题结果缺少题号: {item!r}")
+                        segments.append(
+                            {
+                                "number": str(item["number"]).strip(),
+                                "text": normalize_math_delimiters(
+                                    str(item.get("text", "") or "").strip()
+                                ),
+                                "continued_from_prev": bool(item.get("continued_from_prev", False)),
+                                "continues_to_next": bool(item.get("continues_to_next", False)),
+                                "likely_wrong": bool(item.get("likely_wrong", False)),
+                            }
+                        )
+                    return segments
+                except Exception as exc:  # noqa: BLE001 - 连接与结构化输出错误统一重试
+                    last_error = exc
+                    logger.warning("视觉切题第 %s 次失败: %s", attempt, exc)
+        raise AIMessageError(
+            f"视觉切题失败（已重试 {self.settings.ai_max_retries} 次）: {last_error}"
+        )
 
     def analyze_text(
         self, text: str, hint: str = "", context: AnalysisContext | None = None
@@ -320,27 +333,64 @@ def _truncate_list_fields(candidate: dict) -> None:
             candidate[key] = seen[:_LIST_FIELD_LIMIT]
 
 
+# 视觉模型常把 LaTeX 单反斜杠直接写进 JSON 字符串，造成两类故障：
+# 1) \i、\m、\v 等非法转义让 json.loads 整体失败（整页切题丢失）；
+# 2) \f(\frac)、\b(\beta)、\t(\tan\to)、\n(\ne\nu)、\r(\rho) 恰好是合法转义，
+#    被静默解析成换页符/退格/制表符，公式内容被篡改。
+# 修复策略：保留结构性转义（\\、\"、\/、\uXXXX）；\b\f\n\r\t 后接小写字母视为
+# LaTeX 命令（\frac、\beta、\tan、\ne 等）加倍，否则视为真正的控制符转义保留；
+# 其余孤立反斜杠一律加倍。交替分支按顺序匹配，已配对的 \\ 被整体消费。
+_JSON_ESC_OR_LONE_RE = re.compile(r'\\\\|\\[\"/]|\\u[0-9a-fA-F]{4}|\\[bfnrt](?![a-z])|\\')
+
+# 已配对的 \\ 之后的第二个 \ 不匹配（负向后顾），避免误伤规范转义的文档
+_SUSPICIOUS_LATEX_ESC_RE = re.compile(r'(?<!\\)\\[bfnrt][a-zA-Z]')
+
+
+def _escape_latex_backslashes(text: str) -> str:
+    r"""把疑似 LaTeX 源码的反斜杠加倍：保留 \\、\"、\/、\uXXXX，其余 \ 加倍。"""
+    return _JSON_ESC_OR_LONE_RE.sub(
+        lambda m: m.group(0) if len(m.group(0)) > 1 else "\\\\", text
+    )
+
+
+def _json_loads_lenient(text: str):
+    r"""json.loads 容错版（LaTeX 源码友好）。
+
+    1) 直接解析失败（非法转义）：加倍疑似 LaTeX 反斜杠后重试；
+    2) 直接解析成功但原文含 \<字母> 形态的可疑转义（\frac、\beta、\tan 等会被
+       静默篡改）：同样改用加倍后重试。
+    失败时照常抛 json.JSONDecodeError，由调用方按策略降级。
+    """
+    try:
+        parsed = json.loads(text)
+        if not _SUSPICIOUS_LATEX_ESC_RE.search(text):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return json.loads(_escape_latex_backslashes(text))
+
+
 def extract_json_block(raw: str) -> dict | None:
     if not raw:
         return None
     text = raw.strip()
     # 1) 直接解析
     try:
-        return json.loads(text)
+        return _json_loads_lenient(text)
     except json.JSONDecodeError:
         pass
     # 2) 提取 ```json 围栏
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fenced:
         try:
-            return json.loads(fenced.group(1))
+            return _json_loads_lenient(fenced.group(1))
         except json.JSONDecodeError:
             pass
     # 3) 贪婪匹配第一个平衡的花括号块
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
+            return _json_loads_lenient(match.group(0))
         except json.JSONDecodeError:
             pass
     return None
@@ -353,7 +403,7 @@ def extract_json_list(raw: str) -> list | None:
     text = raw.strip()
     # 1) 直接解析
     try:
-        parsed = json.loads(text)
+        parsed = _json_loads_lenient(text)
         return parsed if isinstance(parsed, list) else None
     except json.JSONDecodeError:
         pass
@@ -361,7 +411,7 @@ def extract_json_list(raw: str) -> list | None:
     fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
     if fenced:
         try:
-            parsed = json.loads(fenced.group(1))
+            parsed = _json_loads_lenient(fenced.group(1))
             return parsed if isinstance(parsed, list) else None
         except json.JSONDecodeError:
             pass
@@ -369,7 +419,7 @@ def extract_json_list(raw: str) -> list | None:
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
         try:
-            parsed = json.loads(match.group(0))
+            parsed = _json_loads_lenient(match.group(0))
             return parsed if isinstance(parsed, list) else None
         except json.JSONDecodeError:
             pass

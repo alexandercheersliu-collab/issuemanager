@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.models.orm import Comment, DetectionLog, Question, ReviewLog, User
+from backend.models.orm import Comment, DetectionLog, Job, Question, ReviewLog, User
 from backend.services.auth import is_admin_username
 from frontend.pages.admin import purge_confirmed
 
@@ -139,6 +139,39 @@ class TestPurgeService:
     def test_purge_nonexistent_subject_zero(self, question_service, admin_user):
         result = question_service.purge_subject(admin_user.id, "alchemy_void")
         assert result["deleted"] == 0
+
+    def test_purge_removes_matching_import_jobs(
+        self, question_service, admin_user, student_user, db_session
+    ):
+        """清空学科时同步删除该学科的整卷导入任务记录。
+
+        否则任务残留的 doc_hash 会在重新导入同一文档时被去重复活，
+        界面直接跳到"已确认入库"（题已删）——表现为重新导入失败。
+        其他学科、其他类型的任务不受影响。
+        """
+        db_session.add_all([
+            Job(
+                id="job-alchemy", user_id=student_user.id, type="document_import",
+                status="success", payload={"subject": "alchemy", "doc_hash": "h1"},
+                result={"confirmed": True},
+            ),
+            Job(
+                id="job-english", user_id=student_user.id, type="document_import",
+                status="success", payload={"subject": "english", "doc_hash": "h2"},
+                result={"confirmed": True},
+            ),
+            Job(
+                id="job-other-type", user_id=student_user.id, type="analyze_image",
+                status="success", payload={"subject": "alchemy"}, result={},
+            ),
+        ])
+        db_session.commit()
+
+        question_service.purge_subject(admin_user.id, "alchemy")
+
+        assert db_session.get(Job, "job-alchemy") is None
+        assert db_session.get(Job, "job-english") is not None
+        assert db_session.get(Job, "job-other-type") is not None
 
 
 # ---------- API 权限矩阵 ----------

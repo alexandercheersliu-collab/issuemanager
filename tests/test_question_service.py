@@ -43,6 +43,68 @@ def test_list_and_keyword_search(question_service, student_user):
     )
 
 
+def test_region_and_textbook_filters(question_service, student_user):
+    matching = question_service.create_manual_question(
+        student_user.id,
+        content_markdown="地区教材过滤·目标题",
+        region="上海",
+        textbook_version="沪教版",
+    )
+    question_service.create_manual_question(
+        student_user.id,
+        content_markdown="地区教材过滤·其他题",
+        region="北京",
+        textbook_version="人教版",
+    )
+
+    results = question_service.list_questions(
+        student_user.id,
+        keyword="地区教材过滤",
+        region="上海",
+        textbook_version="沪教版",
+        semantic=False,
+    )
+
+    assert [q.id for q in results] == [matching.id]
+    assert question_service.count_for_user(
+        student_user.id,
+        keyword="地区教材过滤",
+        region="上海",
+        textbook_version="沪教版",
+    ) == 1
+
+
+def test_semantic_search_does_not_bypass_metadata_filters(
+    question_service, student_user, monkeypatch
+):
+    from backend.services.rag import RagHit
+
+    matching = question_service.create_manual_question(
+        student_user.id,
+        content_markdown="语义过滤边界·九年级题",
+        grade=9,
+    )
+    other = question_service.create_manual_question(
+        student_user.id,
+        content_markdown="语义过滤边界·十年级题",
+        grade=10,
+    )
+    monkeypatch.setattr(
+        question_service.vector_store,
+        "semantic_search",
+        lambda *args, **kwargs: [RagHit(question_id=other.id, distance=0.1)],
+    )
+
+    results = question_service.list_questions(
+        student_user.id,
+        keyword="语义过滤边界",
+        grade=9,
+        semantic=True,
+    )
+
+    assert [q.id for q in results] == [matching.id]
+
+
 def test_isolation_between_users(question_service, db_session, student_user):
     from backend.models.orm import User
 

@@ -14,7 +14,9 @@ from frontend.common import (
     go_to,
     keyboard_shortcuts,
     page_header,
+    safe_truncate_math,
 )
+from frontend.components import k12_meta_line
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
 # 评分按钮四色：忘了红 / 勉强橙 / 记得蓝 / 秒懂绿
@@ -27,14 +29,20 @@ _TERMINAL_DEMOTION_STATES = ("demoted",)
 
 # 切题录入的题面/解析分隔符（与 question_mixins.analyze_text_and_save 落库格式一致）
 _STEM_SEP = "\n\n---\n\n"
+_DOCUMENT_STEM_PREFIX = "### 题目\n"
+_DOCUMENT_ANALYSIS_SEP = "\n\n### 解析\n"
 
 
 def split_stem_and_analysis(content_markdown: str) -> tuple[str, str | None]:
-    """把 content_markdown 拆成（题干, 解析）；无分隔符的旧题返回（原文, None）。
+    """拆分切题录入或整卷导入的（题干, 解析）；无分隔符的旧题返回（原文, None）。
 
-    只按第一个分隔符拆分（解析里若再出现 --- 归解析段）；两段各自 strip，
+    只按第一个分隔符拆分（解析里若再出现分隔符归解析段）；两段各自 strip，
     解析段为空视为无解析（返回 None），由调用方回落到全文展示。
     """
+    if content_markdown.startswith(_DOCUMENT_STEM_PREFIX):
+        stem, marker, analysis = content_markdown.partition(_DOCUMENT_ANALYSIS_SEP)
+        if marker:
+            return stem.removeprefix(_DOCUMENT_STEM_PREFIX).strip(), analysis.strip() or None
     if _STEM_SEP not in content_markdown:
         return content_markdown.strip(), None
     stem, _, analysis = content_markdown.partition(_STEM_SEP)
@@ -97,8 +105,8 @@ def _render_detection_recommendations(service, user: dict, summary: dict) -> Non
     for cand in picked:
         question = cand["question"]
         with st.container(border=True):
-            snippet = " ".join(question.content_markdown.split())[:60]
-            st.markdown(f"**#{question.id}** · {snippet}…")
+            snippet = safe_truncate_math(" ".join(question.content_markdown.split()), 60)
+            st.markdown(f"**#{question.id}** · {snippet}")
             _render_detection(service, question, user)
 
 
@@ -163,6 +171,9 @@ def render_review_page(user: dict) -> None:
         </div>""",
         unsafe_allow_html=True,
     )
+    meta_line = k12_meta_line(question)
+    if meta_line:
+        st.caption(meta_line)
 
     # 闪卡居中加大：窄屏下中间列自然占满
     _card_l, card_col, _card_r = st.columns([0.7, 2.6, 0.7])
@@ -193,7 +204,10 @@ def render_review_page(user: dict) -> None:
                     "如需文字题面，请到「错题本」对应题目点「编辑」补录题干。"
                 )
             else:
-                st.markdown(question.content_markdown[:220], unsafe_allow_html=True)
+                st.markdown(
+                    safe_truncate_math(question.content_markdown, 220),
+                    unsafe_allow_html=True,
+                )
                 st.caption("（本题无原图，请根据题面回忆解法）")
 
             if st.button("显示解析", type="primary", width="stretch"):

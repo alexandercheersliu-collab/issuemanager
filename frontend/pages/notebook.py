@@ -86,7 +86,7 @@ def render_notebook_page(user: dict) -> None:
             view_user_id, include_others=include_others, semantic=False
         )
         all_tags = sorted({t for q in all_questions for t in q.tags})
-        with st.expander("🔎 更多筛选（语义搜索 · 标签 · 学科 · 年级 · 错因 · 来源）", expanded=False):
+        with st.expander("🔎 更多筛选（语义搜索 · 标签 · 学科 · 年级 · 地区 · 教材 · 错因 · 来源）", expanded=False):
             tog1, tog2, tog3, _tog_pad = st.columns([1.2, 1.2, 1.4, 3])
             with tog1:
                 semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
@@ -148,6 +148,25 @@ def render_notebook_page(user: dict) -> None:
                 )
                 source_doc_filter = None if doc_label == "全部" else doc_label
 
+            filt6, filt7 = st.columns(2)
+            with filt6:
+                present_regions = sorted({q.region for q in all_questions if q.region})
+                region_label = st.selectbox(
+                    "按地区筛选", ["全部", *present_regions], index=0, key="notebook_region"
+                )
+                region_filter = None if region_label == "全部" else region_label
+            with filt7:
+                present_textbooks = sorted(
+                    {q.textbook_version for q in all_questions if q.textbook_version}
+                )
+                textbook_label = st.selectbox(
+                    "按教材版本筛选",
+                    ["全部", *present_textbooks],
+                    index=0,
+                    key="notebook_textbook",
+                )
+                textbook_filter = None if textbook_label == "全部" else textbook_label
+
         questions = service.list_questions(
             view_user_id,
             include_others=include_others,
@@ -155,6 +174,8 @@ def render_notebook_page(user: dict) -> None:
             keyword=keyword or None,
             subject=subject_filter,
             grade=grade_filter,
+            region=region_filter,
+            textbook_version=textbook_filter,
             error_category=category_filter,
             source_doc=source_doc_filter,
             semantic=semantic,
@@ -239,8 +260,8 @@ def render_notebook_page(user: dict) -> None:
             if st.button("清除筛选条件", width="stretch"):
                 for key in (
                     "notebook_search", "notebook_tag", "notebook_page",
-                    "notebook_subject", "notebook_grade", "notebook_errcat",
-                    "notebook_source_doc",
+                    "notebook_subject", "notebook_grade", "notebook_region",
+                    "notebook_textbook", "notebook_errcat", "notebook_source_doc",
                 ):
                     st.session_state.pop(key, None)
                 st.rerun()

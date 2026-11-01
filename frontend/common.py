@@ -98,6 +98,42 @@ def page_header(title: str, subtitle: str = "") -> None:
     )
 
 
+def _first_unclosed_math_open(s: str) -> int | None:
+    """返回 s 中第一个未闭合数学定界符的起始下标；全部闭合则为 None。
+
+    识别 $...$、$$...$$、\\(...\\)、\\[...\\] 四种形式；\\$ 等转义不算定界符。
+    """
+    closers = {"$$": "$$", "$": "$", "\\(": "\\)", "\\[": "\\]"}
+    i = 0
+    while i < len(s):
+        for opener in ("$$", "\\(", "\\[", "$"):
+            if s.startswith(opener, i):
+                close = s.find(closers[opener], i + len(opener))
+                if close == -1:
+                    return i
+                i = close + len(closers[opener])
+                break
+        else:
+            i += 2 if s[i] == "\\" else 1  # 跳过转义对，如 \$ 或 \\
+    return None
+
+
+def safe_truncate_math(text: str, max_len: int, ellipsis: str = "…") -> str:
+    """截断含数学公式的 Markdown 预览，保证不切断 $...$ / $$...$$ 等数学区间。
+
+    普通截断后若留下未闭合定界符，回退到未闭合区间的开口之前（半公式会让
+    KaTeX 渲染失败、页面显示 LaTeX 源码）；公式恰在开头时回退会得到空预览，
+    此时保留普通截断。截断了内容才追加省略号。
+    """
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len]
+    open_pos = _first_unclosed_math_open(cut)
+    if open_pos is not None and open_pos > 0:
+        cut = cut[:open_pos]
+    return cut + ellipsis
+
+
 def initials(name: str) -> str:
     return (name[:2] or "U").upper()
 

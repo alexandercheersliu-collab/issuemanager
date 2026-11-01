@@ -56,6 +56,7 @@ def _make_question(question_service, student_user, text="回落测试·源题：
         subject="math",
         grade=9,
         region="北京",
+        textbook_version="人教版",
     )
 
 
@@ -100,6 +101,7 @@ def test_generated_fallback_when_both_empty(question_service, student_user, monk
     assert len(generated) == 1  # MockProvider 固定 followup_question
     assert generated[0].content_markdown.strip()
     assert generated[0].knowledge_points == ["判别式"]
+    assert generated[0].textbook_version == "人教版"
 
 
 def test_strict_mode_disables_fallback(question_service, student_user, monkeypatch):

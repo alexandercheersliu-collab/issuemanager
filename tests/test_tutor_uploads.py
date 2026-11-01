@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from backend.services.entry_types import EntryResult
+from frontend.pages import tutor
 from frontend.pages.tutor import _collect_entries
 
 
@@ -70,3 +71,37 @@ def test_collect_entries_rejects_raw_tuple_contract():
 
     with pytest.raises(AttributeError):
         _collect_entries([("a.png", (SimpleNamespace(id=1), SimpleNamespace()), None)])
+
+
+def test_k12_context_inputs_can_be_locked_after_import():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(
+        "from frontend.pages.tutor import _k12_context_inputs\n"
+        "_k12_context_inputs('locked', disabled=True)\n"
+    )
+    at.run()
+
+    assert not at.exception
+    assert all(widget.disabled for widget in at.selectbox)
+    assert all(widget.disabled for widget in at.text_input)
+
+
+def test_similar_constraints_come_from_saved_question():
+    question = SimpleNamespace(
+        subject="math",
+        grade=10,
+        region="上海",
+        difficulty="hard",
+        knowledge_points=["函数的单调性"],
+        question_type="解答题",
+    )
+
+    assert tutor._similar_constraints(question) == {
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "difficulty": "hard",
+        "knowledge_points": ["函数的单调性"],
+        "question_type": "解答题",
+    }
