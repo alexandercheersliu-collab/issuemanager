@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from backend.services.ai.base import BaseAIProvider
@@ -194,24 +195,47 @@ def _join_cross_page(segments: list[Segment]) -> list[Segment]:
 
 
 def segment_document(
-    pages: list[DocPage], provider: BaseAIProvider | None
+    pages: list[DocPage], provider: BaseAIProvider | None, max_workers: int = 3
 ) -> list[Segment]:
-    """整卷切题：逐页双策略合并，再跨页拼接。
+    """整卷切题：逐页双策略合并（视觉路按页并发），再跨页拼接。
 
     provider 为 None 时只走规则路（扫描页将无产出）。
+    max_workers：视觉切题并发度（1 = 逐页顺序执行）；规则切题是本地正则，
+    开销极小，保持逐页内联。视觉结果按页序回填，合并与跨页拼接的页序不变。
     """
+    rule_results = [
+        [] if page.is_scanned or not page.text.strip() else rule_segment_page(page.text, page.page_no)
+        for page in pages
+    ]
+    # 视觉路结果：[] = 未走视觉路 / 成功但无产出；None = 调用失败（降级标记）
+    visual_results: list[list[Segment] | None] = [[] for _ in pages]
+    if provider is not None:
+        targets = [i for i, page in enumerate(pages) if page.image_path is not None]
+        if targets:
+            with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+                futures = {
+                    pool.submit(
+                        visual_segment_page, provider, pages[i].image_path, pages[i].page_no
+                    ): i
+                    for i in targets
+                }
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        visual_results[i] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - 文字页可降级为规则单路
+                        logger.warning("视觉切题失败 page=%s: %s", pages[i].page_no, exc)
+                        if pages[i].is_scanned:
+                            raise RuntimeError(
+                                f"第 {pages[i].page_no} 页视觉切题失败: {exc}"
+                            ) from exc
+                        visual_results[i] = None
+
     all_segments: list[Segment] = []
-    for page in pages:
-        rule_segments = (
-            [] if page.is_scanned or not page.text.strip() else rule_segment_page(page.text, page.page_no)
-        )
-        visual_segments: list[Segment] = []
-        if provider is not None and page.image_path is not None:
-            try:
-                visual_segments = visual_segment_page(provider, page.image_path, page.page_no)
-            except Exception as exc:  # noqa: BLE001 - 视觉路失败降级为规则单路
-                logger.warning("视觉切题失败 page=%s: %s", page.page_no, exc)
-                for segment in rule_segments:
-                    segment.needs_review = True
+    for rule_segments, visual_segments in zip(rule_results, visual_results, strict=True):
+        if visual_segments is None:  # 视觉路失败的页：规则单路并标 needs_review
+            visual_segments = []
+            for segment in rule_segments:
+                segment.needs_review = True
         all_segments.extend(_merge_page(rule_segments, visual_segments))
     return _join_cross_page(all_segments)

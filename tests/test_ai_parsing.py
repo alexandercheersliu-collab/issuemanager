@@ -132,3 +132,58 @@ def test_parse_keeps_dollar_delimiters_untouched():
     payload = dict(VALID, analysis="行内 $0.9\\times19$，独立 $$a\\div b=0.5$$")
     analysis = parse_analysis(json.dumps(payload, ensure_ascii=False))
     assert analysis.analysis == "行内 $0.9\\times19$，独立 $$a\\div b=0.5$$"
+
+
+def test_extract_json_list_repairs_latex_single_backslashes():
+    # 视觉模型常把 LaTeX 单反斜杠直接写进 JSON 字符串（\i、\m、\v 等不是合法 JSON 转义），
+    # 解析应容错修复，而不是整页切题失败
+    from backend.services.ai.base import extract_json_list
+
+    raw = (
+        '[{"number": "3", "text": "若 $x\\in\\mathbb{R}$，则 $\\frac{x}{1+x^2}$ 与 '
+        '$\\frac{1}{2}$ 的大小关系为____"}, '
+        '{"number": "5", "text": "解集为 $\\varnothing$，方程组 '
+        '$\\begin{cases}3x-y+2=0\\\\\\\\ax-y+b=0\\end{cases}$"}, '
+        '{"number": "7", "text": "则 $\\alpha^2+\\beta^2=$____"}]'
+    )
+    items = extract_json_list(raw)
+    assert items is not None and len(items) == 3
+    assert items[0]["text"].count("\\in") == 1
+    assert "\\frac{x}{1+x^2}" in items[0]["text"]
+    assert "\\varnothing" in items[1]["text"]
+    assert "\\begin{cases}" in items[1]["text"]
+    assert "\\\\ax-y+b=0" in items[1]["text"]  # 合法转义 \\\\ → LaTeX 换行符不受影响
+    assert "\\alpha^2+\\beta^2" in items[2]["text"]
+
+
+def test_extract_json_block_repairs_latex_single_backslashes():
+    from backend.services.ai.base import extract_json_block
+
+    raw = '{"analysis": "由 $x\\geq 0$ 且 $\\log_2 x$ 得", "answer": "$m\\le 3$"}'
+    block = extract_json_block(raw)
+    assert block is not None
+    assert "\\geq" in block["analysis"]
+    assert block["answer"] == "$m\\le 3$"
+
+
+def test_extract_json_list_still_rejects_garbage():
+    from backend.services.ai.base import extract_json_list
+
+    assert extract_json_list("完全不是 JSON 的回复") is None
+
+
+def test_extract_json_list_preserves_real_newline_escapes():
+    # 容错修复不得把模型真正的换行转义 \n 变成字面字符：
+    # \n 后接非小写字母（大写/数字/标点）= 换行；后接小写字母 = LaTeX 命令（\ne、\nu）
+    from backend.services.ai.base import extract_json_list
+
+    raw = (
+        '[{"number": "1", "text": "下列选项正确的是（ ）\\nA. $a+c>b+c$\\nB. $ac>bc$"}, '
+        '{"number": "2", "text": "比较 $x$ 与 $y$：$x\\ne y$ 且 $x\\nu$"}]'
+    )
+    items = extract_json_list(raw)
+    assert items is not None and len(items) == 2
+    assert "\nA. $a+c>b+c$\nB." in items[0]["text"]  # 真换行
+    assert "\\nA" not in items[0]["text"]
+    assert "\\ne y" in items[1]["text"]  # LaTeX \ne 原样保留
+    assert "\\nu" in items[1]["text"]

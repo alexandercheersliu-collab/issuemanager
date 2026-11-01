@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
+
 from backend.config import get_settings
+from backend.models.orm import Job
 from backend.models.schemas import QuestionAnalysis, QuestionOut, TagStat
 from backend.repositories.questions import QuestionRepository
 from backend.services.ai import get_ai_service
@@ -239,8 +242,12 @@ class EntryMixin:
         chapter: str | None = None,
         error_category: str | None = None,
         source_doc: str | None = None,
+        image_path: str | None = None,
     ) -> QuestionOut:
-        """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。"""
+        """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。
+
+        image_path：关联的页图/配图路径（整卷导入确认时传题目所在页的页图）。
+        """
         if not content_markdown or not content_markdown.strip():
             raise ValueError("题目内容不能为空")
         clean_tags = [t.strip() for t in (tags or []) if t.strip()]
@@ -288,6 +295,7 @@ class EntryMixin:
                 chapter=chapter,
                 error_category=error_category,
                 source_doc=source_doc,
+                image_path=image_path,
             )
             out = QuestionOut.from_orm_model(question)
 
@@ -483,6 +491,33 @@ class EntryMixin:
 class QueryMixin:
     """错题查询：关键词 + 语义双路检索、计数、详情、相似题。"""
 
+    @staticmethod
+    def _matches_filters(
+        question: QuestionOut,
+        *,
+        tag: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
+    ) -> bool:
+        return not (
+            (tag and tag not in (question.tags or []))
+            or (subject and question.subject != subject)
+            or (grade is not None and question.grade != grade)
+            or (region and question.region != region)
+            or (textbook_version and question.textbook_version != textbook_version)
+            or (error_category and question.error_category != error_category)
+            or (source and question.source != source)
+            or (
+                source_doc
+                and not (question.source_doc or "").startswith(f"{source_doc}#")
+            )
+        )
+
     def list_questions(
         self,
         user_id: int,
@@ -492,6 +527,8 @@ class QueryMixin:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -502,8 +539,9 @@ class QueryMixin:
         """关键词检索；开启语义搜索时用 RRF 融合向量与关键词两路结果（可选重排）。
 
         offset/limit 在过滤后应用；不传 limit 返回全部（界面默认），API 层分页传入。
-        subject/grade/error_category：K12 元数据过滤（SQL 下推）。
-        source/source_doc：来源过滤（整卷导入题按文档名前缀匹配，SQL 下推）。
+        subject/grade/region/textbook_version/error_category：K12 元数据过滤。
+        source/source_doc：来源过滤（整卷导入题按文档名前缀匹配）。
+        SQL 结果下推过滤，向量补召回结果在融合前按相同口径过滤。
         """
         with self._session() as repo:
             primary = repo.list_for_user(
@@ -513,6 +551,8 @@ class QueryMixin:
                 keyword=keyword,
                 subject=subject,
                 grade=grade,
+                region=region,
+                textbook_version=textbook_version,
                 error_category=error_category,
                 source=source,
                 source_doc=source_doc,
@@ -557,6 +597,22 @@ class QueryMixin:
                         if q.user_id == user_id or include_others:
                             results[q.id] = QuestionOut.from_orm_model(q)
 
+            results = {
+                qid: question
+                for qid, question in results.items()
+                if self._matches_filters(
+                    question,
+                    tag=tag,
+                    subject=subject,
+                    grade=grade,
+                    region=region,
+                    textbook_version=textbook_version,
+                    error_category=error_category,
+                    source=source,
+                    source_doc=source_doc,
+                )
+            }
+
             # 融合排序覆盖默认时间排序（未入榜的题排在其后）
             order = {qid: rank for rank, qid in enumerate(fused_ids)}
             return sorted(
@@ -579,6 +635,8 @@ class QueryMixin:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -592,6 +650,8 @@ class QueryMixin:
                 keyword=keyword,
                 subject=subject,
                 grade=grade,
+                region=region,
+                textbook_version=textbook_version,
                 error_category=error_category,
                 source=source,
                 source_doc=source_doc,
@@ -728,6 +788,7 @@ class QueryMixin:
             subject=question.subject or "math",
             grade=question.grade,
             region=question.region,
+            textbook_version=question.textbook_version,
         )
 
     def _generate_variant(self, question: QuestionOut) -> str | None:
@@ -908,9 +969,23 @@ class AdminMixin:
         with self._session() as repo:
             ids = repo.ids_by_subject_all(subject)
             deleted = repo.delete_by_subject_all(subject)
+            # 同步删除该学科的整卷导入任务：其确认入库的题目已清空，
+            # 残留任务的 doc_hash 会被去重命中，阻碍重新导入同一文档。
+            # 学科缺失的任务按管线默认视为 math（与 _run_import 一致）
+            import_jobs = repo.session.execute(
+                select(Job).where(Job.type == "document_import")
+            ).scalars()
+            removed_jobs = 0
+            for job in import_jobs:
+                if ((job.payload or {}).get("subject") or "math") == subject:
+                    repo.session.delete(job)
+                    removed_jobs += 1
         if ids:
             self.vector_store.delete_questions(ids)
-        logger.warning("admin user=%s 清空学科 subject=%s：删除 %s 道错题", user_id, subject, deleted)
+        logger.warning(
+            "admin user=%s 清空学科 subject=%s：删除 %s 道错题、%s 个导入任务",
+            user_id, subject, deleted, removed_jobs,
+        )
         return {"subject": subject, "deleted": deleted}
 
 

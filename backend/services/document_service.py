@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import select
@@ -19,7 +20,12 @@ from sqlalchemy import select
 from backend.config import Settings, get_settings
 from backend.database import SessionLocal
 from backend.models.orm import Job
-from backend.services.document import SUPPORTED_SUFFIXES, parse_document
+from backend.services.document import (
+    IMAGE_SUFFIXES,
+    SUPPORTED_SUFFIXES,
+    parse_document,
+    parse_images,
+)
 from backend.utils.logging import get_logger
 
 logger = get_logger("document_service")
@@ -38,6 +44,7 @@ class DocumentService:
         data: bytes,
         filename: str,
         *,
+        extra_files: list[tuple[bytes, str]] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -45,16 +52,30 @@ class DocumentService:
     ) -> tuple[str, bool]:
         """接收文档字节，落 DOC_UPLOAD_PATH 并创建异步导入任务。
 
-        返回 (job_id, duplicated)：同一用户重复上传同一文档（SHA-256 相同）
-        且已有任务未失败时，直接返回既有任务，不重复解析。
+        extra_files：整卷拍照的其余照片（(字节, 文件名)，按上传顺序，每张 = 一页）；
+        仅图片格式支持多文件，PDF/DOCX 恒为单文件。
+        返回 (job_id, duplicated)：同一用户重复上传同一文档（SHA-256 相同，
+        多文件按序拼接计算）且已有非空任务未失败时，直接返回既有任务，不重复解析；
+        历史空结果任务不复用，允许重新上传后再次解析。
         """
-        suffix = Path(filename).suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
-            raise ValueError(f"不支持的文档格式: {suffix}（支持 {sorted(SUPPORTED_SUFFIXES)}）")
-        if not data:
-            raise ValueError("文档内容为空")
+        files = [(data, filename), *(extra_files or [])]
+        for file_data, file_name in files:
+            file_suffix = Path(file_name).suffix.lower()
+            if file_suffix not in SUPPORTED_SUFFIXES:
+                raise ValueError(
+                    f"不支持的文档格式: {file_suffix}（支持 {sorted(SUPPORTED_SUFFIXES)}）"
+                )
+            if not file_data:
+                raise ValueError("文档内容为空")
+        if len(files) > 1 and any(
+            Path(name).suffix.lower() not in IMAGE_SUFFIXES for _, name in files
+        ):
+            raise ValueError("多文件仅支持图片格式（jpg/jpeg/png/webp，每张 = 试卷一页）")
 
-        doc_hash = hashlib.sha256(data).hexdigest()
+        hasher = hashlib.sha256()
+        for file_data, _ in files:
+            hasher.update(file_data)
+        doc_hash = hasher.hexdigest()
         existing = self._find_active_job(user_id, doc_hash)
         if existing is not None:
             logger.info("重复文档 job=%s user=%s，直接复用", existing, user_id)
@@ -63,8 +84,15 @@ class DocumentService:
         upload_dir = self.settings.doc_upload_path
         assert upload_dir is not None  # model_validator 保证非 None
         upload_dir.mkdir(parents=True, exist_ok=True)
-        doc_path = upload_dir / f"{doc_hash}{suffix}"
-        doc_path.write_bytes(data)
+        saved_paths: list[Path] = []
+        for index, (file_data, file_name) in enumerate(files):
+            file_suffix = Path(file_name).suffix.lower()
+            stem = doc_hash if index == 0 else f"{doc_hash}-p{index + 1}"
+            saved = upload_dir / f"{stem}{file_suffix}"
+            saved.write_bytes(file_data)
+            saved_paths.append(saved)
+        doc_path = saved_paths[0]
+        is_image_job = Path(filename).suffix.lower() in IMAGE_SUFFIXES
 
         job_id = uuid.uuid4().hex
         with SessionLocal() as session:
@@ -78,6 +106,8 @@ class DocumentService:
                         "filename": filename,
                         "doc_hash": doc_hash,
                         "doc_path": str(doc_path),
+                        # 图片任务：全部照片路径（含首张），按上传顺序成页
+                        "image_paths": [str(p) for p in saved_paths] if is_image_job else None,
                         "subject": subject or "math",
                         "grade": grade,
                         "region": region,
@@ -95,14 +125,17 @@ class DocumentService:
         return job_id, False
 
     def _find_active_job(self, user_id: int, doc_hash: str) -> str | None:
-        """按 SHA-256 找同用户未失败的既有导入任务。"""
+        """按 SHA-256 找同用户可复用的既有任务；失败及空结果任务除外。"""
         with SessionLocal() as session:
             jobs = session.execute(
                 select(Job).where(Job.user_id == user_id, Job.type == JOB_TYPE)
             ).scalars()
             for job in jobs:
-                if (job.payload or {}).get("doc_hash") == doc_hash and job.status != "failed":
-                    return job.id
+                if (job.payload or {}).get("doc_hash") != doc_hash or job.status == "failed":
+                    continue
+                if job.status == "success" and not (job.result or {}).get("total"):
+                    continue
+                return job.id
         return None
 
     # ---------- 异步执行 ----------
@@ -121,10 +154,12 @@ class DocumentService:
             session.commit()
 
         try:
-            pages = parse_document(
-                payload["doc_path"],
-                Path(payload["doc_path"]).parent / "pages" / job_id,
-            )
+            work_dir = Path(payload["doc_path"]).parent / "pages" / job_id
+            if payload.get("image_paths"):
+                # 整卷拍照：照片按上传顺序成页（一页一图）
+                pages = parse_images(payload["image_paths"], work_dir)
+            else:
+                pages = parse_document(payload["doc_path"], work_dir)
             ai = get_ai_service(self.settings)
             context = AnalysisContext(
                 subject=payload.get("subject") or "math",
@@ -132,11 +167,15 @@ class DocumentService:
                 region=payload.get("region"),
                 textbook_version=payload.get("textbook_version"),
             )
-            segments = segment_document(pages, ai)
+            segments = segment_document(pages, ai, max_workers=self.settings.import_concurrency)
 
             result: dict = {
                 "pages": len(pages),
                 "scanned_pages": sum(1 for p in pages if p.is_scanned),
+                # 逐页页图路径（确认入库时按 page_start 关联到题目）
+                "page_images": [
+                    str(p.image_path) if p.image_path is not None else None for p in pages
+                ],
                 "total": len(segments),
                 "done": 0,
                 "segments": [],
@@ -144,8 +183,12 @@ class DocumentService:
             }
             self._save_result(job_id, result)
 
-            for segment in segments:
-                entry: dict = {
+            # 逐题解构是远程调用，按 import_concurrency 并发；工作线程只调
+            # analyze_text 并带回 (下标, 结果, 异常)，result 的所有改动
+            # （entries / done / _save_result）都发生在主线程，无需加锁。
+            # entries 预按题序建好，最终 segments 顺序与切题顺序一致（与完成顺序无关）。
+            entries: list[dict] = [
+                {
                     "number": segment.number,
                     "text": segment.text,
                     "page_start": segment.page_start,
@@ -156,16 +199,31 @@ class DocumentService:
                     "analysis": None,
                     "error": None,
                 }
+                for segment in segments
+            ]
+            result["segments"] = entries
+
+            def _analyze(index: int):
                 try:
-                    analysis = ai.analyze_text(segment.text[:4000], context=context)
-                    entry["analysis"] = analysis.model_dump(mode="json")
+                    analysis = ai.analyze_text(segments[index].text[:4000], context=context)
+                    return index, analysis, None
                 except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷
-                    logger.warning("逐题解构失败 job=%s 题%s: %s", job_id, segment.number, exc)
-                    entry["error"] = str(exc)
-                    entry["needs_review"] = True
-                result["segments"].append(entry)
-                result["done"] += 1
-                self._save_result(job_id, result)
+                    return index, None, exc
+
+            workers = max(1, self.settings.import_concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_analyze, i) for i in range(len(segments))]
+                for future in as_completed(futures):
+                    index, analysis, exc = future.result()
+                    entry = entries[index]
+                    if exc is not None:
+                        logger.warning("逐题解构失败 job=%s 题%s: %s", job_id, entry["number"], exc)
+                        entry["error"] = str(exc)
+                        entry["needs_review"] = True
+                    else:
+                        entry["analysis"] = analysis.model_dump(mode="json")
+                    result["done"] += 1
+                    self._save_result(job_id, result)
 
             self._finish(job_id, status="success", result=result)
         except Exception as exc:  # noqa: BLE001 - 失败落库供轮询方查看
@@ -383,11 +441,14 @@ class DocumentService:
         return entry
 
     # ---------- 确认入库 ----------
-    def confirm_import(self, job_id: str, user_id: int) -> dict:
+    def confirm_import(
+        self, job_id: str, user_id: int, *, context: dict | None = None
+    ) -> dict:
         """确认入库：把解构成功的 segments 批量写入错题本。
 
         source="document"、source_doc="文档名#页码"（跨页题为 #起-止），
-        K12 上下文取任务 payload，结构化字段取逐题解构结果。
+        K12 上下文取任务 payload；调用方可传确认时的最新上下文覆盖原值。
+        结构化字段取逐题解构结果。
         返回 imported（成功数）与 skipped（跳过题号及原因：未解构/入库失败）。
         幂等：已确认的任务直接返回既有结果，不重复入库。
         """
@@ -409,9 +470,17 @@ class DocumentService:
                     "skipped": result.get("skipped", []),
                     "already_confirmed": True,
                 }
+            if context is not None:
+                for key in ("subject", "grade", "region", "textbook_version"):
+                    payload[key] = context.get(key)
+                payload["subject"] = payload["subject"] or "math"
+                job.payload = payload
+                session.commit()
 
         service = QuestionService(session_factory=SessionLocal)
         filename = payload.get("filename") or "document"
+        # 逐页页图（解析阶段落库），确认时按题目起始页关联到 question.image_path
+        page_images: list[str | None] = result.get("page_images") or []
         imported = 0
         skipped: list[dict] = []
         for entry in result.get("segments", []):
@@ -426,6 +495,12 @@ class DocumentService:
                 continue
             page_start, page_end = entry["page_start"], entry["page_end"]
             page_label = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
+            # 跨页题取起始页页图；页图缺失（如 DOCX）则为 None
+            image_path = (
+                page_images[page_start - 1]
+                if isinstance(page_start, int) and 0 < page_start <= len(page_images)
+                else None
+            )
             try:
                 service.create_manual_question(
                     user_id,
@@ -444,6 +519,7 @@ class DocumentService:
                     chapter=analysis.get("chapter") or None,
                     error_category=analysis.get("error_category") or None,
                     source_doc=f"{filename}#{page_label}",
+                    image_path=image_path,
                 )
                 imported += 1
             except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷入库

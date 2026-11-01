@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from doc_samples import make_docx, make_scanned_pdf, make_text_pdf
+from doc_samples import make_docx, make_image, make_scanned_pdf, make_text_pdf
 from PIL import Image
 
 from backend.services.document import parse_document
@@ -67,8 +67,33 @@ def test_parse_docx_without_image(tmp_path):
     assert "[图片:" not in pages[0].text
 
 
+@pytest.mark.parametrize("suffix", [".jpg", ".jpeg", ".png", ".webp"])
+def test_parse_image_as_single_scanned_page(tmp_path, suffix):
+    """整卷拍照：一张图片 = 一页扫描版（无文本层，页图落工作目录）。"""
+    photo = make_image(tmp_path / f"photo{suffix}")
+    pages = parse_document(photo, tmp_path / "work")
+
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.page_no == 1
+    assert page.text == ""
+    assert page.is_scanned
+    assert page.image_path is not None and page.image_path.is_file()
+    # 页图复制进工作目录（与 PDF 页图一致，供后续校对/确认按路径引用）
+    assert page.image_path.parent == tmp_path / "work"
+    assert page.image_path.read_bytes() == photo.read_bytes()
+
+
 def test_unsupported_suffix_raises(tmp_path):
     bogus = tmp_path / "paper.txt"
     bogus.write_text("hello", encoding="utf-8")
     with pytest.raises(ValueError, match="不支持的文档格式"):
         parse_document(bogus, tmp_path / "work")
+
+
+def test_unsupported_image_suffix_raises(tmp_path):
+    """gif/bmp 等非白名单图片格式仍然拒绝。"""
+    gif = tmp_path / "paper.gif"
+    gif.write_bytes(b"GIF89a")
+    with pytest.raises(ValueError, match="不支持的文档格式"):
+        parse_document(gif, tmp_path / "work")

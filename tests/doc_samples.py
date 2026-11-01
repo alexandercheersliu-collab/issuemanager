@@ -47,6 +47,17 @@ def make_scanned_pdf(path: Path, page_count: int = 1) -> Path:
     return path
 
 
+def make_image(path: Path, size: tuple[int, int] = (600, 800)) -> Path:
+    """单张试卷照片：白底 + 边框线，模拟整卷导入的拍照页。"""
+    image = Image.new("RGB", size, (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle([40, 40, size[0] - 40, size[1] // 3], outline=(0, 0, 0), width=2)
+    draw.line([40, size[1] // 2, size[0] - 40, size[1] // 2], fill=(0, 0, 0), width=1)
+    fmt = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(path.suffix.lower(), "PNG")
+    image.save(path, format=fmt)
+    return path
+
+
 def make_docx(path: Path, paragraphs: list[str], *, with_image: bool = True) -> Path:
     """DOCX：按顺序写段落；with_image 时在中间插入一张内嵌图片。"""
     import docx

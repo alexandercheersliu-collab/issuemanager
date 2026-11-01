@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
-from doc_samples import make_text_pdf
+from doc_samples import make_image, make_text_pdf
 from fastapi.testclient import TestClient
 
 from api.main import create_app
@@ -75,6 +76,94 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     assert first.chapter == "一元二次方程"
     assert "第一题" in first.content_markdown
     assert first.answer
+
+
+def test_confirm_import_applies_latest_context(question_service, student_user, tmp_path):
+    service, job_id = _import_and_wait(
+        question_service, student_user, tmp_path, "latest-context.pdf"
+    )
+    context = {
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "textbook_version": "沪教版",
+    }
+
+    outcome = service.confirm_import(job_id, student_user.id, context=context)
+
+    assert outcome["imported"] == 2
+    job = service.get_job(job_id, student_user.id)
+    assert job is not None
+    assert {key: job["payload"][key] for key in context} == context
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("latest-context.pdf#")
+    ]
+    assert len(docs) == 2
+    assert all(q.grade == 10 for q in docs)
+    assert all(q.region == "上海" for q in docs)
+    assert all(q.textbook_version == "沪教版" for q in docs)
+
+
+def test_confirm_import_links_page_image(question_service, student_user, tmp_path):
+    """确认入库：题目 image_path 关联其所在页的渲染页图（PDF 页）。"""
+    pdf = make_text_pdf(
+        tmp_path / "img.pdf", ["1. 页图题一：求 x。\n2. 页图题二：求 y。"]
+    )
+    service = DocumentService()
+    job_id, _ = service.import_document(student_user.id, pdf.read_bytes(), "img.pdf")
+    job = _wait_job(service, job_id, student_user.id)
+    assert job["status"] == "success", job["error"]
+
+    outcome = service.confirm_import(job_id, student_user.id)
+    assert outcome["imported"] == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if q.source == "document" and (q.source_doc or "").startswith("img.pdf#")
+    ]
+    assert len(docs) == 2
+    for q in docs:
+        assert q.image_path, "确认入库应关联页图"
+        path = Path(q.image_path)
+        assert path.is_file()
+        assert path.name == "page-1.png"  # 两题同在第 1 页
+
+
+def test_confirm_import_links_photo_page_by_order(question_service, student_user, tmp_path):
+    """整卷拍照：第 2 页照片切出的题关联第 2 张页图（跨页题取起始页）。"""
+    photo1 = make_image(tmp_path / "c1.png", size=(601, 801))
+    photo2 = make_image(tmp_path / "c2.png", size=(411, 311))
+    service = DocumentService()
+    job_id, _ = service.import_document(
+        student_user.id,
+        photo1.read_bytes(),
+        "c1.png",
+        extra_files=[(photo2.read_bytes(), "c2.png")],
+    )
+    job = _wait_job(service, job_id, student_user.id)
+    assert job["status"] == "success", job["error"]
+    page_images = job["result"]["page_images"]
+    assert len(page_images) == 2
+
+    outcome = service.confirm_import(job_id, student_user.id)
+    assert outcome["imported"] == 4  # mock 视觉切题每页 2 题
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if q.source == "document" and (q.source_doc or "").startswith("c1.png#")
+    ]
+    assert len(docs) == 4
+    assert all(q.image_path and Path(q.image_path).is_file() for q in docs)
+    # 第 2 页切出的题（source_doc = 文件名#2）关联第 2 张照片
+    page2_docs = [q for q in docs if q.source_doc == "c1.png#2"]
+    assert len(page2_docs) == 2
+    assert all(q.image_path == page_images[1] for q in page2_docs)
+    page1_docs = [q for q in docs if q.source_doc == "c1.png#1"]
+    assert all(q.image_path == page_images[0] for q in page1_docs)
 
 
 def test_confirm_import_is_idempotent(question_service, student_user, tmp_path):

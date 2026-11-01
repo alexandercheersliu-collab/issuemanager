@@ -1,6 +1,7 @@
 """整卷导入路由：文档上传（去重）→ 异步切题/解构 → 校对确认入库。"""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
+from backend.services.document import IMAGE_SUFFIXES
 from backend.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -25,27 +27,40 @@ def _service() -> DocumentService:
     dependencies=[Depends(rate_limit("documents:import", 10))],
 )
 async def import_document(
-    document: UploadFile = File(...),
+    document: list[UploadFile] = File(...),
     subject: str = Form(default="math"),
     grade: int | None = Form(default=None),
     region: str = Form(default=""),
     textbook_version: str = Form(default=""),
     user: User = Depends(get_current_user),
 ) -> dict:
-    """上传整卷文档（PDF/DOCX），创建异步导入任务；重复上传返回既有任务。"""
-    data = await document.read()
-    if not data:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文档内容为空")
-    if len(data) > _MAX_DOC_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文档不能超过 50MB")
+    """上传整卷文档，创建异步导入任务；重复上传返回既有任务。
+
+    PDF/DOCX 单文件；整卷拍照可一次上传多张图片（每张 = 一页，页序 = 上传顺序）。
+    """
+    files = [(await item.read(), item.filename or "upload") for item in document]
+    for data, _ in files:
+        if not data:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "文档内容为空")
+        if len(data) > _MAX_DOC_BYTES:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文档不能超过 50MB")
     if grade is not None and not 1 <= grade <= 12:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "年级必须在 1-12 之间")
+    if len(files) > 1 and any(
+        Path(name).suffix.lower() not in IMAGE_SUFFIXES for _, name in files
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "多文件上传仅支持图片格式（jpg/jpeg/png/webp，每张 = 试卷一页）",
+        )
 
+    (first_data, first_name) = files[0]
     try:
         job_id, duplicated = _service().import_document(
             user.id,
-            data,
-            document.filename or "upload.pdf",
+            first_data,
+            first_name,
+            extra_files=files[1:] or None,
             subject=subject or "math",
             grade=grade,
             region=region or None,

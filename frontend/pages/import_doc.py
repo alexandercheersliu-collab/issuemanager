@@ -1,8 +1,10 @@
-"""整卷导入校对页：上传 PDF/DOCX → 异步切题解构 → 人工校对 → 批量入库。
+"""整卷导入校对页：上传 PDF/DOCX/试卷照片 → 异步切题解构 → 人工校对 → 批量入库。
 
 校对操作（合并/拆分/删除/重解析/字段编辑）全部走 DocumentService，
 操作留痕在任务 result.edit_log；确认入库后错题本可按来源文档筛选。
-界面交互逻辑抽成纯函数（summarize_segments / segment_headline）便于单测。
+整卷拍照可一次多选图片（每张 = 试卷一页，页序 = 上传顺序）。
+界面交互逻辑抽成纯函数（summarize_segments / segment_headline /
+validate_upload_selection）便于单测。
 """
 from __future__ import annotations
 
@@ -10,16 +12,36 @@ import time
 
 import streamlit as st
 
-from backend.models.schemas import ERROR_CATEGORIES
+from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
 from backend.services.document_service import DocumentService
 from backend.services.question_service import sanitize_tags
-from frontend.common import go_to, page_header
+from frontend.common import go_to, page_header, safe_truncate_math
 from frontend.pages.tutor import _k12_context_inputs
 
 _DIFFICULTY_LABELS = {"easy": "简单", "medium": "中等", "hard": "困难"}
 
+# 上传允许的格式：PDF/DOCX 单文件；图片可多选（每张 = 试卷一页）
+_UPLOAD_TYPES = ["pdf", "docx", "jpg", "jpeg", "png", "webp"]
+_IMAGE_TYPES = {"jpg", "jpeg", "png", "webp"}
+
 
 # ---------- 纯函数（可单测） ----------
+
+
+def validate_upload_selection(names: list[str]) -> str | None:
+    """校验上传文件组合，返回错误提示（None = 合法）。
+
+    图片可多选（整卷拍照，每张 = 一页）；PDF/DOCX 仅限单文件，不与图片混搭。
+    """
+    if not names:
+        return "请先选择要导入的文件"
+    suffixes = [name.rsplit(".", 1)[-1].lower() for name in names]
+    unsupported = [s for s in suffixes if s not in _UPLOAD_TYPES]
+    if unsupported:
+        return f"不支持的文件格式: .{unsupported[0]}"
+    if len(names) > 1 and any(s not in _IMAGE_TYPES for s in suffixes):
+        return "PDF/DOCX 仅支持单文件导入；多文件请全部使用图片（jpg/jpeg/png/webp）"
+    return None
 
 
 def summarize_segments(segments: list[dict]) -> dict:
@@ -35,9 +57,35 @@ def summarize_segments(segments: list[dict]) -> dict:
 def segment_headline(segment: dict, max_len: int = 24) -> str:
     """列表标题：题号 + 题干摘要，待校对题加 ⚠️ 前缀。"""
     text = (segment.get("text") or "").replace("\n", " ").strip()
-    digest = text[:max_len] + ("…" if len(text) > max_len else "")
+    # 定界符感知截断：避免切断 $...$ 导致标题公式渲染破裂
+    digest = safe_truncate_math(text, max_len)
     mark = "⚠️ " if segment.get("needs_review") else ""
     return f"{mark}{segment.get('number') or '?'}. {digest or '（空题干）'}"
+
+
+def segment_preview_markdown(segment: dict) -> str:
+    """校对预览：题干 + 答案 + 解析 + 变式练习拼成一段 Markdown（st.markdown KaTeX 渲染）。
+
+    编辑控件（text_area/text_input）只能显示 LaTeX 源码，渲染效果统一在此预览。
+    空字段跳过；完全无内容返回空串。
+    """
+    parts = []
+    stem = (segment.get("text") or "").strip()
+    if stem:
+        parts.append(stem)
+    analysis = segment.get("analysis") or {}
+    for label, key in (("答案", "answer"), ("解析", "analysis"), ("变式练习", "followup_question")):
+        value = (analysis.get(key) or "").strip()
+        if value:
+            parts.append(f"**{label}**：{value}")
+    return "\n\n".join(parts)
+
+
+def segment_page_image(page_images: list[str | None], segment: dict) -> str | None:
+    page_start = segment.get("page_start")
+    if isinstance(page_start, int) and 0 < page_start <= len(page_images):
+        return page_images[page_start - 1]
+    return None
 
 
 # ---------- 页面 ----------
@@ -45,7 +93,7 @@ def segment_headline(segment: dict, max_len: int = 24) -> str:
 
 def render_import_doc_page(user: dict) -> None:
     service = DocumentService()
-    page_header("整卷导入", "上传整份试卷 PDF/DOCX，自动切题解构，人工校对后批量入库")
+    page_header("整卷导入", "上传整份试卷 PDF/DOCX 或逐页照片，自动切题解构，人工校对后批量入库")
 
     from backend.services.ai import get_provider_status
 
@@ -55,7 +103,7 @@ def render_import_doc_page(user: dict) -> None:
             "配置后即可调用真实视觉模型。"
         )
 
-    _render_upload(service, user)
+    context = _render_upload(service, user)
 
     job_id = st.session_state.get("import_doc_job_id")
     if not job_id:
@@ -75,34 +123,65 @@ def render_import_doc_page(user: dict) -> None:
             st.session_state.pop("import_doc_job_id", None)
             st.rerun()
         return
-    _render_review(service, user, job)
+    _render_review(service, user, job, context=context)
 
 
-def _render_upload(service: DocumentService, user: dict) -> None:
+def _render_upload(service: DocumentService, user: dict) -> dict:
+    active_job_id = st.session_state.get("import_doc_job_id")
+    active_job = service.get_job(active_job_id, user["id"]) if active_job_id else None
+    if active_job_id and st.session_state.get("import_doc_context_job") != active_job_id:
+        if active_job is not None:
+            payload = active_job.get("payload") or {}
+            grade = payload.get("grade")
+            st.session_state["import_doc_subject"] = SUBJECT_NAMES.get(
+                payload.get("subject") or "math", "数学"
+            )
+            st.session_state["import_doc_grade"] = f"{grade} 年级" if grade else "不限"
+            st.session_state["import_doc_region"] = payload.get("region") or ""
+            st.session_state["import_doc_textbook"] = payload.get("textbook_version") or ""
+            st.session_state["import_doc_context_job"] = active_job_id
+    context_locked = bool(active_job and (active_job.get("result") or {}).get("confirmed"))
+
     with st.container(border=True):
         col_file, col_meta = st.columns([3, 2])
         with col_file:
-            upload = st.file_uploader(
-                "试卷文档（PDF / DOCX）",
-                type=["pdf", "docx"],
+            uploads = st.file_uploader(
+                "试卷文档（PDF / DOCX）或逐页照片",
+                type=_UPLOAD_TYPES,
+                accept_multiple_files=True,
                 key="import_doc_file",
-                help="PDF 按页解析（扫描版走视觉识别）；DOCX 提取段落与内嵌图片",
+                help=(
+                    "PDF 按页解析（扫描版走视觉识别）；DOCX 提取段落与内嵌图片；"
+                    "整卷拍照可多选图片（每张 = 一页，页序 = 选择顺序）"
+                ),
             )
         with col_meta:
-            context = _k12_context_inputs("import_doc")
-        if upload and st.button("开始导入", type="primary", width="stretch"):
+            context = _k12_context_inputs("import_doc", disabled=context_locked)
+            if context_locked:
+                st.caption("该任务已入库；如需修改题目元数据，请到错题本编辑。")
+        if uploads and st.button("开始导入", type="primary", width="stretch"):
+            error = validate_upload_selection([upload.name for upload in uploads])
+            if error:
+                st.error(error)
+                return context
+            first, rest = uploads[0], uploads[1:]
             try:
                 job_id, duplicated = service.import_document(
-                    user["id"], upload.getvalue(), upload.name, **context
+                    user["id"],
+                    first.getvalue(),
+                    first.name,
+                    extra_files=[(u.getvalue(), u.name) for u in rest] or None,
+                    **context,
                 )
             except ValueError as exc:
                 st.error(str(exc))
-                return
+                return context
             st.session_state["import_doc_job_id"] = job_id
             if duplicated:
                 st.info("该文档此前已导入，直接打开既有任务（SHA-256 去重）")
                 time.sleep(1)
             st.rerun()
+    return context
 
 
 def _render_progress(job: dict) -> None:
@@ -120,7 +199,9 @@ def _render_progress(job: dict) -> None:
     st.rerun()
 
 
-def _render_review(service: DocumentService, user: dict, job: dict) -> None:
+def _render_review(
+    service: DocumentService, user: dict, job: dict, *, context: dict
+) -> None:
     result = job.get("result") or {}
     segments = result.get("segments", [])
     payload = job.get("payload") or {}
@@ -146,8 +227,9 @@ def _render_review(service: DocumentService, user: dict, job: dict) -> None:
         st.warning("未切出任何题目，请检查文档内容后重新上传。")
         return
 
+    page_images = result.get("page_images") or []
     for index, segment in enumerate(segments):
-        _render_segment(service, user, _job_id(job), index, segment)
+        _render_segment(service, user, _job_id(job), index, segment, page_images)
 
     st.divider()
     if summary["needs_review"]:
@@ -158,7 +240,7 @@ def _render_review(service: DocumentService, user: dict, job: dict) -> None:
         width="stretch",
         disabled=summary["importable"] == 0,
     ):
-        outcome = service.confirm_import(_job_id(job), user["id"])
+        outcome = service.confirm_import(_job_id(job), user["id"], context=context)
         st.session_state["import_doc_outcome"] = outcome
         st.rerun()
 
@@ -186,7 +268,12 @@ def _job_id(job: dict) -> str:
 
 
 def _render_segment(
-    service: DocumentService, user: dict, job_id: str, index: int, segment: dict
+    service: DocumentService,
+    user: dict,
+    job_id: str,
+    index: int,
+    segment: dict,
+    page_images: list[str | None],
 ) -> None:
     expanded = bool(segment.get("needs_review"))
     with st.expander(segment_headline(segment), expanded=expanded):
@@ -200,8 +287,25 @@ def _render_segment(
         )
         st.caption(f"{page_label} · 切题来源：{segment.get('source', '-')}")
 
+        # 原图保留几何图形等非文字信息；文字预览用于核对 LaTeX 渲染
+        page_image = segment_page_image(page_images, segment)
+        preview = segment_preview_markdown(segment)
+        if page_image or preview:
+            with st.container(border=True):
+                st.caption("预览（原图与文字渲染效果）")
+                if page_image:
+                    st.image(
+                        page_image,
+                        width="stretch",
+                        alt=f"题 {segment.get('number') or index + 1} 所在试卷第 {page_start} 页原图",
+                    )
+                if preview:
+                    st.markdown(preview)
+
         _render_segment_ops(service, user, job_id, index, segment)
-        _render_segment_edit_form(service, user, job_id, index, segment)
+        # 校对表单整体默认折叠，页面以渲染预览为主；解构失败的题需手动补字段，默认展开
+        with st.expander("✏️ 编辑校对（LaTeX 源码）", expanded=bool(segment.get("error"))):
+            _render_segment_edit_form(service, user, job_id, index, segment)
 
 
 def _render_segment_ops(
@@ -260,7 +364,12 @@ def _render_segment_edit_form(
 ) -> None:
     analysis = segment.get("analysis") or {}
     with st.form(f"seg_form_{job_id}_{index}"):
-        new_text = st.text_area("题干", value=segment.get("text") or "", height=120)
+        # 渲染效果见上方预览卡片，此处编辑的是 LaTeX 源码
+        new_text = st.text_area(
+            "题干（$...$ 为公式源码，渲染效果见上方预览）",
+            value=segment.get("text") or "",
+            height=120,
+        )
         col_a, col_d = st.columns(2)
         with col_a:
             new_answer = st.text_input("答案", value=analysis.get("answer") or "")

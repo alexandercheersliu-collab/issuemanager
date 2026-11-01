@@ -1,14 +1,54 @@
-"""后台管理页（仅 admin）：按学科清空错题本，全系统口径的危险维护操作。"""
+"""后台管理页（仅 admin）：重置用户密码、按学科清空错题本（全系统口径的危险维护操作）。"""
 from __future__ import annotations
 
 import streamlit as st
 
+from backend.database import get_session
+from backend.repositories.users import UserRepository
+from backend.services.auth import INITIAL_PASSWORD, AuthService, is_admin_username
 from frontend.common import get_question_service, page_header
 
 
 def purge_confirmed(input_text: str, expected_name: str) -> bool:
     """确认输入校验（纯函数）：输入与学科全名完全一致（去首尾空白）才放行。"""
     return bool(expected_name) and input_text.strip() == expected_name
+
+
+def resettable_users(users: list) -> list:
+    """可被重置密码的用户（纯函数）：排除 admin 名单内的账号。"""
+    return [u for u in users if not is_admin_username(u.username)]
+
+
+def _render_reset_password_section(user: dict) -> None:
+    st.markdown("#### 🔑 重置用户密码")
+    st.caption(f"将选中用户的密码重置为初始密码 {INITIAL_PASSWORD}，并解除其登录锁定。")
+
+    with get_session() as session:
+        users = [
+            (u.id, u.username, u.role)
+            for u in resettable_users(UserRepository(session).list_users())
+        ]
+    if not users:
+        st.info("暂无可重置的用户。")
+        return
+
+    labels = {f"{username}（{role}）": uid for uid, username, role in users}
+    choice = st.selectbox("选择要重置密码的用户", list(labels.keys()), key="admin_reset_user")
+    target_id = labels[choice]
+
+    if st.button(
+        f"将该用户密码重置为 {INITIAL_PASSWORD}",
+        key="admin_reset_btn",
+        type="primary",
+        width="stretch",
+    ):
+        with get_session() as session:
+            try:
+                result = AuthService(session).reset_password_by_admin(user["id"], target_id)
+            except PermissionError:
+                st.error("仅管理员可执行该操作。")
+            else:
+                st.success(f"{result.message}，请提醒其尽快登录并修改密码。")
 
 
 def render_admin_page(user: dict) -> None:
@@ -22,10 +62,13 @@ def render_admin_page(user: dict) -> None:
         st.stop()
         return  # 类型检查器友好；st.stop() 已中断执行
 
+    _render_reset_password_section(user)
+
     if not overview:
         st.info("全系统暂无错题，无需清理。")
         return
 
+    st.divider()
     st.markdown("#### 🗑️ 按学科清空错题本")
     st.caption("清空范围为**全系统所有用户**在该学科下的错题，而非仅当前账号。")
 

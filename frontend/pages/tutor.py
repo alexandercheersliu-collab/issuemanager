@@ -7,7 +7,13 @@ from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
 from backend.services.entry_types import EntryResult
 from backend.services.question_service import sanitize_tags
 from backend.utils.logging import get_logger
-from frontend.common import followup_chat, get_question_service, go_to, page_header
+from frontend.common import (
+    followup_chat,
+    get_question_service,
+    go_to,
+    page_header,
+    safe_truncate_math,
+)
 from frontend.components import save_followup_button
 
 logger = get_logger("tutor")
@@ -15,7 +21,7 @@ logger = get_logger("tutor")
 _GRADE_OPTIONS = ["不限"] + [f"{g} 年级" for g in range(1, 13)]
 
 
-def _k12_context_inputs(key_prefix: str) -> dict:
+def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
     """学科/年级/地区/教材版本录入控件（拍照与手动两个 Tab 共用）。
 
     返回可直接传给服务层的上下文字典；界面层纯控件，服务调用方负责传参。
@@ -24,18 +30,26 @@ def _k12_context_inputs(key_prefix: str) -> dict:
     col_s, col_g = st.columns(2)
     with col_s:
         subject_label = st.selectbox(
-            "学科", subject_labels, index=0, key=f"{key_prefix}_subject"
+            "学科", subject_labels, index=0, key=f"{key_prefix}_subject", disabled=disabled
         )
     with col_g:
-        grade_label = st.selectbox("年级", _GRADE_OPTIONS, index=0, key=f"{key_prefix}_grade")
+        grade_label = st.selectbox(
+            "年级", _GRADE_OPTIONS, index=0, key=f"{key_prefix}_grade", disabled=disabled
+        )
     col_r, col_t = st.columns(2)
     with col_r:
         region = st.text_input(
-            "地区（可选）", placeholder="例如：北京", key=f"{key_prefix}_region"
+            "地区（可选）",
+            placeholder="例如：北京",
+            key=f"{key_prefix}_region",
+            disabled=disabled,
         )
     with col_t:
         textbook = st.text_input(
-            "教材版本（可选）", placeholder="例如：人教版", key=f"{key_prefix}_textbook"
+            "教材版本（可选）",
+            placeholder="例如：人教版",
+            key=f"{key_prefix}_textbook",
+            disabled=disabled,
         )
     subject = next(k for k, v in SUBJECT_NAMES.items() if v == subject_label)
     grade = int(grade_label.split()[0]) if grade_label != "不限" else None
@@ -471,6 +485,17 @@ def _render_entry_results(service, user, entries: list[dict], unit: str = "张")
             _render_analysis(entry["question"], entry["analysis"], service, user)
 
 
+def _similar_constraints(question) -> dict:
+    return {
+        "subject": question.subject,
+        "grade": question.grade,
+        "region": question.region,
+        "difficulty": question.difficulty,
+        "knowledge_points": list(question.knowledge_points or []),
+        "question_type": question.question_type,
+    }
+
+
 def _render_analysis(saved, analysis, service, user) -> None:
     img_col, content_col = st.columns([2, 3])
     with img_col:
@@ -507,14 +532,16 @@ def _render_analysis(saved, analysis, service, user) -> None:
 
         st.divider()
         st.markdown("**相似错题（向量召回）**")
-        similar = service.similar_questions(saved, user_id=user["id"]).items
+        similar = service.similar_questions(
+            saved, user_id=user["id"], **_similar_constraints(saved)
+        ).items
         if similar:
             for q in similar:
                 source_mark = {"bank": "公共题库", "generated": "AI 变式"}.get(q.source)
                 prefix = f"[{source_mark}] " if source_mark else ""
                 st.markdown(
                     f"- {prefix}🏷️ {'、'.join(q.tags[:3])} · "
-                    f"<span class='mm-muted'>{q.content_markdown[:60]}…</span>",
+                    f"<span class='mm-muted'>{safe_truncate_math(q.content_markdown, 60)}</span>",
                     unsafe_allow_html=True,
                 )
         else:

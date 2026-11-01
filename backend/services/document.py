@@ -1,15 +1,18 @@
-"""文档解析层：把整卷 PDF / DOCX 解析为逐页结构（DocPage），供切题管线使用。
+"""文档解析层：把整卷 PDF / DOCX / 试卷照片解析为逐页结构（DocPage），供切题管线使用。
 
 - PDF（PyMuPDF）：逐页提取文本层 + 渲染页图像（≥200 DPI，存入工作目录），
   文本层过薄的页判定为扫描版（只能走视觉切题）。
 - DOCX（python-docx）：按文档顺序提取段落文本，内嵌图片落盘并在文本流中
   留下 ``[图片:相对路径]`` 锚点；DOCX 无分页概念，整体视为一页。
+- 图片（jpg/jpeg/png/webp）：一张图片 = 一页，恒为扫描版（走视觉切题）；
+  多张照片按上传顺序组成逐页文档（parse_images）。
 
 任何一步失败抛 ValueError（调用方转成任务失败），不静默吞错。
 """
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +25,10 @@ _SCANNED_TEXT_THRESHOLD = 20
 # 页图像渲染分辨率（DPI）
 _RENDER_DPI = 200
 
-SUPPORTED_SUFFIXES = {".pdf", ".docx"}
+# 试卷照片格式：多文件上传仅限这些格式（每张 = 一页）
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+SUPPORTED_SUFFIXES = {".pdf", ".docx"} | IMAGE_SUFFIXES
 
 IMAGE_ANCHOR_RE = re.compile(r"\[图片:([^\]]+)\]")
 
@@ -48,7 +54,36 @@ def parse_document(path: str | Path, work_dir: str | Path) -> list[DocPage]:
         return _parse_pdf(path, work_dir)
     if suffix == ".docx":
         return _parse_docx(path, work_dir)
+    if suffix in IMAGE_SUFFIXES:
+        return parse_images([path], work_dir)
     raise ValueError(f"不支持的文档格式: {suffix}（支持 {sorted(SUPPORTED_SUFFIXES)}）")
+
+
+# ---------------- 图片（试卷照片） ----------------
+
+def parse_images(paths: list[str | Path], work_dir: str | Path) -> list[DocPage]:
+    """一组试卷照片按给定顺序视为逐页文档：一页一图，恒为扫描版（走视觉切题）。
+
+    每张照片复制进 work_dir 命名为 page-N<原后缀>（与 PDF 页图同目录约定），
+    供后续校对 / 确认入库按路径引用页图。
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    pages: list[DocPage] = []
+    for index, src in enumerate(paths):
+        src = Path(src)
+        image_path = work_dir / f"page-{index + 1}{src.suffix.lower()}"
+        shutil.copyfile(src, image_path)
+        pages.append(
+            DocPage(
+                page_no=index + 1,
+                text="",
+                image_path=image_path,
+                is_scanned=True,
+            )
+        )
+    logger.info("图片解析完成: %s 页（整卷拍照，全部扫描版）", len(pages))
+    return pages
 
 
 # ---------------- PDF ----------------

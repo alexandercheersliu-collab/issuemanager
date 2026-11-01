@@ -66,6 +66,70 @@ def test_answers_match():
     assert not answers_match("x=1", "1")  # 单字符包含不算对
 
 
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        pytest.param(r"\log_2 8", "log₂8", id="log-LaTeX下标vsUnicode下标"),
+        pytest.param(r"$\leq$", "≤", id="leq"),
+        pytest.param(r"$\le 3$", "≤3", id="le"),
+        pytest.param(r"\geq", "≥", id="geq"),
+        pytest.param(r"x \ge 0", "x≥0", id="ge"),
+        pytest.param(r"\neq", "≠", id="neq"),
+        pytest.param(r"a \ne b", "a≠b", id="ne"),
+        pytest.param("x^2+1", "x²+1", id="插入符vs上标"),
+        pytest.param(r"\pm 2", "±2", id="pm"),
+        pytest.param(r"3 \times 4", "3×4", id="times"),
+        pytest.param(r"6 \div 2", "6÷2", id="div"),
+        pytest.param(r"a \cdot b", "a·b", id="cdot"),
+        pytest.param("f'(x)", "f′(x)", id="撇号vsPRIME"),
+        pytest.param(r"\infty", "∞", id="infty"),
+        pytest.param(r"x \in A", "x∈A", id="in"),
+        pytest.param(r"A \subseteq B", "A⊆B", id="subseteq"),
+        pytest.param(r"\varnothing", "∅", id="varnothing"),
+        pytest.param(r"\emptyset", "∅", id="emptyset"),
+        pytest.param(r"\forall x", "∀x", id="forall"),
+        pytest.param(r"\exists x", "∃x", id="exists"),
+        pytest.param(r"x \to 0", "x→0", id="to"),
+        pytest.param(r"x \rightarrow 0", "x→0", id="rightarrow"),
+        pytest.param(r"\approx 3.14", "≈3.14", id="approx"),
+        pytest.param("A_5^2", "A₅²", id="排列数记号"),
+        pytest.param(r"\pi", "π", id="pi"),
+        pytest.param(r"\triangle ABC", "△ABC", id="triangle"),
+        pytest.param(r"\angle ABC", "∠ABC", id="angle"),
+        pytest.param(r"a \parallel b", "a∥b", id="parallel"),
+        pytest.param(r"a \perp b", "a⊥b", id="perp"),
+        pytest.param(r"\therefore", "∴", id="therefore"),
+        pytest.param(r"\because", "∵", id="because"),
+        pytest.param(r"\sin x", "sinx", id="sin"),
+        pytest.param(r"\cos x", "cosx", id="cos"),
+        pytest.param(r"\tan x", "tanx", id="tan"),
+        pytest.param(r"\ln x", "lnx", id="ln"),
+        pytest.param(r"\lg 100", "lg100", id="lg"),
+    ],
+)
+def test_answers_match_latex_vs_unicode(expected, actual):
+    """高中数学判分：LaTeX 命令与 Unicode 符号应归一为同一结果。"""
+    assert answers_match(expected, actual)
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        pytest.param("2", "3", id="不同数字"),
+        pytest.param("x^2+1", "x^3+1", id="指数不同"),
+        pytest.param(r"\log_2 8", "log₃8", id="底数不同"),
+        pytest.param(r"\sin x", "cosx", id="函数名不同"),
+    ],
+)
+def test_answers_match_latex_unicode_negative(expected, actual):
+    assert not answers_match(expected, actual)
+
+
+def test_answers_match_caret_underscore_deleted_tradeoff():
+    """已知取舍：删除 ^/_ 后 2^3 与 23 归一相同，判分视为相等（文档化行为）。"""
+    assert answers_match("2^3", "23")
+
+
 def test_tested_ref_for():
     from backend.models.schemas import QuestionOut
 

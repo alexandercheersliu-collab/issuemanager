@@ -14,6 +14,21 @@ def test_split_with_separator():
     assert analysis == "**1. 梳理错误原因** ……"
 
 
+def test_split_document_import_headings():
+    """整卷导入格式：逐题题干应在复习正面完整展示，解析留到翻卡后。"""
+    content = (
+        "### 题目\n"
+        "已知 $A=\\{x|x^2+px+1=0\\}$，求实数 $p$ 的取值范围。\n\n"
+        "### 解析\n"
+        "按方程根的分布分类讨论。"
+    )
+
+    stem, analysis = split_stem_and_analysis(content)
+
+    assert stem == "已知 $A=\\{x|x^2+px+1=0\\}$，求实数 $p$ 的取值范围。"
+    assert analysis == "按方程根的分布分类讨论。"
+
+
 def test_split_without_separator():
     """旧版整图录入：无分隔符 → （原文, None）。"""
     content = "**1. 梳理错误原因** 很多同学……"
