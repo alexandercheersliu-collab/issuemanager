@@ -43,10 +43,15 @@ def test_manifest_contains_only_top_level_tikz_packages() -> None:
     assert installer.load_packages() == ["standalone", "pgf", "amsmath"]
 
 
-def test_current_machine_pdflatex_is_discoverable() -> None:
+def test_default_pdflatex_is_discoverable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     installer = _load_installer()
+    compiler = _fake_compiler(tmp_path, "pdfTeX 3.141592653 (TeX Live 2026)")
+    monkeypatch.setattr(installer, "DEFAULT_PDFLATEX", compiler)
+    monkeypatch.setenv("PDFLATEX_PATH", "")
 
-    assert installer.discover_pdflatex() == PDFLATEX_PATH
+    assert installer.discover_pdflatex() == compiler
 
 
 @pytest.mark.parametrize(

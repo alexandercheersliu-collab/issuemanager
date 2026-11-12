@@ -2,7 +2,7 @@
 # Python >= 3.10
 
 # Web 框架
-streamlit>=1.49
+streamlit>=1.65
 streamlit-antd-components>=0.3.2
 plotly>=7.0.0
 networkx>=3.0            # 知识图谱力导向布局（spring_layout）

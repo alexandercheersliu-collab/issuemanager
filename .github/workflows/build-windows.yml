@@ -16,9 +16,9 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -60,7 +60,7 @@ jobs:
           Compress-Archive -Path dist/IssuesManager -DestinationPath "IssuesManager-$version-windows-x64.zip"
           echo "PACKAGE=IssuesManager-$version-windows-x64.zip" >> $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PACKAGE }}
           path: ${{ env.PACKAGE }}
