@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import streamlit as st
 
 from backend.services.ai import get_provider_status
+from backend.services.ai.base import normalize_math_delimiters
 from backend.services.question_service import QuestionService
 
 _ASSETS = pathlib.Path(__file__).parent / "assets" / "style.css"
@@ -118,6 +120,20 @@ def _first_unclosed_math_open(s: str) -> int | None:
     return None
 
 
+_DISPLAY_MATH_RE = re.compile(r"\n*(?<!\\)\$\$(.+?)(?<!\\)\$\$\n*", flags=re.DOTALL)
+
+
+def normalize_display_math(text: str) -> str:
+    return _DISPLAY_MATH_RE.sub(
+        lambda match: f"\n\n$$\n{match.group(1).strip()}\n$$\n\n", text
+    )
+
+
+def render_markdown(text: str, **kwargs) -> None:
+    """将跨行块级公式整理为独立段落，避免后续文本被 KaTeX 当作公式源码。"""
+    st.markdown(normalize_display_math(text), **kwargs)
+
+
 def safe_truncate_math(text: str, max_len: int, ellipsis: str = "…") -> str:
     """截断含数学公式的 Markdown 预览，保证不切断 $...$ / $$...$$ 等数学区间。
 
@@ -152,8 +168,7 @@ _LABEL_TO_KEY = {
 def go_to(page_key: str, **params) -> None:
     """跨页跳转：记录目标导航项，触发重跑。
 
-    注意：菜单组件的 session key 只能在其「本次实例化之前」修改，
-    因此这里仅写入 _pending_nav，由 app.py 在渲染侧边栏前消费。
+    这里仅写入 _pending_nav，由 app.py 在渲染侧边栏前消费。
     """
     label = next(label for label, key in _LABEL_TO_KEY.items() if key == page_key)
     st.session_state["_pending_nav"] = label
@@ -180,7 +195,7 @@ def followup_chat(service, question, user: dict) -> None:
         with st.chat_message(
             message["role"], avatar="🧑‍🎓" if message["role"] == "user" else "📘"
         ):
-            st.markdown(message["content"])
+            st.markdown(normalize_math_delimiters(message["content"]))
 
     if prompt := st.chat_input(
         "哪里没看懂？问老师（例如：为什么判别式要大于等于零）",

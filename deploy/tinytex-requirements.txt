@@ -1,0 +1,4 @@
+# TinyTeX / TeX Live 2026 顶层宏包；传递依赖由 tlmgr 自动解析。
+standalone
+pgf
+amsmath

@@ -13,6 +13,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PDFLATEX_PATH = Path("/home/anna/.local/bin/pdflatex")
 
 
 class Settings(BaseSettings):
@@ -23,7 +24,7 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    app_name: str = "Issues Manager"
+    app_name: str = "智能错题本"
     app_version: str = "2.1.0"
     debug: bool = False
     # 运行时数据根目录（SQLite / 上传原图 / 遥测日志）。
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
     # 需要：pip install rapidocr-onnxruntime
     ocr_enabled: bool = False
 
+    # ---------- TikZ 几何图（可选）----------
+    pdflatex_path: Path = DEFAULT_PDFLATEX_PATH
+    tikz_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+
     # ---------- 分享卡片 ----------
     # 渲染分享卡片使用的中文字体文件（.ttf/.ttc/.otf）绝对路径；
     # 留空 = 按平台自动探测常见字体（Windows 微软雅黑/黑体、Linux 文泉驿、
@@ -153,8 +158,24 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("pdflatex_path", mode="before")
+    @classmethod
+    def _blank_pdflatex_means_default(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_PDFLATEX_PATH
+        return value
+
+    @field_validator("pdflatex_path", mode="after")
+    @classmethod
+    def _expand_pdflatex_path(cls, value: Path) -> Path:
+        return value.expanduser().absolute()
+
     @field_validator(
-        "data_dir", "chroma_dir", "chroma_model_dir", "share_card_font_path", "doc_upload_path",
+        "data_dir",
+        "chroma_dir",
+        "chroma_model_dir",
+        "share_card_font_path",
+        "doc_upload_path",
         mode="after",
     )
     @classmethod

@@ -44,6 +44,8 @@ from backend.utils.logging import get_logger
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.orm import Session, sessionmaker
 
+    from backend.services.geometry_figures import GeneratedVariant
+
 logger = get_logger("questions")
 
 
@@ -113,6 +115,16 @@ class CoreMixin:
         self.ai: BaseAIProvider = get_ai_service(self.settings)
         self.vector_store = QuestionVectorStore(self.settings)
         self.scheduler = ReviewScheduler(self.settings)
+        self._geometry_figure_service = None
+
+    def _geometry_figures(self):
+        if self._geometry_figure_service is None:
+            from backend.services.geometry_figures import GeometryFigureService
+
+            self._geometry_figure_service = GeometryFigureService.from_settings(
+                self.ai, self.settings
+            )
+        return self._geometry_figure_service
 
     @contextmanager
     def _session(self) -> Iterator[QuestionRepository]:
@@ -243,6 +255,8 @@ class EntryMixin:
         error_category: str | None = None,
         source_doc: str | None = None,
         image_path: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
     ) -> QuestionOut:
         """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。
 
@@ -296,6 +310,8 @@ class EntryMixin:
                 error_category=error_category,
                 source_doc=source_doc,
                 image_path=image_path,
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
             )
             out = QuestionOut.from_orm_model(question)
 
@@ -304,6 +320,27 @@ class EntryMixin:
             " ".join([*clean_points, content_markdown.strip(), clean_answer, *clean_tags]),
         )
         return out
+
+    def _redraw_entry_figures(
+        self, *, image_path: Path, segments: list[dict], context
+    ) -> tuple[list[str], list[dict]]:
+        figure_paths: list[str] = []
+        figure_specs: list[dict] = []
+        for segment in segments:
+            boxes = list(segment.get("figure_bboxes") or [])
+            if not boxes:
+                continue
+            outcome = self._geometry_figures().redraw_segment(
+                image_path=image_path,
+                number=str(segment.get("number") or "1"),
+                text=str(segment.get("text") or ""),
+                figure_bboxes=boxes,
+                figures_dir=image_path.parent / f"{image_path.stem}_figures",
+                context=context,
+            )
+            figure_paths.extend(outcome.figure_paths)
+            figure_specs.extend(outcome.figure_specs)
+        return figure_paths, figure_specs
 
     def analyze_and_save(
         self,
@@ -314,39 +351,54 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_hash: str | None = None,
+        segments: list[dict] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
         textbook_version: str | None = None,
     ) -> tuple[QuestionOut, QuestionAnalysis]:
-        """完整录入链路：AI 解析 → 图片落盘 →（可选 OCR）→ 数据库 → 向量索引。
+        """完整录入链路：AI 解析 → 图片落盘 → 图形重绘/兜底 → 数据库 → 向量索引。
 
         image_hash：调用方（analyze_and_save_dedup）预算好的原图哈希，入库供去重。
+        segments：调用方已有的切题结果；为空列表时不重复切题，为 None 时自行识别图形。
         subject/grade/region/textbook_version：录入上下文，随解析落库为 K12 元数据。
         """
         from backend.services.ai.base import AnalysisContext
 
+        context = AnalysisContext(
+            subject=subject,
+            grade=grade,
+            region=region,
+            textbook_version=textbook_version,
+        )
         analysis = self.ai.analyze_question(
             image_bytes,
             mime_type,
             hint,
-            context=AnalysisContext(
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-            ),
+            context=context,
         )
+        if segments is None:
+            try:
+                segments = self.ai.segment_page(image_bytes, mime_type)
+            except Exception as exc:  # noqa: BLE001 - 图形识别失败不阻断原有整图解析
+                logger.info("录题图形定位失败，保留原图: %s", exc)
+                segments = []
         tags = analysis.merged_tags(user_tags or [])
 
         image_path = self._persist_image(user_id, image_bytes)
+        figure_paths, figure_specs = self._redraw_entry_figures(
+            image_path=image_path, segments=segments or [], context=context
+        )
         from backend.services.ocr import extract_text
 
         ocr_text = extract_text(str(image_path))
-        # 大题只错一道小题时，AI 提取的做错小题题干作为题面（与文本路径格式一致：
-        # 题面 + 分隔线 + 解析），复习闪卡与错题本才能题面/解析分离展示
-        if analysis.focused_sub_question.strip():
-            content = f"{analysis.focused_sub_question.strip()}\n\n---\n\n{analysis.analysis}"
+        # 优先使用聚焦小题题干；整图单题则保留切题结果中的题干。
+        # 题面 + 分隔线 + 解析的格式供复习闪卡与错题本分离展示。
+        stem = analysis.focused_sub_question.strip()
+        if not stem and segments and len(segments) == 1:
+            stem = str(segments[0].get("text") or "").strip()
+        if stem:
+            content = f"{stem}\n\n---\n\n{analysis.analysis}"
         else:
             content = analysis.analysis
         with self._session() as repo:
@@ -359,6 +411,8 @@ class EntryMixin:
                 difficulty=analysis.difficulty,
                 followup_question=analysis.followup_question,
                 image_path=str(image_path),
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
                 ocr_text=ocr_text,
                 image_hash=image_hash,
                 subject=subject,
@@ -385,6 +439,7 @@ class EntryMixin:
         mime_type: str = "image/jpeg",
         user_tags: list[str] | None = None,
         hint: str = "",
+        segments: list[dict] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -397,11 +452,11 @@ class EntryMixin:
         if existing is not None:
             out = QuestionOut.from_orm_model(existing)
             analysis = QuestionAnalysis(
-                knowledge_points=list(out.knowledge_points or []),
+                knowledge_points=list(out.knowledge_points or [])[:6],
                 analysis=out.content_markdown,
                 answer=out.answer,
                 difficulty=out.difficulty,  # type: ignore[arg-type]
-                tags=list(out.tags or []),
+                tags=list(out.tags or [])[:6],
                 mistake_cause="",
                 followup_question=out.followup_question or "",
                 question_type=out.question_type or "",
@@ -418,6 +473,7 @@ class EntryMixin:
             user_tags=user_tags,
             hint=hint,
             image_hash=image_hash,
+            segments=segments,
             subject=subject,
             grade=grade,
             region=region,
@@ -433,6 +489,7 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_path: str | None = None,
+        segment: dict | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -448,15 +505,23 @@ class EntryMixin:
             raise ValueError("题干文本不能为空")
         from backend.services.ai.base import AnalysisContext
 
+        context = AnalysisContext(
+            subject=subject,
+            grade=grade,
+            region=region,
+            textbook_version=textbook_version,
+        )
         analysis = self.ai.analyze_text(
             text.strip()[:4000],
             hint,
-            context=AnalysisContext(
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-            ),
+            context=context,
+        )
+        figure_paths, figure_specs = (
+            self._redraw_entry_figures(
+                image_path=Path(image_path), segments=[segment], context=context
+            )
+            if image_path and segment
+            else ([], [])
         )
         tags = analysis.merged_tags(user_tags or [])
         # 大题只错一道小题时，以 AI 聚焦的小题题干替换整题题干入库
@@ -473,6 +538,8 @@ class EntryMixin:
                 difficulty=analysis.difficulty,
                 followup_question=analysis.followup_question,
                 image_path=image_path,
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
                 subject=subject,
                 grade=grade,
                 region=region,
@@ -773,13 +840,15 @@ class QueryMixin:
         )
 
     @staticmethod
-    def _generated_as_question(question: QuestionOut, variant: str) -> QuestionOut:
+    def _generated_as_question(
+        question: QuestionOut, variant: GeneratedVariant
+    ) -> QuestionOut:
         """AI 变式题包装为 QuestionOut（source="generated"，不落库）。"""
         return QuestionOut(
             id=-9999,
             user_id=0,
             image_path=None,
-            content_markdown=variant,
+            content_markdown=variant.content,
             answer="",
             knowledge_points=list(question.knowledge_points or [])[:4],
             tags=["AI 变式"],
@@ -789,26 +858,47 @@ class QueryMixin:
             grade=question.grade,
             region=question.region,
             textbook_version=question.textbook_version,
+            question_type=question.question_type,
+            chapter=question.chapter,
+            error_category=question.error_category,
+            figure_paths=list(variant.figure_paths),
+            figure_specs=[dict(spec) for spec in variant.figure_specs],
         )
 
-    def _generate_variant(self, question: QuestionOut) -> str | None:
-        """LLM 变式生成兜底：复用分析管线的 followup_question 能力。"""
+    def _generate_variant(self, question: QuestionOut) -> GeneratedVariant | None:
+        """带图题生成并校验新图；无图题沿用文本分析的 followup_question。"""
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeneratedVariant
 
+        context = AnalysisContext(
+            subject=question.subject or "math",
+            grade=question.grade,
+            region=question.region,
+            textbook_version=question.textbook_version,
+        )
         try:
+            if question.figure_paths or question.figure_specs:
+                variant = self.ai.generate_geometry_variant(
+                    question.content_markdown[:4000],
+                    knowledge_points=list(question.knowledge_points or []),
+                    error_category=question.error_category or "",
+                    question_type=question.question_type or "",
+                    difficulty=question.difficulty or "medium",
+                    figure_specs=list(question.figure_specs or []),
+                    context=context,
+                )
+                return self._geometry_figures().render_variant(variant, source=question)
             analysis = self.ai.analyze_text(
                 question.content_markdown[:4000],
-                context=AnalysisContext(
-                    subject=question.subject or "math",
-                    grade=question.grade,
-                    region=question.region,
-                    textbook_version=question.textbook_version,
-                ),
+                context=context,
             )
         except Exception as exc:  # noqa: BLE001 - 生成失败仅少一条兜底，不影响召回
             logger.info("变式生成失败 question=%s: %s", question.id, exc)
             return None
-        return (analysis.followup_question or "").strip() or None
+        content = (analysis.followup_question or "").strip()
+        if not content:
+            return None
+        return GeneratedVariant(content=content, figure_paths=[], figure_specs=[])
 
 
 class EditTagMixin:

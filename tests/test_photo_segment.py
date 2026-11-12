@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image
 
 from backend.services.ai.mock import MockProvider
+from backend.services.geometry_figures import FigureOutcome
 from frontend.pages.tutor import (
     _plan_photo_entry,
     _save_checked_candidates,
@@ -40,7 +41,12 @@ def test_should_use_segmentation_requires_two_or_more():
 
 def test_build_candidates_labels_source_image_and_defaults():
     segments = [
-        {"number": "3", "text": "  已知   x^2=9，求 x。 ", "likely_wrong": True},
+        {
+            "number": "3",
+            "text": "  已知   x^2=9，求 x。 ",
+            "likely_wrong": True,
+            "figure_bboxes": [[10, 20, 30, 40]],
+        },
         {"number": "4", "text": "计算 1+1。"},  # 无 likely_wrong 字段
     ]
     candidates = build_candidates("homework.jpg", segments)
@@ -50,6 +56,8 @@ def test_build_candidates_labels_source_image_and_defaults():
     assert candidates[0]["text"] == "已知   x^2=9，求 x。"  # 仅去首尾空白，内部保留
     assert candidates[0]["summary"] == "已知 x^2=9，求 x。"  # 摘要压缩空白
     assert candidates[0]["likely_wrong"] is True
+    assert candidates[0]["figure_bboxes"] == [[10, 20, 30, 40]]
+    assert candidates[1]["figure_bboxes"] == []
     assert candidates[1]["likely_wrong"] is False  # 缺省 False
     assert default_checked(candidates[0]) is True
     assert default_checked(candidates[1]) is False
@@ -90,12 +98,16 @@ def test_plan_single_question_image_falls_back():
     )
     assert plan["candidates"] == []
     assert [f["name"] for f in plan["fallbacks"]] == ["one.jpg"]
+    assert plan["fallbacks"][0]["segments"] == [
+        {"number": "1", "text": "唯一一道题", "likely_wrong": False}
+    ]
 
 
 def test_plan_segment_exception_falls_back():
     plan = _plan_photo_entry(_BrokenProvider(), [("bad.jpg", b"img-b", "image/jpeg")])
     assert plan["candidates"] == []
     assert [f["name"] for f in plan["fallbacks"]] == ["bad.jpg"]
+    assert plan["fallbacks"][0]["segments"] == []
 
 
 def test_plan_merges_candidates_across_images():
@@ -138,6 +150,71 @@ def test_checked_candidates_saved_per_question(question_service, student_user, t
     assert "【演示切题】" in questions[0].content_markdown
     assert all(q.grade == 9 for q in questions)
     assert all("期末" in q.tags for q in questions)
+
+
+def test_checked_candidates_redraw_only_questions_with_figures(
+    question_service, student_user, tmp_path
+):
+    class GeometryProvider(MockProvider):
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [
+                {
+                    "number": "1",
+                    "text": "带图几何题",
+                    "likely_wrong": True,
+                    "figure_bboxes": [[10, 20, 200, 180]],
+                },
+                {
+                    "number": "2",
+                    "text": "无图计算题",
+                    "likely_wrong": False,
+                    "figure_bboxes": [],
+                },
+            ]
+
+    class FakeFigures:
+        def __init__(self):
+            self.calls = []
+
+        def redraw_segment(self, **kwargs):
+            self.calls.append(kwargs["number"])
+            path = tmp_path / f"redraw-{kwargs['number']}.png"
+            Image.new("RGB", (20, 20), "white").save(path)
+            return FigureOutcome(
+                figure_paths=[str(path)],
+                figure_specs=[
+                    {
+                        "kind": "geometry",
+                        "semantic_spec": {"points": ["A", "B"]},
+                        "tikz_source": "tikz",
+                        "render_path": str(path),
+                        "crop_path": None,
+                        "validation_status": "ai_passed",
+                        "validation_issues": [],
+                        "assumptions": [],
+                    }
+                ],
+                needs_review=False,
+            )
+
+    provider = GeometryProvider()
+    figures = FakeFigures()
+    question_service.ai = provider
+    question_service._geometry_figure_service = figures
+    plan = _plan_photo_entry(provider, [("paper.jpg", _jpeg_bytes(), "image/jpeg")])
+    context = {"subject": "math", "grade": 9, "region": None, "textbook_version": None}
+
+    results = _save_checked_candidates(
+        question_service, student_user.id, plan["candidates"], [], "", context
+    )
+
+    assert [error for _, _, error in results] == [None, None]
+    questions = [entry.question for _, entry, _ in results]
+    assert questions[0].figure_paths == [str(tmp_path / "redraw-1.png")]
+    assert questions[0].figure_specs[0].tikz_source == "tikz"
+    assert questions[1].figure_paths == []
+    assert questions[1].figure_specs == []
+    assert figures.calls == ["1"]
 
 
 def test_partial_selection_saves_only_checked(question_service, student_user):

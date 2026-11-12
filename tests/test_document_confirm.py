@@ -53,6 +53,24 @@ def _import_and_wait(question_service, student_user, tmp_path, name="confirm.pdf
 
 def test_confirm_import_persists_source_fields(question_service, student_user, tmp_path):
     service, job_id = _import_and_wait(question_service, student_user, tmp_path)
+    figure = tmp_path / "confirm-figure.png"
+    figure.write_bytes(b"figure")
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {"shape": "triangle"},
+        "tikz_source": "\\draw (0,0)--(1,0);",
+        "render_path": None,
+        "crop_path": str(figure),
+        "validation_status": "fallback",
+        "validation_issues": ["需人工确认"],
+        "assumptions": [],
+    }
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = [str(figure)]
+    result["segments"][0]["figure_specs"] = [spec]
+    result["segments"][1].pop("figure_specs", None)  # 兼容功能上线前的任务
+    service._save_result(job_id, result)
 
     outcome = service.confirm_import(job_id, student_user.id)
     assert outcome == {"imported": 2, "skipped": [], "already_confirmed": False}
@@ -67,6 +85,7 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     assert {q.source_doc for q in docs} == {"confirm.pdf#1"}
 
     first = next(q for q in docs if "第一题" in q.content_markdown)
+    second = next(q for q in docs if "第二题" in q.content_markdown)
     assert first.subject == "math"
     assert first.grade == 9
     assert first.region == "北京"
@@ -76,6 +95,9 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     assert first.chapter == "一元二次方程"
     assert "第一题" in first.content_markdown
     assert first.answer
+    assert first.figure_paths == [str(figure)]
+    assert [item.model_dump() for item in first.figure_specs] == [spec]
+    assert second.figure_specs == []
 
 
 def test_confirm_import_applies_latest_context(question_service, student_user, tmp_path):

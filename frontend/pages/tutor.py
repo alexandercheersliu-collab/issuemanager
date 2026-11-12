@@ -12,9 +12,10 @@ from frontend.common import (
     get_question_service,
     go_to,
     page_header,
+    render_markdown,
     safe_truncate_math,
 )
-from frontend.components import save_followup_button
+from frontend.components import render_figures, save_followup_button
 
 logger = get_logger("tutor")
 
@@ -22,7 +23,7 @@ _GRADE_OPTIONS = ["不限"] + [f"{g} 年级" for g in range(1, 13)]
 
 
 def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
-    """学科/年级/地区/教材版本录入控件（拍照与手动两个 Tab 共用）。
+    """学科/年级/地区/教材版本录入控件，默认数学、10 年级、上海、沪教版。
 
     返回可直接传给服务层的上下文字典；界面层纯控件，服务调用方负责传参。
     """
@@ -30,16 +31,25 @@ def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
     col_s, col_g = st.columns(2)
     with col_s:
         subject_label = st.selectbox(
-            "学科", subject_labels, index=0, key=f"{key_prefix}_subject", disabled=disabled
+            "学科",
+            subject_labels,
+            index=subject_labels.index("数学"),
+            key=f"{key_prefix}_subject",
+            disabled=disabled,
         )
     with col_g:
         grade_label = st.selectbox(
-            "年级", _GRADE_OPTIONS, index=0, key=f"{key_prefix}_grade", disabled=disabled
+            "年级",
+            _GRADE_OPTIONS,
+            index=_GRADE_OPTIONS.index("10 年级"),
+            key=f"{key_prefix}_grade",
+            disabled=disabled,
         )
     col_r, col_t = st.columns(2)
     with col_r:
         region = st.text_input(
             "地区（可选）",
+            value="上海",
             placeholder="例如：北京",
             key=f"{key_prefix}_region",
             disabled=disabled,
@@ -47,6 +57,7 @@ def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
     with col_t:
         textbook = st.text_input(
             "教材版本（可选）",
+            value="沪教版",
             placeholder="例如：人教版",
             key=f"{key_prefix}_textbook",
             disabled=disabled,
@@ -104,12 +115,15 @@ def render_tutor_page(user: dict) -> None:
                 plan = None
                 st.session_state.pop("photo_plan", None)
 
-            # 切题期间禁用按钮防重复点击：点击后先置忙并重渲染（按钮变灰），
-            # 下一轮再执行真正的切题；忙态在结束/异常时都会解除
+            # 从找题到解构入库完成前都禁用，已有计划表示录入流程尚未结束。
             seg_busy = st.session_state.get("photo_seg_busy", False)
             if uploads and st.button(
-                "开始 AI 解析", type="primary", width="stretch", disabled=seg_busy
+                "开始 AI 解析",
+                type="primary",
+                width="stretch",
+                disabled=seg_busy or plan is not None,
             ):
+                st.session_state.pop("photo_entry_results", None)
                 st.session_state["photo_seg_busy"] = True
                 st.rerun()
             if seg_busy:
@@ -129,15 +143,19 @@ def render_tutor_page(user: dict) -> None:
 
             if plan is not None:
                 if not plan["candidates"]:
-                    # 所有图片都只切出单题或切题失败：行为与原整图解析完全一致
-                    _process_uploads(
-                        service, user, uploads, sanitize_tags(tags_input), hint, context
+                    # 单题也沿用计划中的图形坐标，避免重复切题并进入 TikZ 重绘
+                    _process_plan(
+                        service, user, plan, [], sanitize_tags(tags_input), hint, context
                     )
                     st.session_state.pop("photo_plan", None)
                 else:
                     _render_candidate_review(
                         service, user, plan, tags_input, hint, context
                     )
+
+            entries = st.session_state.get("photo_entry_results", [])
+            if entries:
+                _render_entry_results(service, user, entries, unit="项")
 
     with tab_manual:
         _render_manual_entry(service, user)
@@ -256,6 +274,7 @@ def build_candidates(image_name: str, segments: list[dict]) -> list[dict]:
             "text": str(s.get("text", "") or "").strip(),
             "summary": summarize_stem(str(s.get("text", "") or "")),
             "likely_wrong": bool(s.get("likely_wrong", False)),
+            "figure_bboxes": list(s.get("figure_bboxes") or []),
         }
         for s in segments
     ]
@@ -283,7 +302,9 @@ def _plan_photo_entry(ai, images: list[tuple[str, bytes, str]]) -> dict:
             for cand in build_candidates(name, segments):
                 candidates.append({**cand, "image_bytes": data})
         else:
-            fallbacks.append({"name": name, "bytes": data, "mime": mime})
+            fallbacks.append(
+                {"name": name, "bytes": data, "mime": mime, "segments": segments or []}
+            )
     return {"candidates": candidates, "fallbacks": fallbacks}
 
 
@@ -319,6 +340,7 @@ def _save_checked_candidates(
                 user_tags=tags,
                 hint=hint,
                 image_path=path_cache[cand["image"]],
+                segment=cand,
                 subject=context["subject"],
                 grade=context["grade"],
                 region=context["region"],
@@ -375,7 +397,7 @@ def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: s
 
 
 def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str], hint: str, context: dict) -> None:
-    """批量入库：勾选题逐题解构 + 回退图整图解析，统一渲染结果。
+    """批量入库：勾选题逐题解构 + 回退图整图解析，保存结果供后续刷新渲染。
 
     进度用 st.status 分步展示（与同类题检测同一模式）：单题 AI 调用要
     20–60 秒，静态进度条在等待期间纹丝不动，用户会以为页面卡死。
@@ -405,6 +427,7 @@ def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str
                     mime_type=fb["mime"],
                     user_tags=tags,
                     hint=hint,
+                    segments=fb["segments"],
                     subject=context["subject"],
                     grade=context["grade"],
                     region=context["region"],
@@ -423,7 +446,7 @@ def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str
             )
         else:
             status.update(label=f"✅ {total} 道题全部录入完成", state="complete", expanded=False)
-    _render_entry_results(service, user, _collect_entries(results), unit="项")
+    st.session_state["photo_entry_results"] = _collect_entries(results)
 
 
 def _process_uploads(service, user, uploads, tags: list[str], hint: str, context: dict) -> None:
@@ -521,13 +544,13 @@ def _render_analysis(saved, analysis, service, user) -> None:
         if meta_bits:
             st.caption(" · ".join(meta_bits))
         st.markdown(f"**考点**：{'、'.join(analysis.knowledge_points)}")
-        st.markdown(analysis.analysis, unsafe_allow_html=True)
-        st.markdown(f"**正确答案**：{analysis.answer}")
+        render_markdown(analysis.analysis, unsafe_allow_html=True)
+        render_markdown(f"**正确答案**：{analysis.answer}")
         if analysis.mistake_cause:
             st.info(f"常见错因：{analysis.mistake_cause}")
         if analysis.followup_question:
             with st.expander("举一反三 · 变式练习"):
-                st.markdown(analysis.followup_question)
+                render_markdown(analysis.followup_question)
                 save_followup_button(service, saved, user, analysis.followup_question)
 
         st.divider()
@@ -536,7 +559,7 @@ def _render_analysis(saved, analysis, service, user) -> None:
             saved, user_id=user["id"], **_similar_constraints(saved)
         ).items
         if similar:
-            for q in similar:
+            for index, q in enumerate(similar):
                 source_mark = {"bank": "公共题库", "generated": "AI 变式"}.get(q.source)
                 prefix = f"[{source_mark}] " if source_mark else ""
                 st.markdown(
@@ -544,6 +567,19 @@ def _render_analysis(saved, analysis, service, user) -> None:
                     f"<span class='mm-muted'>{safe_truncate_math(q.content_markdown, 60)}</span>",
                     unsafe_allow_html=True,
                 )
+                render_figures(
+                    q.figure_paths or [], alt_prefix=f"题 {saved.id} 的同类题图形"
+                )
+                if q.source == "generated":
+                    save_followup_button(
+                        service,
+                        q,
+                        user,
+                        q.content_markdown,
+                        figure_paths=list(q.figure_paths or []),
+                        figure_specs=list(q.figure_specs or []),
+                        key_suffix=f"{saved.id}_{index}",
+                    )
         else:
             st.caption("暂无相似错题。随着错题积累，这里会自动出现同知识点的历史题目。")
 

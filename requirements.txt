@@ -38,5 +38,8 @@ Pillow>=10.3
 reportlab>=4.0
 alembic>=1.13
 
+# TikZ 几何图需要外部 TinyTeX / TeX Live 2026（不是 pip 依赖）。
+# 顶层宏包见 deploy/tinytex-requirements.txt；运行 scripts/install_tinytex.py 自动配置。
+
 # 可选：OCR 原图文字识别（.env 设 OCR_ENABLED=true 并安装后启用）
 # rapidocr-onnxruntime>=1.3

@@ -377,3 +377,181 @@ def test_segment_document_page_failure_fallback_under_concurrency(tmp_path):
     assert all(s.text.startswith(f"1. 第{s.page_start}页规则题") for s in segments)
     # 第 2 页视觉失败 → 规则单路标 needs_review；其余页双路对齐不标
     assert [s.needs_review for s in segments] == [False, True, False]
+
+
+class _StubFigureService:
+    def __init__(self, outcomes=None):
+        self.calls = []
+        self.outcomes = outcomes or {}
+
+    def redraw_segment(self, **kwargs):
+        from backend.services.geometry_figures import FigureOutcome
+
+        self.calls.append(kwargs)
+        key = (Path(kwargs["image_path"]).name, kwargs["number"])
+        return self.outcomes.get(
+            key,
+            FigureOutcome(
+                figure_paths=[f"{Path(kwargs['image_path']).stem}-{kwargs['number']}.png"],
+                figure_specs=[{
+                    "kind": "geometry",
+                    "semantic_spec": {"source": key[0]},
+                    "tikz_source": kwargs["number"],
+                    "render_path": None,
+                    "crop_path": None,
+                    "validation_status": "ai_passed",
+                    "validation_issues": [],
+                    "assumptions": [],
+                }],
+                needs_review=False,
+            ),
+        )
+
+
+def test_visual_segment_delegates_boxes_without_eager_locate_or_crop(tmp_path, monkeypatch):
+    from backend.services.ai.base import AnalysisContext
+    from backend.services.geometry_figures import FigureOutcome
+
+    class _NoSecondLocate(_StubSegmentProvider):
+        def locate_figures(self, image_bytes, items, mime_type="image/png"):
+            raise AssertionError("生产切题路径不应立即二次定位")
+
+    def _no_eager_crop(*args, **kwargs):
+        raise AssertionError("生产切题路径不应绕过图形服务立即裁剪")
+
+    monkeypatch.setattr("backend.services.figures.crop_figures", _no_eager_crop)
+    provider = _NoSecondLocate([
+        [{"number": "1", "text": "如图", "figure_bboxes": [[0, 0, 500, 500]]}]
+    ])
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {"shape": "triangle"},
+        "tikz_source": "\\draw (0,0)--(1,0);",
+        "render_path": "rendered.png",
+        "crop_path": None,
+        "validation_status": "fallback",
+        "validation_issues": ["需人工确认"],
+        "assumptions": [],
+    }
+    service = _StubFigureService({
+        ("page.png", "1"): FigureOutcome(["rendered.png"], [spec], True)
+    })
+    context = AnalysisContext(subject="math", grade=8, region="北京")
+    figures_dir = tmp_path / "figures"
+
+    segments = visual_segment_page(
+        provider,
+        _page_image(tmp_path),
+        1,
+        figures_dir=figures_dir,
+        figure_service=service,
+        context=context,
+    )
+
+    assert segments[0].figure_paths == ["rendered.png"]
+    assert segments[0].figure_specs == [spec]
+    assert segments[0].needs_review is True
+    assert len(service.calls) == 1
+    call = service.calls[0]
+    assert call["image_path"] == tmp_path / "page.png"
+    assert call["number"] == "1"
+    assert call["text"] == "如图"
+    assert call["figure_bboxes"] == [[0, 0, 500, 500]]
+    assert call["figures_dir"] == figures_dir
+    assert call["context"] is context
+
+
+def test_aligned_strategies_keep_visual_figure_data(tmp_path):
+    from backend.services.geometry_figures import FigureOutcome
+
+    provider = _StubSegmentProvider([
+        [{"number": "1", "text": "视觉题", "figure_bboxes": [[0, 0, 500, 500]]}]
+    ])
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {},
+        "tikz_source": "aligned",
+        "render_path": "aligned.png",
+        "crop_path": None,
+        "validation_status": "fallback",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    service = _StubFigureService({
+        ("page.png", "1"): FigureOutcome(["aligned.png"], [spec], True)
+    })
+    page = _page(1, "1. 规则题", image=_page_image(tmp_path))
+
+    segments = segment_document(
+        [page], provider, figures_dir=tmp_path / "figures", figure_service=service
+    )
+
+    assert segments[0].figure_paths == ["aligned.png"]
+    assert segments[0].figure_specs == [spec]
+    assert segments[0].needs_review is True
+    assert segments[0].text == "1. 规则题"
+
+
+def test_cross_page_join_preserves_figure_order(tmp_path):
+    from backend.services.geometry_figures import FigureOutcome
+
+    image1 = tmp_path / "first.png"
+    image2 = tmp_path / "second.png"
+    Image.new("RGB", (100, 100), "white").save(image1)
+    Image.new("RGB", (100, 100), "black").save(image2)
+    provider = _ConcurrencySegmentProvider({
+        image1.read_bytes(): {
+            "page_no": 1,
+            "items": [{
+                "number": "1",
+                "text": "上半",
+                "continues_to_next": True,
+                "figure_bboxes": [[0, 0, 400, 400]],
+            }],
+        },
+        image2.read_bytes(): {
+            "page_no": 2,
+            "items": [{
+                "number": "1",
+                "text": "下半",
+                "continued_from_prev": True,
+                "figure_bboxes": [[500, 500, 1000, 1000]],
+            }],
+        },
+    })
+    first_spec = {
+        "kind": "geometry",
+        "semantic_spec": {"part": 1},
+        "tikz_source": "first",
+        "render_path": "first-figure.png",
+        "crop_path": None,
+        "validation_status": "ai_passed",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    second_spec = {
+        "kind": "geometry",
+        "semantic_spec": {"part": 2},
+        "tikz_source": "second",
+        "render_path": None,
+        "crop_path": "second-figure.png",
+        "validation_status": "fallback",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    service = _StubFigureService({
+        ("first.png", "1"): FigureOutcome(["first-figure.png"], [first_spec], False),
+        ("second.png", "1"): FigureOutcome(["second-figure.png"], [second_spec], True),
+    })
+
+    segments = segment_document(
+        [_page(1, "", scanned=True, image=image1), _page(2, "", scanned=True, image=image2)],
+        provider,
+        figures_dir=tmp_path / "figures",
+        figure_service=service,
+    )
+
+    assert len(segments) == 1
+    assert segments[0].figure_paths == ["first-figure.png", "second-figure.png"]
+    assert segments[0].figure_specs == [first_spec, second_spec]
+    assert segments[0].needs_review is True

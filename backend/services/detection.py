@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import re
 import unicodedata
@@ -203,6 +204,8 @@ class DetectionMixin:
             "tested": {
                 "source": tested.source,
                 "content": tested.content_markdown,
+                "figure_paths": list(tested.figure_paths or []),
+                "figure_specs": [spec.model_dump() for spec in tested.figure_specs],
                 "knowledge_points": tested.knowledge_points,
                 "difficulty": tested.difficulty,
             },
@@ -213,9 +216,16 @@ class DetectionMixin:
         """generated 题的参考答案：即时走 AI 文本解析（失败时留空，判分必 wrong）。"""
         from backend.services.ai.base import AnalysisContext
 
+        figure_hints = [
+            f"新图 {index} 语义：{json.dumps(spec.semantic_spec, ensure_ascii=False)}\n"
+            f"新图 {index} 假设：{json.dumps(spec.assumptions, ensure_ascii=False)}"
+            for index, spec in enumerate(tested.figure_specs, start=1)
+        ]
+        hint = "\n".join(figure_hints)
         try:
             analysis = self.ai.analyze_text(
                 tested.content_markdown[:4000],
+                hint=hint,
                 context=AnalysisContext(
                     subject=source.subject or "math",
                     grade=source.grade,

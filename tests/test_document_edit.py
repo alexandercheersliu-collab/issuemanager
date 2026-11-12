@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import time
+import uuid
 
 import pytest
 from doc_samples import make_text_pdf
+from PIL import Image
 
+from backend.database import SessionLocal
+from backend.models.orm import Job
+from backend.models.schemas import FigureSpec
 from backend.services.document_service import DocumentService
+from backend.services.geometry_figures import FigureOutcome, GeometryFigureService
+from backend.services.tikz import TikzRenderer
 
 
 def _wait_job(service: DocumentService, job_id: str, user_id: int, timeout: float = 30.0) -> dict:
@@ -72,11 +79,40 @@ def test_update_segment_rejects_invalid_job_and_index(student_user, tmp_path):
 
 def test_merge_segments(student_user, tmp_path):
     service, job_id = _import_and_wait(student_user, tmp_path, "merge.pdf")
+    first_spec = {
+        "kind": "geometry",
+        "semantic_spec": {"part": 1},
+        "tikz_source": "first",
+        "render_path": "first.png",
+        "crop_path": None,
+        "validation_status": "ai_passed",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    second_spec = {
+        "kind": "geometry",
+        "semantic_spec": {"part": 2},
+        "tikz_source": "second",
+        "render_path": None,
+        "crop_path": "second.png",
+        "validation_status": "fallback",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = ["first.png"]
+    result["segments"][0]["figure_specs"] = [first_spec]
+    result["segments"][1]["figure_paths"] = ["second.png"]
+    result["segments"][1]["figure_specs"] = [second_spec]
+    service._save_result(job_id, result)
 
     merged = service.merge_segments(job_id, student_user.id, 0)
     assert "校对题一" in merged["text"] and "校对题二" in merged["text"]
     assert merged["needs_review"] is True  # 结构变动需人工确认
     assert merged["analysis"] is not None  # 解构结果优先保留前者
+    assert merged["figure_paths"] == ["first.png", "second.png"]
+    assert merged["figure_specs"] == [first_spec, second_spec]
 
     segments = _segments(service, job_id, student_user.id)
     assert len(segments) == 1
@@ -90,10 +126,29 @@ def test_merge_segments(student_user, tmp_path):
 
 def test_split_segment(student_user, tmp_path):
     service, job_id = _import_and_wait(student_user, tmp_path, "split.pdf")
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {"part": 1},
+        "tikz_source": "first",
+        "render_path": "first.png",
+        "crop_path": None,
+        "validation_status": "ai_passed",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = ["first.png"]
+    result["segments"][0]["figure_specs"] = [spec]
+    service._save_result(job_id, result)
     original = _segments(service, job_id, student_user.id)[0]
     split_at = len(original["text"]) // 2
 
     first, second = service.split_segment(job_id, student_user.id, 0, split_at)
+    assert first["figure_paths"] == ["first.png"]
+    assert second["figure_paths"] == []
+    assert first["figure_specs"] == [spec]
+    assert second["figure_specs"] == []
     assert first["text"] + "" != ""
     assert first["text"] == original["text"][:split_at].rstrip()
     assert second["text"] == original["text"][split_at:].lstrip()
@@ -166,6 +221,468 @@ def test_confirm_reports_skipped(question_service, student_user, tmp_path):
     again = service.confirm_import(job_id, student_user.id)
     assert again["already_confirmed"] is True
     assert again["skipped"] == outcome["skipped"]  # 幂等返回既有跳过明细
+
+
+# ---------- TikZ 图形校对 ----------
+
+
+def _figure_job(student_user, tmp_path):
+    page = tmp_path / "page.png"
+    Image.new("RGB", (40, 30), "white").save(page)
+    old_spec = FigureSpec(
+        kind="geometry",
+        semantic_spec={"points": ["A", "B"]},
+        tikz_source="old tikz",
+        render_path="old-render.png",
+        crop_path=None,
+        validation_status="ai_passed",
+        validation_issues=[],
+        assumptions=["旧图假设"],
+    ).model_dump()
+    job_id = uuid.uuid4().hex
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                id=job_id,
+                user_id=student_user.id,
+                type="document_import",
+                status="success",
+                payload={"filename": "figure.pdf"},
+                result={
+                    "confirmed": False,
+                    "page_images": [str(page)],
+                    "segments": [
+                        {
+                            "number": "1",
+                            "text": "如图，求 AB。",
+                            "page_start": 1,
+                            "page_end": 1,
+                            "needs_review": False,
+                            "figure_paths": ["old-render.png"],
+                            "figure_specs": [old_spec],
+                        }
+                    ],
+                },
+            )
+        )
+        session.commit()
+    return DocumentService(), job_id, old_spec
+
+
+def test_answer_only_edit_preserves_fallback_review_requirement(student_user, tmp_path):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    fallback = dict(
+        old_spec,
+        render_path=None,
+        crop_path="fallback-crop.png",
+        validation_status="fallback",
+        validation_issues=["对比未通过"],
+    )
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_specs"] = [fallback]
+    result["segments"][0]["figure_paths"] = ["fallback-crop.png"]
+    service._save_result(job_id, result)
+
+    entry = service.update_segment(
+        job_id,
+        student_user.id,
+        0,
+        analysis_updates={"answer": "AB=2"},
+    )
+
+    assert entry["analysis"]["answer"] == "AB=2"
+    assert entry["needs_review"] is True
+    assert entry["figure_specs"] == [fallback]
+    assert entry["figure_paths"] == ["fallback-crop.png"]
+
+
+def test_stem_edit_invalidates_passed_comparison_but_preserves_current_figure(
+    student_user, tmp_path
+):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+
+    entry = service.update_segment(
+        job_id,
+        student_user.id,
+        0,
+        text="如图，AB 已改为 4，求 BC。",
+    )
+
+    spec = entry["figure_specs"][0]
+    assert spec["validation_status"] == "fallback"
+    assert any("题干" in issue and "对比" in issue for issue in spec["validation_issues"])
+    assert spec["render_path"] == "old-render.png"
+    assert entry["figure_paths"] == ["old-render.png"]
+    assert entry["needs_review"] is True
+
+
+class _ReviewService:
+    def __init__(self, *, spec=None, error=None):
+        self.spec = spec
+        self.error = error
+        self.calls = []
+
+    def review_tikz(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.spec
+
+
+class _RedrawService:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = []
+
+    def redraw_segment(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.outcome
+
+
+def test_reanalyze_legacy_segment_rebuilds_missing_figure_specs(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0].pop("figure_paths")
+    result["segments"][0].pop("figure_specs")
+    service._save_result(job_id, result)
+
+    import backend.services.ai as ai_services
+
+    provider = ai_services.get_ai_service(service.settings)
+    monkeypatch.setattr(
+        provider,
+        "locate_figures",
+        lambda image_bytes, items, mime_type: [[[0, 0, 1000, 1000]]],
+    )
+    monkeypatch.setattr(ai_services, "get_ai_service", lambda settings: provider)
+    outcome = FigureOutcome(
+        figure_paths=["restored-render.png"],
+        figure_specs=[old_spec],
+        needs_review=False,
+    )
+    redraw = _RedrawService(outcome)
+    monkeypatch.setattr(GeometryFigureService, "from_settings", lambda ai, settings: redraw)
+
+    entry = service.reanalyze_segment(job_id, student_user.id, 0)
+
+    assert entry["figure_paths"] == ["restored-render.png"]
+    assert entry["figure_specs"] == [old_spec]
+    assert entry["needs_review"] is False
+    persisted = _segments(service, job_id, student_user.id)[0]
+    assert persisted["figure_specs"] == [old_spec]
+
+
+def _reject_figure_rebuild(monkeypatch, service):
+    import backend.services.ai as ai_services
+
+    provider = ai_services.get_ai_service(service.settings)
+
+    def unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("existing figure specs must not be rebuilt")
+
+    monkeypatch.setattr(provider, "locate_figures", unexpected_rebuild)
+    monkeypatch.setattr(ai_services, "get_ai_service", lambda settings: provider)
+    monkeypatch.setattr(GeometryFigureService, "from_settings", unexpected_rebuild)
+
+
+def test_reanalyze_preserves_existing_figure_specs_without_rebuild(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    _reject_figure_rebuild(monkeypatch, service)
+
+    entry = service.reanalyze_segment(job_id, student_user.id, 0)
+
+    assert entry["figure_paths"] == ["old-render.png"]
+    assert entry["figure_specs"] == [old_spec]
+    assert entry["needs_review"] is False
+    persisted = _segments(service, job_id, student_user.id)[0]
+    assert persisted["figure_specs"] == [old_spec]
+
+
+def test_reanalyze_preserves_fallback_review_requirement(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    fallback = dict(
+        old_spec,
+        render_path=None,
+        crop_path="fallback-crop.png",
+        validation_status="fallback",
+    )
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = ["fallback-crop.png"]
+    result["segments"][0]["figure_specs"] = [fallback]
+    service._save_result(job_id, result)
+    _reject_figure_rebuild(monkeypatch, service)
+
+    entry = service.reanalyze_segment(job_id, student_user.id, 0)
+
+    assert entry["figure_paths"] == ["fallback-crop.png"]
+    assert entry["figure_specs"] == [fallback]
+    assert entry["needs_review"] is True
+    persisted = _segments(service, job_id, student_user.id)[0]
+    assert persisted["figure_specs"] == [fallback]
+    assert persisted["needs_review"] is True
+
+
+def test_recompile_figure_rejects_other_users_and_out_of_range_indices(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+    reviewer = _ReviewService()
+    monkeypatch.setattr(GeometryFigureService, "from_settings", lambda ai, settings: reviewer)
+
+    with pytest.raises(LookupError):
+        service.recompile_segment_figure(
+            job_id, student_user.id + 999, 0, 0, tikz_source="user tikz"
+        )
+    with pytest.raises(IndexError):
+        service.recompile_segment_figure(
+            job_id, student_user.id, 4, 0, tikz_source="user tikz"
+        )
+    with pytest.raises(IndexError):
+        service.recompile_segment_figure(
+            job_id, student_user.id, 0, 3, tikz_source="user tikz"
+        )
+    assert reviewer.calls == []
+
+
+def test_recompile_figure_rejects_dangerous_tikz_and_preserves_valid_figure(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    geometry = GeometryFigureService(
+        object(),
+        TikzRenderer(tmp_path / "missing-pdflatex", tmp_path / "artifacts"),
+    )
+    monkeypatch.setattr(GeometryFigureService, "from_settings", lambda ai, settings: geometry)
+    before = _segments(service, job_id, student_user.id)[0]
+
+    with pytest.raises(ValueError, match="Dangerous LaTeX command"):
+        service.recompile_segment_figure(
+            job_id,
+            student_user.id,
+            0,
+            0,
+            tikz_source=r"\begin{tikzpicture}\immediate\write18{echo bad}\end{tikzpicture}",
+        )
+
+    after = _segments(service, job_id, student_user.id)[0]
+    assert after["figure_specs"] == [old_spec]
+    assert after == before
+
+
+def test_recompile_figure_compile_failure_preserves_valid_figure(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    reviewer = _ReviewService(error=RuntimeError("compile failed"))
+    monkeypatch.setattr(GeometryFigureService, "from_settings", lambda ai, settings: reviewer)
+    before = _segments(service, job_id, student_user.id)[0]
+
+    with pytest.raises(RuntimeError, match="compile failed"):
+        service.recompile_segment_figure(
+            job_id, student_user.id, 0, 0, tikz_source="broken tikz"
+        )
+
+    after = _segments(service, job_id, student_user.id)[0]
+    assert after["figure_specs"] == [old_spec]
+    assert after == before
+
+
+def test_recompile_failed_comparison_preserves_trusted_path_until_accepted(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+    reviewed = FigureSpec(
+        kind="geometry",
+        semantic_spec={"points": ["C", "D"]},
+        tikz_source="user tikz",
+        render_path="new-render.png",
+        crop_path=None,
+        validation_status="fallback",
+        validation_issues=["请人工核对"],
+        assumptions=["新图假设"],
+    )
+    reviewer = _ReviewService(spec=reviewed)
+    monkeypatch.setattr(GeometryFigureService, "from_settings", lambda ai, settings: reviewer)
+
+    entry = service.recompile_segment_figure(
+        job_id, student_user.id, 0, 0, tikz_source="user tikz"
+    )
+
+    assert entry["figure_paths"] == ["old-render.png"]
+    assert entry["figure_specs"] == [reviewed.model_dump()]
+    assert entry["needs_review"] is True
+    assert reviewer.calls[0]["tikz_source"] == "user tikz"
+    assert reviewer.calls[0]["draft"].tikz_source == "old tikz"
+    assert reviewer.calls[0]["figure_box"] is None
+    persisted = _segments(service, job_id, student_user.id)[0]
+    assert persisted["figure_specs"][0]["validation_status"] == "fallback"
+    assert persisted["figure_paths"] == ["old-render.png"]
+
+    accepted = service.accept_segment_figure(job_id, student_user.id, 0, 0)
+
+    assert accepted["figure_paths"] == ["new-render.png"]
+    assert accepted["figure_specs"][0]["validation_status"] == "manual_passed"
+    assert accepted["needs_review"] is False
+
+
+def test_recompile_failed_comparison_preserves_other_figure_paths(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, old_spec = _figure_job(student_user, tmp_path)
+    second = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 2},
+        tikz_source="second old",
+        render_path="second-render.png",
+        crop_path=None,
+        validation_status="ai_passed",
+        validation_issues=[],
+        assumptions=[],
+    ).model_dump()
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_specs"] = [old_spec, second]
+    result["segments"][0]["figure_paths"] = ["old-render.png", "second-render.png"]
+    service._save_result(job_id, result)
+    reviewed = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 1},
+        tikz_source="first reviewed",
+        render_path="first-candidate.png",
+        crop_path=None,
+        validation_status="fallback",
+        validation_issues=["题干与新图不符"],
+        assumptions=[],
+    )
+    monkeypatch.setattr(
+        GeometryFigureService,
+        "from_settings",
+        lambda ai, settings: _ReviewService(spec=reviewed),
+    )
+
+    entry = service.recompile_segment_figure(
+        job_id, student_user.id, 0, 0, tikz_source="first reviewed"
+    )
+
+    assert entry["figure_paths"] == ["old-render.png", "second-render.png"]
+    assert entry["figure_specs"][0]["render_path"] == "first-candidate.png"
+    assert entry["figure_specs"][1] == second
+
+
+def _set_two_figures_with_first_path_missing(service, job_id, user_id):
+    first = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 1},
+        tikz_source="first old",
+        render_path=None,
+        crop_path=None,
+        validation_status="fallback",
+        validation_issues=["裁剪失败"],
+        assumptions=[],
+    ).model_dump()
+    second = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 2},
+        tikz_source="second old",
+        render_path="second-render.png",
+        crop_path=None,
+        validation_status="ai_passed",
+        validation_issues=[],
+        assumptions=[],
+    ).model_dump()
+    job = service.get_job(job_id, user_id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = ["second-render.png"]
+    result["segments"][0]["figure_specs"] = [first, second]
+    service._save_result(job_id, result)
+
+
+def test_recompile_first_figure_rebuilds_paths_when_earlier_path_was_missing(
+    student_user, tmp_path, monkeypatch
+):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+    _set_two_figures_with_first_path_missing(service, job_id, student_user.id)
+    reviewed = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 1},
+        tikz_source="first reviewed",
+        render_path="first-reviewed.png",
+        crop_path=None,
+        validation_status="ai_passed",
+        validation_issues=[],
+        assumptions=[],
+    )
+    monkeypatch.setattr(
+        GeometryFigureService,
+        "from_settings",
+        lambda ai, settings: _ReviewService(spec=reviewed),
+    )
+
+    entry = service.recompile_segment_figure(
+        job_id, student_user.id, 0, 0, tikz_source="first reviewed"
+    )
+
+    assert entry["figure_paths"] == ["first-reviewed.png", "second-render.png"]
+
+
+def test_accept_second_figure_does_not_duplicate_its_compacted_path(student_user, tmp_path):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+    _set_two_figures_with_first_path_missing(service, job_id, student_user.id)
+
+    entry = service.accept_segment_figure(job_id, student_user.id, 0, 1)
+
+    assert entry["figure_paths"] == ["second-render.png"]
+    assert entry["figure_specs"][1]["validation_status"] == "manual_passed"
+
+
+def test_accept_figure_preserves_other_fallback_crop_path(student_user, tmp_path):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    first = result["segments"][0]["figure_specs"][0]
+    fallback = FigureSpec(
+        kind="geometry",
+        semantic_spec={"figure": 2},
+        tikz_source="fallback tikz",
+        render_path="fallback-redraw.png",
+        crop_path="fallback-crop.png",
+        validation_status="fallback",
+        validation_issues=["对比未通过"],
+        assumptions=[],
+    ).model_dump()
+    result["segments"][0]["figure_specs"] = [first, fallback]
+    result["segments"][0]["figure_paths"] = ["old-render.png", "fallback-crop.png"]
+    service._save_result(job_id, result)
+
+    entry = service.accept_segment_figure(job_id, student_user.id, 0, 0)
+
+    assert entry["figure_paths"] == ["old-render.png", "fallback-crop.png"]
+    assert entry["figure_specs"][1] == fallback
+
+
+def test_accept_figure_requires_a_compiled_render(student_user, tmp_path):
+    service, job_id, _ = _figure_job(student_user, tmp_path)
+
+    entry = service.accept_segment_figure(job_id, student_user.id, 0, 0)
+    assert entry["figure_specs"][0]["validation_status"] == "manual_passed"
+
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_specs"][0].update(
+        {"render_path": None, "crop_path": "fallback.png", "validation_status": "fallback"}
+    )
+    service._save_result(job_id, result)
+    with pytest.raises(ValueError, match="成功编译"):
+        service.accept_segment_figure(job_id, student_user.id, 0, 0)
 
 
 # ---------- API 级：校对编辑端点 ----------

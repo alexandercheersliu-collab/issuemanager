@@ -143,6 +143,7 @@ class DocumentService:
         """完整管线：解析 → 双策略切题 → 逐题结构化解构（进度写入 result）。"""
         from backend.services.ai import get_ai_service
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeometryFigureService
         from backend.services.segment import segment_document
 
         with SessionLocal() as session:
@@ -167,7 +168,15 @@ class DocumentService:
                 region=payload.get("region"),
                 textbook_version=payload.get("textbook_version"),
             )
-            segments = segment_document(pages, ai, max_workers=self.settings.import_concurrency)
+            figure_service = GeometryFigureService.from_settings(ai, self.settings)
+            segments = segment_document(
+                pages,
+                ai,
+                max_workers=self.settings.import_concurrency,
+                figures_dir=work_dir / "figures",
+                figure_service=figure_service,
+                context=context,
+            )
 
             result: dict = {
                 "pages": len(pages),
@@ -196,6 +205,8 @@ class DocumentService:
                     "needs_review": segment.needs_review,
                     "continued": segment.continued,
                     "source": segment.source,
+                    "figure_paths": list(segment.figure_paths),
+                    "figure_specs": list(segment.figure_specs),
                     "analysis": None,
                     "error": None,
                 }
@@ -323,22 +334,37 @@ class DocumentService:
         text: str | None = None,
         analysis_updates: dict | None = None,
     ) -> dict:
-        """编辑题干与解构字段（白名单内逐字段覆盖，可手工补齐解构失败的题）。
-
-        人工编辑即视为已校对：清除 needs_review 与 error。
-        """
+        """编辑题干与解构字段；题干变化后要求重新进行图文对比。"""
         result, _ = self._load_editable(job_id, user_id)
         entry = self._segment_at(result, index)
+        text_changed = False
         if text is not None and text.strip():
-            entry["text"] = text.strip()
+            updated_text = text.strip()
+            text_changed = updated_text != entry.get("text")
+            entry["text"] = updated_text
         if analysis_updates:
             analysis = dict(entry.get("analysis") or {})
             for key, value in analysis_updates.items():
                 if key in self.EDITABLE_ANALYSIS_FIELDS:
                     analysis[key] = value
             entry["analysis"] = analysis
+        if text_changed:
+            specs = []
+            for current in entry.get("figure_specs") or []:
+                spec = dict(current)
+                if spec.get("validation_status") in {"ai_passed", "manual_passed"}:
+                    spec["validation_status"] = "fallback"
+                    spec["validation_issues"] = [
+                        *(spec.get("validation_issues") or []),
+                        "题干已修改，需重新进行图文对比",
+                    ]
+                specs.append(spec)
+            entry["figure_specs"] = specs
         entry["error"] = None
-        entry["needs_review"] = False
+        entry["needs_review"] = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
         self._save_edit(job_id, result, "update", index, f"编辑题 {entry.get('number')}")
         logger.info("校对编辑 job=%s index=%s", job_id, index)
         return entry
@@ -361,6 +387,14 @@ class DocumentService:
             "needs_review": True,
             "continued": first.get("continued", False),
             "source": first.get("source", "merged"),
+            "figure_paths": [
+                *(first.get("figure_paths") or []),
+                *(second.get("figure_paths") or []),
+            ],
+            "figure_specs": [
+                *(first.get("figure_specs") or []),
+                *(second.get("figure_specs") or []),
+            ],
             "analysis": first.get("analysis") or second.get("analysis"),
             "error": None,
         }
@@ -393,6 +427,8 @@ class DocumentService:
             "error": None,
             "needs_review": True,
             "continued": False,
+            "figure_paths": [],
+            "figure_specs": [],
         }
         result["segments"][index : index + 1] = [first, second]
         self._save_edit(
@@ -410,12 +446,13 @@ class DocumentService:
         logger.info("校对删除 job=%s index=%s", job_id, index)
 
     def reanalyze_segment(self, job_id: str, user_id: int, index: int) -> dict:
-        """单题重新解构：调既有 AI 文本解析管线，成功后清除 needs_review。
+        """单题重新解构，并为旧任务补齐图形定位与重绘结果。
 
         失败时错误落回 entry（needs_review 保持）并抛 RuntimeError，供界面提示。
         """
         from backend.services.ai import get_ai_service
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeometryFigureService
 
         result, payload = self._load_editable(job_id, user_id)
         entry = self._segment_at(result, index)
@@ -426,7 +463,35 @@ class DocumentService:
             region=payload.get("region"),
             textbook_version=payload.get("textbook_version"),
         )
+        figure_needs_review = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
         try:
+            if "figure_specs" not in entry:
+                page_images = result.get("page_images") or []
+                page_start = entry.get("page_start")
+                if isinstance(page_start, int) and 0 < page_start <= len(page_images):
+                    image_path = page_images[page_start - 1]
+                    if image_path:
+                        located = ai.locate_figures(
+                            Path(image_path).read_bytes(),
+                            [{"number": entry.get("number"), "text": entry["text"]}],
+                            "image/png",
+                        )
+                        outcome = GeometryFigureService.from_settings(
+                            ai, self.settings
+                        ).redraw_segment(
+                            image_path=Path(image_path),
+                            number=entry.get("number"),
+                            text=entry["text"],
+                            figure_bboxes=located[0] if located else [],
+                            figures_dir=Path(image_path).parent / "figures",
+                            context=context,
+                        )
+                        entry["figure_paths"] = list(outcome.figure_paths)
+                        entry["figure_specs"] = list(outcome.figure_specs)
+                        figure_needs_review = outcome.needs_review
             analysis = ai.analyze_text(entry["text"][:4000], context=context)
         except Exception as exc:  # noqa: BLE001 - 错误落库供界面展示
             entry["error"] = str(exc)
@@ -435,9 +500,124 @@ class DocumentService:
             raise RuntimeError(f"重新解析失败: {exc}") from exc
         entry["analysis"] = analysis.model_dump(mode="json")
         entry["error"] = None
-        entry["needs_review"] = False
+        entry["needs_review"] = figure_needs_review
         self._save_edit(job_id, result, "reanalyze", index, f"重解析题 {entry.get('number')}")
         logger.info("校对重解析 job=%s index=%s", job_id, index)
+        return entry
+
+    @staticmethod
+    def _figure_spec_at(entry: dict, figure_index: int) -> dict:
+        specs = entry.get("figure_specs") or []
+        if not 0 <= figure_index < len(specs):
+            raise IndexError(f"图序号越界: {figure_index}（共 {len(specs)} 图）")
+        return specs[figure_index]
+
+    @staticmethod
+    def _effective_figure_path(spec: dict) -> str | None:
+        if spec.get("validation_status") == "fallback":
+            return spec.get("crop_path") or spec.get("render_path")
+        return spec.get("render_path") or spec.get("crop_path")
+
+    @classmethod
+    def _refresh_figure_paths(
+        cls, entry: dict, *, preserved_paths: dict[int, str | None] | None = None
+    ) -> None:
+        paths = []
+        for index, spec in enumerate(entry.get("figure_specs") or []):
+            if (
+                spec.get("validation_status") == "fallback"
+                and not spec.get("crop_path")
+                and preserved_paths is not None
+                and index in preserved_paths
+            ):
+                path = preserved_paths[index]
+            else:
+                path = cls._effective_figure_path(spec)
+            if path:
+                paths.append(path)
+        entry["figure_paths"] = paths
+        entry["needs_review"] = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
+
+    def recompile_segment_figure(
+        self,
+        job_id: str,
+        user_id: int,
+        index: int,
+        figure_index: int,
+        *,
+        tikz_source: str,
+    ) -> dict:
+        """只重编译用户提供的 TikZ；任何编译或对比异常均不改动旧图。"""
+        from backend.models.schemas import GeometryFigureDraft
+        from backend.services.ai import get_ai_service
+        from backend.services.geometry_figures import GeometryFigureService
+
+        result, _ = self._load_editable(job_id, user_id)
+        entry = self._segment_at(result, index)
+        spec = self._figure_spec_at(entry, figure_index)
+        page_images = result.get("page_images") or []
+        page_start = entry.get("page_start")
+        if not isinstance(page_start, int) or not 0 < page_start <= len(page_images):
+            raise ValueError("缺少原图参考，无法重新校对图形")
+        image_path = page_images[page_start - 1]
+        if not image_path:
+            raise ValueError("缺少原图参考，无法重新校对图形")
+        draft = GeometryFigureDraft(
+            kind=spec.get("kind") or "geometry",
+            semantic_spec=dict(spec.get("semantic_spec") or {}),
+            tikz_source=spec.get("tikz_source") or "",
+            assumptions=list(spec.get("assumptions") or []),
+        )
+        figures = GeometryFigureService.from_settings(get_ai_service(self.settings), self.settings)
+        reviewed = figures.review_tikz(
+            image_path=Path(image_path),
+            text=entry.get("text") or "",
+            figure_box=None,
+            draft=draft,
+            tikz_source=tikz_source,
+        )
+        if not reviewed.render_path:
+            raise RuntimeError("TikZ 编译未产生有效图形，已保留原图")
+        entry["figure_specs"][figure_index] = reviewed.model_dump(mode="json")
+        self._refresh_figure_paths(
+            entry,
+            preserved_paths={figure_index: self._effective_figure_path(spec)},
+        )
+        self._save_edit(
+            job_id,
+            result,
+            "recompile_figure",
+            index,
+            f"重新编译题 {entry.get('number')} 的第 {figure_index + 1} 张图",
+        )
+        logger.info("校对图形重编译 job=%s index=%s figure=%s", job_id, index, figure_index)
+        return entry
+
+    def accept_segment_figure(
+        self, job_id: str, user_id: int, index: int, figure_index: int
+    ) -> dict:
+        """人工确认已有成功渲染图；裁剪兜底图不能冒充编译成功图。"""
+        result, _ = self._load_editable(job_id, user_id)
+        entry = self._segment_at(result, index)
+        current = self._figure_spec_at(entry, figure_index)
+        render_path = current.get("render_path")
+        if not render_path:
+            raise ValueError("仅成功编译并产生渲染图后才能人工确认")
+        spec = dict(current)
+        spec["validation_status"] = "manual_passed"
+        entry["figure_specs"][figure_index] = spec
+        self._refresh_figure_paths(entry)
+        self._save_edit(
+            job_id,
+            result,
+            "accept_figure",
+            index,
+            f"人工确认题 {entry.get('number')} 的第 {figure_index + 1} 张图",
+        )
+        logger.info("人工确认图形 job=%s index=%s figure=%s", job_id, index, figure_index)
         return entry
 
     # ---------- 确认入库 ----------
@@ -520,6 +700,8 @@ class DocumentService:
                     error_category=analysis.get("error_category") or None,
                     source_doc=f"{filename}#{page_label}",
                     image_path=image_path,
+                    figure_paths=list(entry.get("figure_paths") or []),
+                    figure_specs=list(entry.get("figure_specs") or []),
                 )
                 imported += 1
             except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷入库
