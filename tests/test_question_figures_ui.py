@@ -305,9 +305,7 @@ def test_import_review_recompile_and_accept_buttons_call_document_service(tmp_pa
     )
 
     assert not at.exception
-    recompile = next(
-        button for button in at.form_submit_button if "重新编译并对比" in button.label
-    )
+    recompile = next(button for button in at.button if "重新编译并对比" in button.label)
     recompile.click().run()
 
     assert not at.exception

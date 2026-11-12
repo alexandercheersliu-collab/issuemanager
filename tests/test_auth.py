@@ -77,7 +77,7 @@ finally:
     assert not at.exception
     at.text_input[0].set_value("demo")
     at.text_input[1].set_value("demo123")
-    at.form_submit_button[0].click().run()
+    at.button[0].click().run()
 
     assert not at.exception
     assert at.session_state["auth_cleared"] is True
