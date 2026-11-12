@@ -1,6 +1,8 @@
 """整卷导入校对界面的纯函数测试：统计与列表标题（不启动 Streamlit 运行时）。"""
 from __future__ import annotations
 
+from streamlit.testing.v1 import AppTest
+
 from frontend.pages import import_doc
 from frontend.pages.import_doc import (
     segment_headline,
@@ -109,6 +111,26 @@ def test_segment_preview_markdown_includes_all_rendered_sections():
     assert "**变式练习**：不等式组" in preview
 
 
+def test_segment_preview_normalizes_multiline_display_math():
+    segment = _segment(
+        analysis={
+            "analysis": (
+                "于是\n$$|\\vec{BD_1}|^2=|\\mathbf b+\\mathbf c-\\mathbf a|^2\n"
+                "=4+4+4+2\\times2-2\\times2-2\\times2=8.$$\n"
+                "因此 $|\\vec{BD_1}|=\\sqrt8=2\\sqrt2$，选 D。"
+            )
+        }
+    )
+
+    preview = segment_preview_markdown(segment)
+
+    assert (
+        "于是\n\n$$\n|\\vec{BD_1}|^2=|\\mathbf b+\\mathbf c-\\mathbf a|^2\n"
+        "=4+4+4+2\\times2-2\\times2-2\\times2=8.\n$$\n\n"
+        "因此 $|\\vec{BD_1}|=\\sqrt8=2\\sqrt2$，选 D。"
+    ) in preview
+
+
 def test_segment_preview_markdown_skips_missing_fields():
     # 无解析结果（解构失败）时只渲染题干；完全为空返回空串
     assert segment_preview_markdown(_segment(analysis=None)) == "已知 x^2=9，求 x 的值。"
@@ -129,3 +151,39 @@ def test_segment_page_image_returns_none_when_unavailable():
     assert import_doc.segment_page_image([], _segment(page_start=1, page_end=1)) is None
     assert import_doc.segment_page_image([None], _segment(page_start=1, page_end=1)) is None
     assert import_doc.segment_page_image(["p1.jpg"], _segment(page_start=2, page_end=2)) is None
+
+
+def test_selecting_new_upload_clears_previous_job_result():
+    script = """
+import streamlit as st
+from frontend.pages import import_doc
+
+class FakeDocumentService:
+    def get_job(self, job_id, user_id):
+        return {
+            'job_id': job_id,
+            'status': 'success',
+            'payload': {'filename': 'old.jpg', 'subject': 'math'},
+            'result': {'confirmed': True, 'imported': 1, 'skipped': []},
+            'error': None,
+        }
+
+if 'test_initialized' not in st.session_state:
+    st.session_state['import_doc_job_id'] = 'old-job'
+    st.session_state['import_doc_context_job'] = 'old-job'
+    st.session_state['import_doc_outcome'] = {'imported': 1}
+    st.session_state['test_initialized'] = True
+import_doc.DocumentService = FakeDocumentService
+import_doc.render_import_doc_page({'id': 1})
+"""
+    at = AppTest.from_string(script, default_timeout=15).run()
+    assert not at.exception
+    assert any("已确认入库 1 题" in alert.value for alert in at.success)
+
+    at.get("file_uploader")[0].upload("new.jpg", b"new image", "image/jpeg").run()
+
+    assert not at.exception
+    assert not at.success
+    assert "import_doc_job_id" not in at.session_state
+    assert "import_doc_context_job" not in at.session_state
+    assert "import_doc_outcome" not in at.session_state

@@ -164,6 +164,71 @@ def test_import_single_image(question_service, student_user, tmp_path):
     assert job["result"]["scanned_pages"] == 1
 
 
+def test_import_image_saves_geometry_figure_outcome(
+    question_service, student_user, tmp_path, monkeypatch
+):
+    from backend.services.ai.mock import MockProvider
+    from backend.services.geometry_figures import FigureOutcome, GeometryFigureService
+
+    class _FigureProvider(MockProvider):
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [{
+                "number": "1",
+                "text": "如图，求线段长度。",
+                "figure_bboxes": [[0, 0, 500, 500]],
+                "continued_from_prev": False,
+                "continues_to_next": False,
+            }]
+
+    class _FigureService:
+        def __init__(self, figure_path, spec):
+            self.figure_path = figure_path
+            self.spec = spec
+            self.calls = []
+
+        def redraw_segment(self, **kwargs):
+            self.calls.append(kwargs)
+            return FigureOutcome([str(self.figure_path)], [self.spec], False)
+
+    figure_path = tmp_path / "redrawn.png"
+    make_image(figure_path)
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {"shape": "triangle"},
+        "tikz_source": "\\draw (0,0)--(1,0);",
+        "render_path": str(figure_path),
+        "crop_path": None,
+        "validation_status": "ai_passed",
+        "validation_issues": [],
+        "assumptions": [],
+    }
+    figure_service = _FigureService(figure_path, spec)
+    provider = _FigureProvider()
+    created_with = []
+
+    def _from_settings(cls, ai, settings):
+        created_with.append((ai, settings))
+        return figure_service
+
+    monkeypatch.setattr("backend.services.ai.get_ai_service", lambda settings: provider)
+    monkeypatch.setattr(GeometryFigureService, "from_settings", classmethod(_from_settings))
+    photo = make_image(tmp_path / "figure.png")
+    service = DocumentService()
+    job_id, _ = service.import_document(
+        student_user.id, photo.read_bytes(), "figure.png", subject="math", grade=8
+    )
+    job = _wait_job(service, job_id, student_user.id)
+
+    assert job["status"] == "success", job["error"]
+    entry = job["result"]["segments"][0]
+    assert entry["figure_paths"] == [str(figure_path)]
+    assert entry["figure_specs"] == [spec]
+    assert created_with == [(provider, service.settings)]
+    assert len(figure_service.calls) == 1
+    assert figure_service.calls[0]["figure_bboxes"] == [[0, 0, 500, 500]]
+    assert figure_service.calls[0]["context"].grade == 8
+
+
 def test_import_document_rejects_multi_non_image(question_service, student_user, tmp_path):
     """多文件仅支持图片：PDF/DOCX 组合或图 + 文档混搭一律拒绝。"""
     pdf = make_text_pdf(tmp_path / "a.pdf", ["1. 题目"])

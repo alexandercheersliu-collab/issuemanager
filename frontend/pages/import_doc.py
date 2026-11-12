@@ -8,6 +8,7 @@ validate_upload_selection）便于单测。
 """
 from __future__ import annotations
 
+import os
 import time
 
 import streamlit as st
@@ -15,7 +16,13 @@ import streamlit as st
 from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
 from backend.services.document_service import DocumentService
 from backend.services.question_service import sanitize_tags
-from frontend.common import go_to, page_header, safe_truncate_math
+from frontend.common import (
+    go_to,
+    normalize_display_math,
+    page_header,
+    safe_truncate_math,
+)
+from frontend.components import render_figures
 from frontend.pages.tutor import _k12_context_inputs
 
 _DIFFICULTY_LABELS = {"easy": "简单", "medium": "中等", "hard": "困难"}
@@ -78,7 +85,7 @@ def segment_preview_markdown(segment: dict) -> str:
         value = (analysis.get(key) or "").strip()
         if value:
             parts.append(f"**{label}**：{value}")
-    return "\n\n".join(parts)
+    return normalize_display_math("\n\n".join(parts))
 
 
 def segment_page_image(page_images: list[str | None], segment: dict) -> str | None:
@@ -89,6 +96,11 @@ def segment_page_image(page_images: list[str | None], segment: dict) -> str | No
 
 
 # ---------- 页面 ----------
+
+
+def _clear_import_doc_job() -> None:
+    for key in ("import_doc_job_id", "import_doc_context_job", "import_doc_outcome"):
+        st.session_state.pop(key, None)
 
 
 def render_import_doc_page(user: dict) -> None:
@@ -150,6 +162,7 @@ def _render_upload(service: DocumentService, user: dict) -> dict:
                 type=_UPLOAD_TYPES,
                 accept_multiple_files=True,
                 key="import_doc_file",
+                on_change=_clear_import_doc_job,
                 help=(
                     "PDF 按页解析（扫描版走视觉识别）；DOCX 提取段落与内嵌图片；"
                     "整卷拍照可多选图片（每张 = 一页，页序 = 选择顺序）"
@@ -287,13 +300,27 @@ def _render_segment(
         )
         st.caption(f"{page_label} · 切题来源：{segment.get('source', '-')}")
 
-        # 原图保留几何图形等非文字信息；文字预览用于核对 LaTeX 渲染
+        # 裁剪图保留当前题所需图形；完整原页用于按需回溯
+        figures = [
+            path for path in (segment.get("figure_paths") or []) if os.path.exists(path)
+        ]
         page_image = segment_page_image(page_images, segment)
         preview = segment_preview_markdown(segment)
-        if page_image or preview:
+        if figures or page_image or preview:
             with st.container(border=True):
-                st.caption("预览（原图与文字渲染效果）")
-                if page_image:
+                st.caption("预览（图形、原图与文字渲染效果）")
+                if figures:
+                    render_figures(
+                        figures, alt_prefix=f"题 {segment.get('number') or index + 1} 的图形"
+                    )
+                if page_image and figures:
+                    with st.expander("查看完整原页", expanded=False):
+                        st.image(
+                            page_image,
+                            width="stretch",
+                            alt=f"题 {segment.get('number') or index + 1} 所在试卷第 {page_start} 页原图",
+                        )
+                elif page_image:
                     st.image(
                         page_image,
                         width="stretch",
@@ -302,10 +329,96 @@ def _render_segment(
                 if preview:
                     st.markdown(preview)
 
+        if segment.get("figure_specs"):
+            _render_figure_review(service, user, job_id, index, segment, page_image)
         _render_segment_ops(service, user, job_id, index, segment)
         # 校对表单整体默认折叠，页面以渲染预览为主；解构失败的题需手动补字段，默认展开
         with st.expander("✏️ 编辑校对（LaTeX 源码）", expanded=bool(segment.get("error"))):
             _render_segment_edit_form(service, user, job_id, index, segment)
+
+
+def _render_figure_review(
+    service: DocumentService,
+    user: dict,
+    job_id: str,
+    index: int,
+    segment: dict,
+    page_image: str | None,
+) -> None:
+    status_labels = {
+        "ai_passed": "AI 校验通过",
+        "manual_passed": "人工已确认",
+        "fallback": "待人工确认",
+    }
+    number = segment.get("number") or index + 1
+    for figure_index, spec in enumerate(segment.get("figure_specs") or []):
+        status = spec.get("validation_status") or "fallback"
+        with st.expander(
+            f"图形 {figure_index + 1} 校对（{status_labels.get(status, status)}）",
+            expanded=status == "fallback",
+        ):
+            reference = spec.get("crop_path") or page_image
+            redraw = spec.get("render_path")
+            reference_col, redraw_col = st.columns(2)
+            with reference_col:
+                st.markdown("**原图参考**")
+                if reference and os.path.exists(reference):
+                    st.image(
+                        reference,
+                        width="stretch",
+                        alt=f"题 {number} 的第 {figure_index + 1} 张原图参考",
+                    )
+                else:
+                    st.caption("原图参考不可用")
+            with redraw_col:
+                st.markdown("**TikZ 重绘**")
+                if redraw and os.path.exists(redraw):
+                    st.image(
+                        redraw,
+                        width="stretch",
+                        alt=f"题 {number} 的第 {figure_index + 1} 张 TikZ 重绘图",
+                    )
+                else:
+                    st.caption("尚无成功编译的重绘图")
+            st.caption(f"校验状态：{status_labels.get(status, status)}")
+            issues = spec.get("validation_issues") or []
+            if issues:
+                st.caption(f"对比问题：{'；'.join(issues)}")
+
+            with st.form(f"figure_review_{job_id}_{index}_{figure_index}"):
+                tikz_source = st.text_area(
+                    "TikZ 源码（仅提交时重新编译和对比）",
+                    value=spec.get("tikz_source") or "",
+                    height=200,
+                    max_chars=256 * 1024,
+                )
+                if st.form_submit_button("重新编译并对比", type="primary"):
+                    try:
+                        service.recompile_segment_figure(
+                            job_id,
+                            user["id"],
+                            index,
+                            figure_index,
+                            tikz_source=tikz_source,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 编译/对比失败保留旧图并提示
+                        st.error(f"图形重编译失败：{exc}")
+                        continue
+                    st.toast("图形已重新编译并对比", icon="✅")
+                    st.rerun()
+            if st.button(
+                "人工确认图形",
+                key=f"accept_figure_{job_id}_{index}_{figure_index}",
+                disabled=not redraw,
+                width="stretch",
+            ):
+                try:
+                    service.accept_segment_figure(job_id, user["id"], index, figure_index)
+                except Exception as exc:  # noqa: BLE001 - 页面呈现服务校验错误
+                    st.error(f"人工确认失败：{exc}")
+                    continue
+                st.toast("已人工确认图形", icon="✅")
+                st.rerun()
 
 
 def _render_segment_ops(

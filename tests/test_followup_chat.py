@@ -51,6 +51,17 @@ def test_answer_followup_builds_context_and_history():
     assert len(sent) == 4  # system + 2 历史 + 当前问题
 
 
+def test_answer_followup_normalizes_math_delimiters_for_streamlit():
+    provider = MockProvider()
+    provider.chat = lambda messages: (  # type: ignore[method-assign, assignment]
+        r"对于方程 \[ax^2+bx+c=0\quad(a\ne0)\]，根为 \(x_1,x_2\)。"
+    )
+
+    reply = provider.answer_followup("ctx", [], "韦达定理是什么？")
+
+    assert reply == r"对于方程 $$ax^2+bx+c=0\quad(a\ne0)$$，根为 $x_1,x_2$。"
+
+
 def test_answer_followup_truncates_long_history():
     provider = MockProvider()
     captured: list[list[dict]] = []
@@ -83,6 +94,29 @@ def test_base_provider_is_abstract():
 
     with pytest.raises(TypeError):
         BaseAIProvider()  # type: ignore[abstract]
+
+
+def test_followup_chat_normalizes_math_in_existing_history():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(
+        r'''
+from types import SimpleNamespace
+import streamlit as st
+from backend.services.ai.mock import MockProvider
+from frontend.common import followup_chat
+st.session_state["chat_1"] = [{
+    "role": "assistant",
+    "content": r"对于方程 \[ax^2+bx+c=0\quad(a\ne0)\]，根为 \(x_1,x_2\)。",
+}]
+followup_chat(MockProvider(), SimpleNamespace(id=1), {"id": 1})
+'''
+    ).run()
+
+    assert not at.exception
+    assert at.markdown[0].value == (
+        r"对于方程 $$ax^2+bx+c=0\quad(a\ne0)$$，根为 $x_1,x_2$。"
+    )
 
 
 def test_service_answer_followup_ownership(question_service, student_user, db_session):

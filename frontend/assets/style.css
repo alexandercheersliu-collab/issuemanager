@@ -78,96 +78,97 @@ hr {
 
 /* ---------------- 侧边栏 ---------------- */
 section[data-testid="stSidebar"] {
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
   background: var(--mm-card);
   border-right: 1px solid var(--mm-border);
 }
-
-/* 品牌区 */
-.mm-brand { text-align: center; padding: 0.9rem 0 0.9rem 0; }
-.mm-brand__logo {
-  width: 52px;
-  height: 52px;
-  margin: 0 auto 0.55rem auto;
-  border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.6rem;
-  background: linear-gradient(135deg, var(--mm-primary) 0%, var(--mm-accent) 100%);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
-}
-.mm-brand__title { font-size: 1.12rem; font-weight: 700; color: var(--mm-navy); }
-.mm-brand__tag { font-size: 0.8rem; color: var(--mm-text-2); margin-top: 0.15rem; }
-/* 品牌区与导航之间：细分隔线 + 节奏留白 */
-.mm-brand::after {
-  content: "";
-  display: block;
-  width: 56%;
-  margin: 0.85rem auto 0 auto;
-  border-bottom: 1px solid var(--mm-border);
+section[data-testid="stSidebar"][data-collapsed="true"] {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  border: 0 !important;
 }
 
-/* 侧边栏导航（st.radio 菜单化：隐藏圆圈、整行 hover/active 态）
-   DOM：stRadioGroup > div[data-selected] > label[stRadioOption] > span(隐藏 input) + div > [圆圈, 文本] */
-section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] {
-  gap: 4px;
-  margin-top: 0.35rem;
+/* 纯图标品牌区 */
+section[data-testid="stSidebar"] .st-key-sidebar_brand {
+  padding: 0.1rem 0 0.35rem;
 }
-section[data-testid="stSidebar"] label[data-testid="stRadioOption"] {
+section[data-testid="stSidebar"] .st-key-sidebar_brand [data-testid="stElementContainer"],
+section[data-testid="stSidebar"] .st-key-sidebar_brand [data-testid="stFullScreenFrame"],
+section[data-testid="stSidebar"] .st-key-sidebar_brand [data-testid="stFullScreenFrame"] > div {
   width: 100%;
-  min-height: 40px;
-  padding: 0.5rem 0.9rem;
-  border-radius: 10px;
-  cursor: pointer;
-  color: var(--mm-text-2);
-  font-size: 0.92rem;
-  transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
-section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:hover {
+section[data-testid="stSidebar"] .st-key-sidebar_brand [data-testid="stImage"] img {
+  display: block;
+  margin: 0 auto;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.18);
+}
+
+/* 侧边栏导航：统一线性图标、内容左对齐、紧凑行距与柔和选中态 */
+section[data-testid="stSidebar"] .st-key-sidebar_nav { gap: 0; }
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button {
+  justify-content: flex-start;
+  min-height: 38px;
+  padding: 0.45rem 0.65rem;
+  border: 0;
+  border-radius: 9px;
+  box-shadow: none;
+  font-size: 0.9rem;
+  text-align: left;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button > div {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button[kind="tertiary"] {
+  background: transparent;
+  color: var(--mm-text-2);
+}
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button[kind="tertiary"]:hover {
   background: var(--mm-bg);
   color: var(--mm-text);
 }
-section[data-testid="stSidebar"] div[data-testid="stRadioGroup"] > div[data-selected="true"] > label {
-  background: var(--mm-primary-soft);
-  color: var(--mm-primary);
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button[kind="secondary"],
+section[data-testid="stSidebar"] .st-key-sidebar_nav .stButton > button[kind="secondary"]:hover {
+  background: var(--mm-primary-soft) !important;
+  color: var(--mm-primary) !important;
+  border: 0 !important;
+  box-shadow: none !important;
   font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--mm-primary);  /* 左侧指示条 */
 }
-section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:first-child {
-  display: none;  /* 单选圆圈 */
+section[data-testid="stSidebar"] .st-key-sidebar_account {
+  background: var(--mm-bg);
+  border-color: var(--mm-border);
+  border-radius: 10px;
+  padding: 0.5rem 0.65rem;
+}
+section[data-testid="stSidebar"] .st-key-sidebar_logout button {
+  color: var(--mm-text-2) !important;
+}
+section[data-testid="stSidebar"] .st-key-sidebar_logout button > div {
+  justify-content: flex-start;
+  text-align: left;
 }
 
 /* 用户卡片 */
 .mm-user-card {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
   background: var(--mm-bg);
   border: 1px solid var(--mm-border);
-  border-radius: 12px;
-  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  padding: 0.45rem 0.65rem;
+}
+.st-key-sidebar_account .mm-user-card {
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 .mm-user-card__name { font-weight: 600; font-size: 0.92rem; color: var(--mm-text); }
 .mm-user-card__role { font-size: 0.78rem; color: var(--mm-text-2); }
-/* 版本号：小徽标 */
-.mm-version { text-align: center; margin-top: 0.6rem; }
-.mm-version > span {
-  display: inline-block;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--mm-muted);
-  background: var(--mm-bg);
-  border: 1px solid var(--mm-border);
-  border-radius: 999px;
-  padding: 0.1rem 0.6rem;
-}
-
-/* 侧边栏细分隔线节奏 */
-section[data-testid="stSidebar"] hr {
-  margin: 0.9rem 0;
-  border-color: var(--mm-border);
-}
 
 /* ---------------- 卡片体系 ---------------- */
 .mm-card {
@@ -399,17 +400,12 @@ section[data-testid="stSidebar"] hr {
   margin: 3.2rem auto 0 auto;
   text-align: center;
 }
-.mm-login__logo {
-  width: 68px;
-  height: 68px;
-  margin: 0 auto 0.8rem auto;
+.mm-login__logo-image {
+  width: 76px;
+  height: 76px;
+  margin: 0 auto 0.9rem auto;
   border-radius: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 2.1rem;
-  background: linear-gradient(135deg, var(--mm-primary) 0%, var(--mm-accent) 100%);
-  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.22);
 }
 .mm-login__title {
   font-size: 2rem;
@@ -641,12 +637,6 @@ section[data-testid="stSidebar"] [data-baseweb] a { transition: background-color
   div[data-baseweb="select"] > div {
     min-height: 44px;
   }
-  /* 侧边栏导航整行加大 */
-  section[data-testid="stSidebar"] label[data-testid="stRadioOption"] {
-    padding-top: 0.6rem;
-    padding-bottom: 0.6rem;
-  }
-
   /* 复习闪卡：全宽 + 紧凑内边距（columns 窄屏自动堆叠后闪卡即全宽） */
   .mm-flashcard { padding: 1.2rem 1rem; border-radius: 14px; }
 
@@ -657,7 +647,7 @@ section[data-testid="stSidebar"] [data-baseweb] a { transition: background-color
   /* 登录页：logo 与标题略缩，外边距收窄 */
   .mm-login { margin-top: 1.6rem; }
   .mm-login__title { font-size: 1.6rem; }
-  .mm-login__logo { width: 56px; height: 56px; font-size: 1.7rem; }
+  .mm-login__logo-image { width: 60px; height: 60px; }
 
   /* 统计卡数值略缩 */
   .mm-stat__value { font-size: 1.55rem; }

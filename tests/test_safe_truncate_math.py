@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from streamlit.testing.v1 import AppTest
+
 from frontend.common import safe_truncate_math
 
 
@@ -86,3 +88,13 @@ def test_exact_length_boundary_unchanged():
     """长度恰好等于 max_len：未截断，不加省略号。"""
     text = "x" * 220
     assert safe_truncate_math(text, 220) == text
+
+
+def test_render_markdown_normalizes_multiline_display_math():
+    at = AppTest.from_string(
+        "from frontend.common import render_markdown\n"
+        "render_markdown('于是\\n$$x^2\\n=4$$\\n因此 $x=2$')\n"
+    ).run()
+
+    assert not at.exception
+    assert at.markdown[0].value == "于是\n\n$$\nx^2\n=4\n$$\n\n因此 $x=2$"

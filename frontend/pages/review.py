@@ -14,9 +14,10 @@ from frontend.common import (
     go_to,
     keyboard_shortcuts,
     page_header,
+    render_markdown,
     safe_truncate_math,
 )
-from frontend.components import k12_meta_line
+from frontend.components import k12_meta_line, render_figures
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
 # 评分按钮四色：忘了红 / 勉强橙 / 记得蓝 / 秒懂绿
@@ -188,23 +189,27 @@ def render_review_page(user: dict) -> None:
                 st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
             stem, analysis_part = split_stem_and_analysis(question.content_markdown)
             has_image = bool(question.image_path and os.path.exists(question.image_path))
-            if stem and analysis_part is not None:
-                # 切题录入：题面文字优先（完整可读、LaTeX 可渲染），原图折叠收起
+            figures = [
+                path for path in (question.figure_paths or []) if os.path.exists(path)
+            ]
+            if stem and (analysis_part is not None or figures):
+                # 切题录入或带图变式：题面文字和当前题图形优先，完整原图折叠收起
                 with st.container(key="review_stem_box"):
-                    st.markdown(stem)
+                    render_markdown(stem)
+                    render_figures(figures, alt_prefix=f"题 {question.id} 的图形")
                 if has_image:
-                    with st.expander("📷 查看原图", expanded=False):
-                        st.image(question.image_path)
+                    with st.expander("📷 查看完整原页", expanded=False):
+                        st.image(question.image_path, alt=f"题 {question.id} 的完整原页")
             elif has_image:
                 # 旧版整图录入：题面只在图片里，限高居中展示
                 with st.container(key="review_legacy_image"):
-                    st.image(question.image_path)
+                    st.image(question.image_path, alt=f"题 {question.id} 的原图")
                 st.caption(
                     "本题来自整图录入，未提取题面文字；"
                     "如需文字题面，请到「错题本」对应题目点「编辑」补录题干。"
                 )
             else:
-                st.markdown(
+                render_markdown(
                     safe_truncate_math(question.content_markdown, 220),
                     unsafe_allow_html=True,
                 )
@@ -216,11 +221,11 @@ def render_review_page(user: dict) -> None:
             if st.session_state.get(reveal_key):
                 st.divider()
                 # 有分隔符：正面已展示题干，这里只放解析段；无分隔符保持全文
-                st.markdown(
+                render_markdown(
                     analysis_part if analysis_part is not None else question.content_markdown,
                     unsafe_allow_html=True,
                 )
-                st.markdown(f"**答案**：{question.answer}")
+                render_markdown(f"**答案**：{question.answer}")
                 # 各档评分的下次间隔预览（一行紧凑展示）
                 previews = []
                 for grade in GRADE_ORDER:

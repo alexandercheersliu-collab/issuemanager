@@ -33,7 +33,14 @@ def _bank_hit() -> RagHit:
     )
 
 
-def _make_question(question_service, student_user, text="检测编排·源题", answer="x=1"):
+def _make_question(
+    question_service,
+    student_user,
+    text="检测编排·源题",
+    answer="x=1",
+    figure_paths=None,
+    figure_specs=None,
+):
     return question_service.create_manual_question(
         student_user.id,
         content_markdown=text,
@@ -41,6 +48,8 @@ def _make_question(question_service, student_user, text="检测编排·源题", 
         knowledge_points=["一元二次方程"],
         subject="math",
         grade=9,
+        figure_paths=figure_paths,
+        figure_specs=figure_specs,
     )
 
 
@@ -149,9 +158,17 @@ def test_tested_ref_for():
 # ---------- 服务层编排 ----------
 
 
-def test_start_detection_own_hit(question_service, student_user, monkeypatch):
+def test_start_detection_own_hit(question_service, student_user, monkeypatch, tmp_path):
+    figure = tmp_path / "figure.png"
+    figure.write_bytes(b"figure")
     source = _make_question(question_service, student_user)
-    other = _make_question(question_service, student_user, "检测编排·同类题", answer="x=1")
+    other = _make_question(
+        question_service,
+        student_user,
+        "检测编排·同类题",
+        answer="x=1",
+        figure_paths=[str(figure)],
+    )
     monkeypatch.setattr(
         question_service, "vector_store", _StubStore(own_hits=[RagHit(other.id, 0.4)])
     )
@@ -159,6 +176,7 @@ def test_start_detection_own_hit(question_service, student_user, monkeypatch):
     challenge = question_service.start_detection(source.id, student_user.id)
     assert challenge["tested"]["source"] == "manual"  # 库内题来源不变
     assert "同类题" in challenge["tested"]["content"]
+    assert challenge["tested"]["figure_paths"] == [str(figure)]
     assert "answer" not in challenge["tested"]  # 答案不下发
 
     log = _log(challenge["log_id"])
@@ -179,6 +197,84 @@ def test_start_detection_generated_fallback_gets_answer(
     log = _log(challenge["log_id"])
     assert log.tested_ref.startswith("gen:")
     assert log.tested_answer.strip()  # Mock 演示答案已快照
+
+
+def _generated_geometry_question():
+    from backend.models.schemas import QuestionOut
+
+    return QuestionOut(
+        id=-9999,
+        user_id=0,
+        image_path=None,
+        content_markdown="新几何题：已知 DE ⟂ EF，求∠DFE",
+        answer="",
+        source="generated",
+        figure_paths=["/new/variant.png"],
+        figure_specs=[
+            {
+                "kind": "geometry",
+                "semantic_spec": {
+                    "points": ["D", "E", "F"],
+                    "relations": ["DE ⟂ EF"],
+                },
+                "tikz_source": "new tikz",
+                "render_path": "/new/variant.png",
+                "crop_path": None,
+                "validation_status": "ai_passed",
+                "validation_issues": [],
+                "assumptions": ["新图仅为示意图"],
+            }
+        ],
+    )
+
+
+def test_start_detection_generated_includes_new_figure_specs(
+    question_service, student_user, monkeypatch
+):
+    from backend.services.question_mixins import SimilarQuestionsOutcome
+
+    source = _make_question(question_service, student_user)
+    tested = _generated_geometry_question()
+    monkeypatch.setattr(
+        question_service,
+        "similar_questions",
+        lambda *args, **kwargs: SimilarQuestionsOutcome(items=[tested]),
+    )
+
+    challenge = question_service.start_detection(source.id, student_user.id)
+
+    assert challenge["tested"]["figure_paths"] == ["/new/variant.png"]
+    assert challenge["tested"]["figure_specs"] == [
+        spec.model_dump() for spec in tested.figure_specs
+    ]
+
+
+def test_generated_reference_answer_receives_new_figure_semantics(
+    question_service, student_user, monkeypatch
+):
+    source = _make_question(
+        question_service,
+        student_user,
+        figure_paths=["/source/original.png"],
+    )
+    tested = _generated_geometry_question()
+    captured = {}
+    real_analyze = question_service.ai.analyze_text
+
+    def _analyze_spy(text, hint="", context=None):
+        captured["text"] = text
+        captured["hint"] = hint
+        return real_analyze(text, hint=hint, context=context)
+
+    monkeypatch.setattr(question_service.ai, "analyze_text", _analyze_spy)
+
+    answer = question_service._generate_reference_answer(tested, source)
+
+    assert answer.strip()
+    assert captured["text"] == tested.content_markdown
+    assert "DE ⟂ EF" in captured["hint"]
+    assert "新图仅为示意图" in captured["hint"]
+    assert "/source/original.png" not in captured["hint"]
 
 
 def test_submit_answer_and_demotion_e2e(question_service, student_user, monkeypatch):

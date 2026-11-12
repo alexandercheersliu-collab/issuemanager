@@ -5,8 +5,12 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from backend.models.schemas import FigureComparison, GeometryFigureDraft, GeometryVariant
+from backend.services.geometry_figures import GeometryFigureService
 from backend.services.rag import RagHit, SimilarResult
 
 
@@ -47,7 +51,9 @@ def _bank_hit(bank_id: str = "bank-math-9-001", **meta) -> RagHit:
     )
 
 
-def _make_question(question_service, student_user, text="回落测试·源题：判别式"):
+def _make_question(
+    question_service, student_user, text="回落测试·源题：判别式", figure_paths=None
+):
     return question_service.create_manual_question(
         student_user.id,
         content_markdown=text,
@@ -57,6 +63,7 @@ def _make_question(question_service, student_user, text="回落测试·源题：
         grade=9,
         region="北京",
         textbook_version="人教版",
+        figure_paths=figure_paths,
     )
 
 
@@ -91,17 +98,182 @@ def test_bank_fallback_when_own_insufficient(question_service, student_user, mon
     assert "判别式" in item.content_markdown
 
 
-def test_generated_fallback_when_both_empty(question_service, student_user, monkeypatch):
+class _VariantRenderer:
+    def __init__(self, tmp_path):
+        self.tmp_path = tmp_path
+        self.calls = []
+
+    def render(self, source):
+        self.calls.append(source)
+        path = self.tmp_path / f"variant-{len(self.calls)}.png"
+        path.write_bytes(b"new rendered figure")
+        return SimpleNamespace(png_path=str(path))
+
+
+def _geometry_source(question_service, student_user):
+    source = _make_question(
+        question_service,
+        student_user,
+        "几何源题：证明 AB ⟂ BC",
+        figure_paths=["/source/figure.png"],
+    )
+    source.figure_specs = [
+        {
+            "kind": "geometry",
+            "semantic_spec": {"points": ["A", "B", "C"], "relations": ["AB ⟂ BC"]},
+            "tikz_source": "old tikz",
+            "render_path": "/source/figure.png",
+            "crop_path": None,
+            "validation_status": "ai_passed",
+            "validation_issues": [],
+            "assumptions": ["原图不按比例"],
+        }
+    ]
+    return source
+
+
+def test_generated_fallback_without_figure_uses_followup_question(
+    question_service, student_user, monkeypatch
+):
     source = _make_question(question_service, student_user)
-    store = _StubStore(own_hits=[], bank_hits=[])
-    monkeypatch.setattr(question_service, "vector_store", store)
+    monkeypatch.setattr(question_service, "vector_store", _StubStore([], []))
+    captured = {}
+    real_analyze = question_service.ai.analyze_text
+
+    def _analyze_spy(text, hint="", context=None):
+        captured["text"] = text
+        return real_analyze(text, hint=hint, context=context)
+
+    def _unexpected_geometry_service(*args, **kwargs):
+        raise AssertionError("无图题不应构造几何服务")
+
+    monkeypatch.setattr(question_service.ai, "analyze_text", _analyze_spy)
+    monkeypatch.setattr(GeometryFigureService, "from_settings", _unexpected_geometry_service)
 
     outcome = question_service.similar_questions(source, user_id=student_user.id, top_k=2)
+
     generated = [q for q in outcome.items if q.source == "generated"]
-    assert len(generated) == 1  # MockProvider 固定 followup_question
+    assert len(generated) == 1
     assert generated[0].content_markdown.strip()
-    assert generated[0].knowledge_points == ["判别式"]
-    assert generated[0].textbook_version == "人教版"
+    assert generated[0].figure_paths == []
+    assert generated[0].figure_specs == []
+    assert captured["text"] == source.content_markdown
+
+
+def test_generated_geometry_fallback_uses_new_render_and_specs(
+    question_service, student_user, monkeypatch, tmp_path
+):
+    source = _geometry_source(question_service, student_user)
+    monkeypatch.setattr(question_service, "vector_store", _StubStore([], []))
+    renderer = _VariantRenderer(tmp_path)
+    service = GeometryFigureService(question_service.ai, renderer)
+    draft = GeometryFigureDraft(
+        kind="geometry",
+        semantic_spec={"points": ["D", "E", "F"], "relations": ["DE ⟂ EF"]},
+        tikz_source="new tikz",
+        assumptions=["新图不按比例"],
+    )
+    generate_calls = []
+
+    def _generate(content, **kwargs):
+        generate_calls.append((content, kwargs))
+        return GeometryVariant(question="几何新题：证明 DE ⟂ EF", figures=[draft])
+
+    monkeypatch.setattr(question_service.ai, "generate_geometry_variant", _generate)
+    monkeypatch.setattr(
+        question_service.ai,
+        "validate_geometry_variant",
+        lambda png_bytes, **kwargs: FigureComparison(passed=True),
+    )
+    monkeypatch.setattr(
+        GeometryFigureService, "from_settings", lambda ai, settings: service
+    )
+
+    outcome = question_service.similar_questions(source, user_id=student_user.id, top_k=2)
+
+    generated = [q for q in outcome.items if q.source == "generated"]
+    assert len(generated) == 1
+    assert generated[0].content_markdown == "几何新题：证明 DE ⟂ EF"
+    assert generated[0].figure_paths == [str(tmp_path / "variant-1.png")]
+    assert generated[0].figure_paths != source.figure_paths
+    assert generated[0].figure_specs[0].semantic_spec == draft.semantic_spec
+    assert generated[0].figure_specs[0].assumptions == ["新图不按比例"]
+    assert generated[0].figure_specs[0].render_path == generated[0].figure_paths[0]
+    assert len(generate_calls) == 1
+    assert generate_calls[0][0] == source.content_markdown
+
+
+def test_invalid_geometry_variant_regenerates_once_then_returns_no_candidate(
+    question_service, student_user, monkeypatch, tmp_path
+):
+    source = _geometry_source(question_service, student_user)
+    store = _StubStore([], [])
+    monkeypatch.setattr(question_service, "vector_store", store)
+    renderer = _VariantRenderer(tmp_path)
+    service = GeometryFigureService(question_service.ai, renderer)
+    generate_calls = []
+
+    def _generate(content, **kwargs):
+        generate_calls.append(kwargs)
+        return GeometryVariant(
+            question=f"几何候选 {len(generate_calls)}",
+            figures=[
+                GeometryFigureDraft(
+                    kind="geometry",
+                    semantic_spec={"relations": ["题干与图不一致"]},
+                    tikz_source=f"bad tikz {len(generate_calls)}",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(question_service.ai, "generate_geometry_variant", _generate)
+    monkeypatch.setattr(
+        question_service.ai,
+        "validate_geometry_variant",
+        lambda png_bytes, **kwargs: FigureComparison(
+            passed=False,
+            issues=["新图与题干不一致"],
+            repair_instruction="按题干重画新图",
+        ),
+    )
+    monkeypatch.setattr(
+        GeometryFigureService, "from_settings", lambda ai, settings: service
+    )
+
+    outcome = question_service.similar_questions(source, user_id=student_user.id, top_k=2)
+
+    assert outcome.items == []
+    assert len(generate_calls) == 2
+    assert generate_calls[0].get("repair_instruction", "") == ""
+    assert generate_calls[1]["repair_instruction"] == "按题干重画新图"
+    assert renderer.calls == ["bad tikz 1", "bad tikz 2"]
+
+
+def test_figure_dependent_variant_regenerates_once_then_omits_figureless_result(
+    question_service, student_user, monkeypatch, tmp_path
+):
+    source = _geometry_source(question_service, student_user)
+    monkeypatch.setattr(question_service, "vector_store", _StubStore([], []))
+    renderer = _VariantRenderer(tmp_path)
+    service = GeometryFigureService(question_service.ai, renderer)
+    generate_calls = []
+
+    def _generate(content, **kwargs):
+        generate_calls.append(kwargs)
+        return GeometryVariant(question=f"无图几何候选 {len(generate_calls)}", figures=[])
+
+    monkeypatch.setattr(question_service.ai, "generate_geometry_variant", _generate)
+    monkeypatch.setattr(
+        GeometryFigureService, "from_settings", lambda ai, settings: service
+    )
+
+    outcome = question_service.similar_questions(source, user_id=student_user.id, top_k=2)
+
+    assert outcome.items == []
+    assert len(generate_calls) == 2
+    assert generate_calls[0].get("repair_instruction", "") == ""
+    assert "至少生成一幅新图" in generate_calls[1]["repair_instruction"]
+    assert renderer.calls == []
 
 
 def test_strict_mode_disables_fallback(question_service, student_user, monkeypatch):

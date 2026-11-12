@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import configparser
+import importlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -94,4 +96,51 @@ def test_k12_migration_adds_columns_and_backfills(tmp_path, monkeypatch):
         "SELECT subject, grade, region, error_category, source_doc FROM questions WHERE id=1"
     ).fetchone()
     assert row == ("math", None, None, None, None)  # 旧数据回填默认值，其余可空
+    conn.close()
+
+
+def test_figure_paths_migration_adds_json_column(tmp_path, monkeypatch):
+    from alembic import command
+
+    db = tmp_path / "figure_paths_migration_test.db"
+    cfg = _alembic_config(db, monkeypatch)
+    command.upgrade(cfg, "e7f2c91a3b55")
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+    assert "figure_paths" in columns
+    conn.close()
+
+
+def test_figure_specs_migration_adds_json_column_and_defaults_old_rows(tmp_path, monkeypatch):
+    from alembic import command
+
+    migration = importlib.import_module(
+        "migrations.versions.b52e0d8a4c21_add_questions_figure_specs"
+    )
+    assert migration.down_revision == "a41d9c7e2f10"
+
+    db = tmp_path / "figure_specs_migration_test.db"
+    cfg = _alembic_config(db, monkeypatch)
+    command.upgrade(cfg, "a41d9c7e2f10")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO users (username, password_hash, role) VALUES ('s1', 'x', 'student')"
+    )
+    conn.execute(
+        "INSERT INTO questions (user_id, content_markdown, answer, knowledge_points, tags,"
+        " difficulty, source, reps, ease, interval_days)"
+        " VALUES (1, '旧题', '42', '[]', '[]', 'medium', 'ai', 0, 2.5, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(questions)")}
+    assert "figure_specs" in columns
+    (stored_specs,) = conn.execute("SELECT figure_specs FROM questions WHERE id=1").fetchone()
+    assert json.loads(stored_specs) == []
     conn.close()

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from backend.services.ai.base import BaseAIProvider
 from backend.services.document import DocPage
@@ -45,6 +45,8 @@ class Segment:
     continues_to_next: bool = False  # 内部对齐用：题干延续到下一页
     continued_from_prev: bool = False  # 内部对齐用：本段是上一页题目的延续
     source: str = "rule"  # rule / visual
+    figure_paths: list[str] = field(default_factory=list)
+    figure_specs: list[dict] = field(default_factory=list)
 
 
 def _cn_to_int(text: str) -> int | None:
@@ -120,25 +122,50 @@ def rule_segment_page(text: str, page_no: int) -> list[Segment]:
 # ---------------- 策略 A：视觉切题 ----------------
 
 def visual_segment_page(
-    provider: BaseAIProvider, image_path, page_no: int
+    provider: BaseAIProvider,
+    image_path,
+    page_no: int,
+    figures_dir=None,
+    figure_service=None,
+    context=None,
 ) -> list[Segment]:
-    """页图像送视觉模型切题。"""
+    """页图像送视觉模型切题，图形坐标交给几何图形服务处理。"""
     from pathlib import Path
 
-    data = Path(image_path).read_bytes()
-    items = provider.segment_page(data, "image/png")
-    return [
-        Segment(
-            number=item["number"],
-            text=item["text"],
-            page_start=page_no,
-            page_end=page_no,
-            continues_to_next=item["continues_to_next"],
-            continued_from_prev=item["continued_from_prev"],
-            source="visual",
+    image_path = Path(image_path)
+    items = provider.segment_page(image_path.read_bytes(), "image/png")
+    segments = []
+    for item in items:
+        figure_paths: list[str] = []
+        figure_specs: list[dict] = []
+        needs_review = False
+        if figure_service is not None:
+            outcome = figure_service.redraw_segment(
+                image_path=image_path,
+                number=item["number"],
+                text=item["text"],
+                figure_bboxes=item.get("figure_bboxes") or [],
+                figures_dir=figures_dir,
+                context=context,
+            )
+            figure_paths = list(outcome.figure_paths)
+            figure_specs = list(outcome.figure_specs)
+            needs_review = outcome.needs_review
+        segments.append(
+            Segment(
+                number=item["number"],
+                text=item["text"],
+                page_start=page_no,
+                page_end=page_no,
+                needs_review=needs_review,
+                continues_to_next=item.get("continues_to_next", False),
+                continued_from_prev=item.get("continued_from_prev", False),
+                source="visual",
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
+            )
         )
-        for item in items
-    ]
+    return segments
 
 
 # ---------------- 双策略合并 ----------------
@@ -162,6 +189,9 @@ def _merge_page(
             twin = flags[segment.number]
             segment.continues_to_next = twin.continues_to_next
             segment.continued_from_prev = twin.continued_from_prev
+            segment.figure_paths = list(twin.figure_paths)
+            segment.figure_specs = list(twin.figure_specs)
+            segment.needs_review = segment.needs_review or twin.needs_review
         return rule_segments
 
     logger.warning(
@@ -187,6 +217,8 @@ def _join_cross_page(segments: list[Segment]) -> list[Segment]:
             head.page_end = segment.page_end
             head.continued = True
             head.continues_to_next = segment.continues_to_next
+            head.figure_paths.extend(segment.figure_paths)
+            head.figure_specs.extend(segment.figure_specs)
             if segment.needs_review:
                 head.needs_review = True
         else:
@@ -195,7 +227,12 @@ def _join_cross_page(segments: list[Segment]) -> list[Segment]:
 
 
 def segment_document(
-    pages: list[DocPage], provider: BaseAIProvider | None, max_workers: int = 3
+    pages: list[DocPage],
+    provider: BaseAIProvider | None,
+    max_workers: int = 3,
+    figures_dir=None,
+    figure_service=None,
+    context=None,
 ) -> list[Segment]:
     """整卷切题：逐页双策略合并（视觉路按页并发），再跨页拼接。
 
@@ -215,7 +252,13 @@ def segment_document(
             with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
                 futures = {
                     pool.submit(
-                        visual_segment_page, provider, pages[i].image_path, pages[i].page_no
+                        visual_segment_page,
+                        provider,
+                        pages[i].image_path,
+                        pages[i].page_no,
+                        figures_dir,
+                        figure_service,
+                        context,
                     ): i
                     for i in targets
                 }
