@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.config import Settings
 from backend.models.orm import Job, User
 from backend.services.ai.base import AnalysisContext
 from backend.services.ai.mock import MockProvider
@@ -14,11 +15,13 @@ from backend.services.entry_types import DEFAULT_IMPORT_CONTEXT, PhotoImage
 from backend.services.photo_entry import PhotoEntryService
 
 
-def _service_with_provider(monkeypatch, provider: MockProvider) -> PhotoEntryService:
+def _service_with_provider(
+    monkeypatch, provider: MockProvider, settings: Settings | None = None
+) -> PhotoEntryService:
     monkeypatch.setattr(
         "backend.services.question_mixins.get_ai_service", lambda settings: provider
     )
-    return PhotoEntryService()
+    return PhotoEntryService(settings)
 
 
 def _wait_for_phase(
@@ -226,6 +229,39 @@ def test_duplicate_fallback_image_reuses_original_record(monkeypatch, student_us
     assert provider.analyze_calls == 1
 
 
+def test_identical_fallbacks_in_one_job_keep_dedup_semantics(monkeypatch, student_user):
+    class Provider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.analyze_calls = 0
+            self.lock = threading.Lock()
+
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [{"number": "1", "text": "同批次重复整图题"}]
+
+        def analyze_question(self, *args, **kwargs):
+            with self.lock:
+                self.analyze_calls += 1
+            time.sleep(0.1)
+            return super().analyze_question(*args, **kwargs)
+
+    provider = Provider()
+    service = _service_with_provider(monkeypatch, provider, Settings(import_concurrency=2))
+    job_id = service.create_job(
+        student_user.id,
+        [
+            PhotoImage("first-copy.jpg", b"same-batch-image", "image/jpeg"),
+            PhotoImage("second-copy.jpg", b"same-batch-image", "image/jpeg"),
+        ],
+    )
+
+    done = _wait_for_phase(service, job_id, student_user.id, "done")
+
+    assert provider.analyze_calls == 1
+    assert [entry["duplicated"] for entry in done["entries"]] == [False, True]
+    assert done["entries"][0]["question"]["id"] == done["entries"][1]["question"]["id"]
+
+
 def test_one_failing_candidate_does_not_stop_other_imports(monkeypatch, student_user):
     class Provider(MockProvider):
         def segment_page(self, image_bytes, mime_type="image/png"):
@@ -254,6 +290,114 @@ def test_one_failing_candidate_does_not_stop_other_imports(monkeypatch, student_
     assert done["entries"][0]["question"] is None
     assert done["entries"][1]["error"] is None
     assert done["entries"][1]["question"]["id"] > 0
+
+
+class _ConcurrentProvider(MockProvider):
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
+        self.segment_current = 0
+        self.segment_max = 0
+        self.analyze_current = 0
+        self.analyze_max = 0
+
+    def segment_page(self, image_bytes, mime_type="image/png"):
+        with self.lock:
+            self.segment_current += 1
+            self.segment_max = max(self.segment_max, self.segment_current)
+        try:
+            time.sleep(0.05)
+            return [
+                {"number": "1", "text": f"{image_bytes.decode()} 第一题"},
+                {"number": "2", "text": f"{image_bytes.decode()} 第二题"},
+            ]
+        finally:
+            with self.lock:
+                self.segment_current -= 1
+
+    def analyze_text(self, text, hint="", context=None):
+        with self.lock:
+            self.analyze_current += 1
+            self.analyze_max = max(self.analyze_max, self.analyze_current)
+        try:
+            time.sleep(0.12 if "第一题" in text else 0.02)
+            analysis = super().analyze_text(text, hint, context)
+            analysis.answer = f"答案:{text}"
+            return analysis
+        finally:
+            with self.lock:
+                self.analyze_current -= 1
+
+
+def test_multi_image_segmentation_uses_bounded_concurrency(monkeypatch, student_user):
+    provider = _ConcurrentProvider()
+    service = _service_with_provider(
+        monkeypatch, provider, Settings(import_concurrency=3)
+    )
+    job_id = service.create_job(
+        student_user.id,
+        [PhotoImage(f"{index}.jpg", f"image-{index}".encode(), "image/jpeg") for index in range(3)],
+    )
+
+    review = _wait_for_phase(service, job_id, student_user.id, "review")
+
+    assert provider.segment_max > 1
+    assert [candidate["text"] for candidate in review["candidates"]] == [
+        f"image-{image_index} 第{number}题"
+        for image_index in range(3)
+        for number in ("一", "二")
+    ]
+
+
+def test_selected_candidates_import_concurrently_in_stable_order(monkeypatch, student_user):
+    provider = _ConcurrentProvider()
+    service = _service_with_provider(
+        monkeypatch, provider, Settings(import_concurrency=3)
+    )
+    job_id = service.create_job(
+        student_user.id, [PhotoImage("concurrent.jpg", b"concurrent", "image/jpeg")]
+    )
+    review = _wait_for_phase(service, job_id, student_user.id, "review")
+    service.confirm(
+        job_id, student_user.id, [candidate["id"] for candidate in review["candidates"]]
+    )
+
+    done = _wait_for_phase(service, job_id, student_user.id, "done")
+
+    assert provider.analyze_max > 1
+    assert [entry["name"] for entry in done["entries"]] == [
+        "concurrent.jpg · 第 1 题",
+        "concurrent.jpg · 第 2 题",
+    ]
+    assert [entry["question"]["stem"] for entry in done["entries"]] == [
+        "concurrent 第一题",
+        "concurrent 第二题",
+    ]
+    assert [entry["question"]["answer"] for entry in done["entries"]] == [
+        "答案:concurrent 第一题",
+        "答案:concurrent 第二题",
+    ]
+
+
+def test_photo_concurrency_one_preserves_sequential_execution(monkeypatch, student_user):
+    provider = _ConcurrentProvider()
+    service = _service_with_provider(
+        monkeypatch, provider, Settings(import_concurrency=1)
+    )
+    job_id = service.create_job(
+        student_user.id,
+        [PhotoImage(f"serial-{index}.jpg", f"serial-{index}".encode(), "image/jpeg") for index in range(2)],
+    )
+    review = _wait_for_phase(service, job_id, student_user.id, "review")
+    service.confirm(
+        job_id, student_user.id, [candidate["id"] for candidate in review["candidates"]]
+    )
+
+    done = _wait_for_phase(service, job_id, student_user.id, "done")
+
+    assert done["done"] == 4
+    assert provider.segment_max == 1
+    assert provider.analyze_max == 1
 
 
 def test_empty_selection_without_fallbacks_is_rejected(monkeypatch, student_user):
