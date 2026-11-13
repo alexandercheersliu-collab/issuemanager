@@ -19,6 +19,7 @@ from frontend.common import (
 from frontend.components import (
     question_detail_view,
     regrade_buttons,
+    render_figures,
     save_followup_button,
 )
 
@@ -86,7 +87,7 @@ def render_notebook_page(user: dict) -> None:
             view_user_id, include_others=include_others, semantic=False
         )
         all_tags = sorted({t for q in all_questions for t in q.tags})
-        with st.expander("🔎 更多筛选（语义搜索 · 标签 · 学科 · 年级 · 错因 · 来源）", expanded=False):
+        with st.expander("🔎 更多筛选（语义搜索 · 标签 · 学科 · 年级 · 地区 · 教材 · 错因 · 来源）", expanded=False):
             tog1, tog2, tog3, _tog_pad = st.columns([1.2, 1.2, 1.4, 3])
             with tog1:
                 semantic = st.toggle("语义搜索", value=True, help="用向量检索理解语义，而非仅字面匹配")
@@ -148,6 +149,25 @@ def render_notebook_page(user: dict) -> None:
                 )
                 source_doc_filter = None if doc_label == "全部" else doc_label
 
+            filt6, filt7 = st.columns(2)
+            with filt6:
+                present_regions = sorted({q.region for q in all_questions if q.region})
+                region_label = st.selectbox(
+                    "按地区筛选", ["全部", *present_regions], index=0, key="notebook_region"
+                )
+                region_filter = None if region_label == "全部" else region_label
+            with filt7:
+                present_textbooks = sorted(
+                    {q.textbook_version for q in all_questions if q.textbook_version}
+                )
+                textbook_label = st.selectbox(
+                    "按教材版本筛选",
+                    ["全部", *present_textbooks],
+                    index=0,
+                    key="notebook_textbook",
+                )
+                textbook_filter = None if textbook_label == "全部" else textbook_label
+
         questions = service.list_questions(
             view_user_id,
             include_others=include_others,
@@ -155,6 +175,8 @@ def render_notebook_page(user: dict) -> None:
             keyword=keyword or None,
             subject=subject_filter,
             grade=grade_filter,
+            region=region_filter,
+            textbook_version=textbook_filter,
             error_category=category_filter,
             source_doc=source_doc_filter,
             semantic=semantic,
@@ -190,10 +212,11 @@ def render_notebook_page(user: dict) -> None:
             with st.expander("📤 导出（打印重做 / 详解 / PDF）", expanded=False):
                 exp_col1, exp_col2, exp_col3 = st.columns(3)
                 with exp_col1:
-                    redo_io = generate_word_exam(questions, "错题复习卷", mode="redo", answer_key=True)
                     st.download_button(
                         "导出重做版（原图+留白+卷末答案）",
-                        data=redo_io,
+                        data=lambda: generate_word_exam(
+                            questions, "错题复习卷", mode="redo", answer_key=True
+                        ),
                         file_name=f"错题复习卷_重做版_{dt.date.today():%Y%m%d}.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         width="stretch",
@@ -201,20 +224,20 @@ def render_notebook_page(user: dict) -> None:
                         help="只含题目与答题留白，卷末附参考答案，适合打印重做",
                     )
                 with exp_col2:
-                    detail_io = generate_word_exam(questions, "错题详解卷", mode="detailed")
                     st.download_button(
                         "导出详解版（含解析答案）",
-                        data=detail_io,
+                        data=lambda: generate_word_exam(
+                            questions, "错题详解卷", mode="detailed"
+                        ),
                         file_name=f"错题详解卷_{dt.date.today():%Y%m%d}.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         width="stretch",
                         help="含完整解析、答案与变式练习",
                     )
                 with exp_col3:
-                    pdf_io = generate_pdf_exam(questions, "错题复习卷")
                     st.download_button(
                         "导出 PDF（打印友好）",
-                        data=pdf_io,
+                        data=lambda: generate_pdf_exam(questions, "错题复习卷"),
                         file_name=f"错题复习卷_{dt.date.today():%Y%m%d}.pdf",
                         mime="application/pdf",
                         width="stretch",
@@ -239,8 +262,8 @@ def render_notebook_page(user: dict) -> None:
             if st.button("清除筛选条件", width="stretch"):
                 for key in (
                     "notebook_search", "notebook_tag", "notebook_page",
-                    "notebook_subject", "notebook_grade", "notebook_errcat",
-                    "notebook_source_doc",
+                    "notebook_subject", "notebook_grade", "notebook_region",
+                    "notebook_textbook", "notebook_errcat", "notebook_source_doc",
                 ):
                     st.session_state.pop(key, None)
                 st.rerun()
@@ -294,10 +317,16 @@ def render_notebook_page(user: dict) -> None:
             f"{k12_label + '　·　' if k12_label else ''}"
             f"{(q.created_at.strftime('%Y-%m-%d') if q.created_at else '')}"
         )
-        with st.expander(expander_title):
-            _render_question_detail(service, q, user)
-            if st.checkbox("选中", key=f"select_{q.id}"):
-                selected_ids.append(q.id)
+        question_expander = st.expander(
+            expander_title, key=f"notebook_question_{q.id}", on_change="rerun"
+        )
+        if question_expander.open:
+            with question_expander:
+                _render_question_detail(service, q, user)
+                if st.checkbox("选中", key=f"select_{q.id}"):
+                    selected_ids.append(q.id)
+        elif st.session_state.get(f"select_{q.id}"):
+            selected_ids.append(q.id)
 
     if selected_ids:
         st.warning(f"已选中 {len(selected_ids)} 题")
@@ -341,11 +370,31 @@ def _share_card_button(q) -> None:
     """生成错题分享卡片 PNG。"""
     from backend.services.share_card import render_share_card
 
-    if st.button("🖼️ 生成分享卡片", key=f"share_{q.id}", width="stretch"):
-        stream = render_share_card(q)
+    generating_key = f"share_generating_{q.id}"
+    data_key = f"share_data_{q.id}"
+
+    def start_generating() -> None:
+        st.session_state[generating_key] = True
+
+    st.button(
+        "🖼️ 生成分享卡片",
+        key=f"share_{q.id}",
+        width="stretch",
+        disabled=st.session_state.get(generating_key, False),
+        on_click=start_generating,
+    )
+    if st.session_state.get(generating_key, False):
+        try:
+            with st.spinner("正在生成分享卡片…"):
+                st.session_state[data_key] = render_share_card(q).getvalue()
+        finally:
+            st.session_state[generating_key] = False
+        st.rerun()
+
+    if data_key in st.session_state:
         st.download_button(
             "下载分享卡片",
-            data=stream,
+            data=st.session_state[data_key],
             file_name=f"错题卡片_{q.id}.png",
             mime="image/png",
             width="stretch",
@@ -473,6 +522,9 @@ def _render_detection(service, q, user) -> None:
         st.caption(
             f"来源：{source_label} · 难度 {tested['difficulty']}"
             + (f" · 知识点：{'、'.join(points[:3])}" if points else "")
+        )
+        render_figures(
+            tested.get("figure_paths") or [], alt_prefix=f"题 {q.id} 的同类题图形"
         )
         st.markdown(tested["content"])
         with st.form(f"det_form_{q.id}"):

@@ -48,6 +48,32 @@ def submit_detection_answer(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
 
+@router.get("/detection/{log_id}/figures/{index}")
+def detection_figure(
+    log_id: int,
+    index: int,
+    token: str = "",
+    user: User = Depends(get_current_user),
+):
+    """读取当前用户检测题的短期签名图形，下标从 0 开始。"""
+    from fastapi.responses import FileResponse
+
+    from backend.services.asset_tokens import resolve_detection_figure_path
+    from backend.services.demotion import DemotionService
+
+    if DemotionService().get_log(log_id, user.id) is None or index < 0:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    try:
+        path = resolve_detection_figure_path(
+            token, log_id=log_id, user_id=user.id, figure_index=index
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在") from exc
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    return FileResponse(path)
+
+
 @router.get("/questions/{question_id}/detection/history")
 def detection_history(question_id: int, user: User = Depends(get_current_user)) -> dict:
     """某题检测历史（新→旧）+ 连续通过进度与降级状态。"""

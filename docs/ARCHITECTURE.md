@@ -130,12 +130,12 @@ SQLite / MySQL  +  ChromaDB  +  文件存储
 
 `mobile/`：Vite + React + TypeScript + Tailwind + shadcn/ui 的独立移动端 Web（PWA 外壳），直连 FastAPI 网关，与 Streamlit 教师端并存。设计原则：**学生高频功能极简前置，低频功能藏入口**。
 
-- **底部四 Tab**：复习（闪卡 + 四档 SM-2 评分 2×2 触控）/ 录题（`capture="environment"` 唤起相机）/ 错题本（防抖搜索 + 分页 + 详情弹窗）/ 我的（统计 + 退出）。整卷导入、导出、管理类操作不进主导航。
+- **底部五 Tab**：复习（闪卡 + 四档 SM-2 评分 2×2 触控）/ 录题（`capture="environment"` 唤起相机）/ 助手 / 错题本（防抖搜索 + 分页 + 详情弹窗）/ 我的（统计 + 退出）。整卷导入仅保留录题页底部入口，不新增主导航或文字录入入口。
 
 ![复习闪卡](screenshots/mobile-review.png)
 - **会话**：JWT 存 localStorage；启动时本地无令牌直接进登录页（避免必失败的 `/auth/me`）；任一请求 401 派发自定义事件全局登出；429 按 `Retry-After` 提示。
-- **原图**：`<img>` 无法带 Authorization 头，经 `GET /questions/{id}/image` 鉴权拉 blob 转 objectURL。
-- **按需分包**：jspdf（386 KB）仅在整卷导入时动态加载；`MathText`（react-markdown + KaTeX，396 KB）懒加载渲染 Markdown 与公式，chunk 加载期间纯文本兜底，主包 391 KB（gzip 123 KB）。AI 输出的 `\(...\)`/`\(...\)` 定界符统一归一化为 `$...$`/`$$...$$`。
+- **内容与图片**：Mobile 使用服务端 `stem` / `analysis`，不再自行猜测存储格式。原图、题目/整卷有效图和检测生成图均通过属主校验或短期签名令牌保护的 API 拉取为 blob；组件负责释放 object URL。
+- **按需分包**：`MathText`（react-markdown + KaTeX）懒加载渲染 Markdown 与公式，chunk 加载期间纯文本兜底。AI 输出的 `\(...\)`/`\[...\]` 定界符统一归一化为 `$...$`/`$$...$$`。
 - **同类题检测**：`DetectionPanel` 两个入口——错题详情内嵌；复习评「忘了/勉强」后拦截跳题，先出巩固间页（可跳过）。走 `POST /questions/{id}/detection/start` → `POST /detection/{log_id}/answer`，作答判分后展示连续通过进度与降级/回升/掌握联动结果。
 
 ### 11.1 学生侧功能动线
@@ -143,54 +143,66 @@ SQLite / MySQL  +  ChromaDB  +  文件存储
 ```
 复习（默认 Tab）                    录题                         错题本
 ─────────────                     ──────────                   ──────────
-到期闪卡                           拍照上传                      防抖搜索/分页
+到期闪卡                           一张/多张照片                 防抖搜索/分页
   │                                │                            │
-显示解析                           AI 解析                       点卡片看详情
-  │                                │                            │
-四档评分                    ┌──────┴───────┐                    └─ 同类题检测
-  │                        │ 小题聚焦提示  │                         │
-  ├ 记得/秒懂 → 下一题      │ 没拍全警告   │                         ▼
-  │                        └──────┬───────┘                   作答判分 + 降级联动
-  └ 忘了/勉强 → 巩固间页          ▼
-       │                     已归档（结果页）
-       ├ 同类题检测 → 作答判分 → 降级/回升/掌握
-       └ 跳过 → 下一题
+显示解析                    多题 → 候选勾选              点卡片看详情（题面/解析/有效图）
+  │                         单题 → 自动整图录入                  │
+四档评分                           │                            └─ 同类题检测
+  │                                ▼                               │
+  ├ 记得/秒懂 → 下一题      入库/重复/失败结果               作答判分 + 降级联动
+  └ 忘了/勉强 → 巩固间页
 
-录题页底部隐藏入口：整卷导入（多图 → PDF → 切题解构 → 校对 → 批量入库）
+录题页底部现有入口：整卷导入（PDF/DOCX 或逐页图片 → 校对 → 批量入库）
 ```
 
 ![评「忘了」后的巩固间页](screenshots/mobile-review-detection.png)
 ![检测判分结果](screenshots/mobile-detection-result.png)
 
-### 11.2 整卷导入闭环（拍照 → 分析 → 批量入库）
+### 11.2 拍照录题闭环
 
-学生侧最高频的批量录入场景。入口藏在录题页底部（「拍的是一整张试卷？试试整卷导入 →」）：
+现有拍照入口与 Web 共用 `PhotoEntryService`，Mobile 只通过 REST 读取任务和提交选择：
+
+```
+POST /photo-entry/jobs（多图、可选标签/备注）
+  ▼
+GET /photo-entry/jobs/{job_id}（planning / review / importing / done / failed）
+  ▼
+多题候选：POST /photo-entry/jobs/{job_id}/confirm（仅提交稳定 candidate ID）
+无候选回退：服务端自动逐图解析，无需学生确认
+  ▼
+完成页：入库、重复、失败明细；任务 ID 在完成后清除
+```
+
+疑似错题候选默认选中。单题、空切题或切题异常直接回退整图，不重复调用切题；同图去重和单项失败隔离由共享服务处理。任务 ID 持久化到 localStorage，刷新或切走后恢复未完成任务。Mobile 不显示 K12 表单，请求使用共享默认值：数学、10 年级、上海、沪教版。
+
+### 11.3 整卷导入闭环
+
+入口仍在录题页底部（「拍的是一整张试卷？试试整卷导入 →」）：
 
 ![录题页与整卷入口](screenshots/mobile-batch-entry.png)
 ![整卷导入选页](screenshots/mobile-batch-pages.png)
 
 ```
-多页照片（≤20 页）
-  │  客户端合成 PDF：canvas 压至 1600px / JPEG 0.8，一图一页 A4（jspdf 动态加载）
+一份 PDF/DOCX，或逐页 JPEG/PNG/WEBP（≤20 页，保持选择顺序）
   ▼
-POST /documents/import（重复文档按哈希复用既有任务）
-  │  job_id
+POST /documents/import（use_default_context=true；重复文档按哈希复用既有任务）
   ▼
-轮询 GET /documents/{job_id}/segments（2s，进度条 done/total）
-  │
+轮询 GET /documents/{job_id}/segments（2s，显示 done/total）
   ▼
-校对列表：题号 / 知识点 / 「建议复核」「解析失败」标记 / 删除误切题（DELETE segment）
-  │
+校对：页码/来源/题干/有效图 + 删除误切题 + 单题重新解析
   ▼
-POST /documents/{job_id}/confirm → 批量入库（幂等；解析失败的题跳过并计数）
+POST /documents/{job_id}/confirm → 幂等入库；失败题跳过并展示可展开原因
 ```
 
-- **为什么客户端合成 PDF**：整卷导入管线只接受 PDF/DOCX（切题按页进行），手机拍照是 JPEG/PNG；在端侧压缩合成既满足 50MB 网关上限，又避免多图多次往返。
-- **编辑能力取舍**：移动端只给「删除误切题」；合并/拆分/重解析等校对编辑留给教师端（低频且需要精细操作）。
-- **任务可恢复**：解析在服务端后台线程跑，前端把 job_id 持久化到 localStorage——切 Tab、锁屏、关浏览器都不丢；回到录题页自动恢复：解析中→进度页续跑，解析完→直接进校对页，已确认/失败→自动清除。卡死任务（如服务端重启导致状态永远 running）有「放弃这次导入」逃生出口。
-- **手机文件选择兼容**：选片框 `accept="image/*"`（不拦 HEIC），`onChange`/`onInput` 双挂且读后立即清空 value 去重——覆盖 iOS Safari 与国产/微信内置浏览器只派发其一的情况；读取失败弹明确提示而非静默。
+多图直接上传，不再经客户端 PDF 合成。Mobile 只提供删除和重新解析，不提供题干/解析编辑、合并、拆分、TikZ 编辑或人工图形编辑。解析任务在服务端运行，job ID 持久化到 localStorage；未完成任务可恢复，卡死任务可放弃本地视图。文件选择器同时处理 `onChange`/`onInput`，读取后清空 input 以允许再次选择同一文件。
 
 ![校对确认](screenshots/mobile-batch-review.png)
 ![入库完成](screenshots/mobile-batch-done.png)
 
-实拍验证（Playwright 390×844 + 真实 AI 解析）：两页模拟试卷 → 合成 PDF → 切题解构 → 校对页 → 确认入库 2 题，全流程无 JS 报错。
+### 11.4 内容、图形与验收边界
+
+题面/解析拆分由后端统一处理，兼容拍照分隔格式、整卷 `### 题目` / `### 解析` 格式和无分隔旧数据。详情、复习、整卷校对和同类题检测优先显示最终有效图；没有有效图时按既有规则回退完整原图/原页。`validation_status="fallback"` 只显示「图形为原图裁剪，请核对准确性」，不展示 TikZ 源码。
+
+CI 构建 `mobile/dist`，检查 8000 上 API 健康状态，再运行 8 个 390×844 Playwright Mobile 场景。测试默认另起带临时数据库和受控 MockProvider 的隔离 API，失败截图作为 artifact 上传；这些场景验证流程、契约、鉴权资源接线和兜底展示，不证明真实模型的几何识别或 TikZ 语义准确性，后者仍需单独人工验收。
+
+注册时采集学科、年级、地区和教材版本偏好，并用偏好替代默认上下文，仍是后续工作；当前没有该注册资料契约或 Mobile 表单。

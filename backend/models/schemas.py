@@ -66,13 +66,42 @@ class QuestionAnalysis(BaseModel):
         return cleaned or value
 
     def merged_tags(self, user_tags: list[str]) -> list[str]:
-        """AI 标签与用户手填标签合并去重，保持顺序稳定。"""
+        """AI 标签与用户手填标签合并去重，保持顺序并遵守标签上限。"""
         seen: list[str] = []
         for tag in [*user_tags, *self.tags, *self.knowledge_points]:
             normalized = tag.strip()
             if normalized and normalized not in seen:
                 seen.append(normalized)
-        return seen
+        return seen[:6]
+
+
+class GeometryFigureDraft(BaseModel):
+    kind: str
+    semantic_spec: dict
+    tikz_source: str
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class FigureComparison(BaseModel):
+    passed: bool
+    issues: list[str] = Field(default_factory=list)
+    repair_instruction: str = ""
+
+
+class GeometryVariant(BaseModel):
+    question: str
+    figures: list[GeometryFigureDraft] = Field(default_factory=list)
+
+
+class FigureSpec(BaseModel):
+    kind: str
+    semantic_spec: dict
+    tikz_source: str
+    render_path: str | None = None
+    crop_path: str | None = None
+    validation_status: Literal["ai_passed", "manual_passed", "fallback"]
+    validation_issues: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
 
 
 class AIProviderInfo(BaseModel):
@@ -89,6 +118,8 @@ class QuestionOut(BaseModel):
     id: int
     user_id: int
     image_path: str | None
+    figure_paths: list[str] = Field(default_factory=list)
+    figure_specs: list[FigureSpec] = Field(default_factory=list)
     content_markdown: str
     answer: str
     knowledge_points: list[str] = Field(default_factory=list)
@@ -121,10 +152,20 @@ class QuestionOut(BaseModel):
         # 原图路径自愈：库里的绝对路径在 DATA_DIR 迁移后可能失效，
         # 这里换成当前真实可用路径（找不到则留空，界面按"无图"处理）。
         resolved = q.resolved_image_path() if hasattr(q, "resolved_image_path") else None
+        resolved_figures = (
+            q.resolved_figure_paths() if hasattr(q, "resolved_figure_paths") else []
+        )
+        resolved_figure_specs = (
+            q.resolved_figure_specs()
+            if hasattr(q, "resolved_figure_specs")
+            else getattr(q, "figure_specs", None) or []
+        )
         return cls(
             id=q.id,
             user_id=q.user_id,
             image_path=str(resolved) if resolved else None,
+            figure_paths=[str(path) for path in resolved_figures],
+            figure_specs=resolved_figure_specs,
             content_markdown=q.content_markdown,
             answer=q.answer,
             knowledge_points=list(q.knowledge_points or []),
@@ -151,6 +192,22 @@ class QuestionOut(BaseModel):
             created_at=q.created_at,
             demotion_state=getattr(q, "demotion_state", None) or "normal",
         )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def stem(self) -> str:
+        """从原始 Markdown 内容派生题面。"""
+        from backend.services.question_content import split_stem_and_analysis
+
+        return split_stem_and_analysis(self.content_markdown)[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def analysis(self) -> str | None:
+        """从原始 Markdown 内容派生解析；旧题或无解析时为 None。"""
+        from backend.services.question_content import split_stem_and_analysis
+
+        return split_stem_and_analysis(self.content_markdown)[1]
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -23,6 +23,19 @@ uvicorn api.main:app --port 8000   # API: http://localhost:8000/docs（可选）
 
 首次启动自动建表并创建种子账号（`SEED_*` 环境变量可改），请立即在「设置」中修改密码。
 
+### 1.1 TikZ 几何图：TinyTeX / TeX Live 2026
+
+几何图重绘使用外部 TinyTeX / TeX Live 2026，**不是 pip 依赖，也不会离线内置到部署包**。顶层宏包清单为 `deploy/tinytex-requirements.txt`（`standalone`、`pgf`、`amsmath`），传递依赖由 `tlmgr` 解析。首次自动配置需要访问 TinyTeX 官方安装脚本及 TeX 包仓库的网络：
+
+```bash
+python scripts/install_tinytex.py              # 缺失时安装；已满足时跳过
+python scripts/install_tinytex.py --check-only  # 只检查，不下载、不安装
+```
+
+自检严格要求 TeX Live 2026，检查全部清单宏包，并通过生产 `TikzRenderer` / `build_document` 真实编译最小 TikZ 图。可用 `PDFLATEX_PATH` 指定编译器绝对路径，用 `TIKZ_TIMEOUT_SECONDS` 设置超时（大于 0、最多 120 秒）。Windows 部署启动器只注入实际存在且可执行的 `pdflatex` 路径，已有配置优先。
+
+缺少 TeX、版本不符或编译失败不会阻止应用启动或整卷导入；几何图会按需降级为原图裁剪，其他功能保持可用。离线部署可跳过 TeX 安装并接受此降级，后续联网配置即可启用重绘。
+
 ## 1.5 家庭局域网部署（电脑做服务端，手机/平板同 Wi-Fi 使用）
 
 移动端是纯静态构建产物，**由 FastAPI 网关同源托管在 `/m`**：一个 8000 端口同时服务

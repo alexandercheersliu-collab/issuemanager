@@ -16,6 +16,9 @@ logger = get_logger("auth")
 
 _FAIL_DELAY_SECONDS = 1.0  # 失败时固定延迟，抑制暴力枚举
 
+# admin 重置密码时写入的初始密码；重置后应提醒用户尽快自行修改
+INITIAL_PASSWORD = "123456"
+
 # 进程内默认限流器；多实例部署可注入 Redis 实现的 RateLimiter
 _login_limiter: RateLimiter = InMemoryRateLimiter()
 
@@ -73,3 +76,30 @@ class AuthService:
             return LoginResult(ok=False, message="新密码至少 6 位")
         self.repo.update_password(user_id, new_password, get_settings().bcrypt_rounds)
         return LoginResult(ok=True, message="密码已更新")
+
+    def reset_password_by_admin(self, admin_user_id: int, target_user_id: int) -> LoginResult:
+        """admin 把指定用户密码重置为 INITIAL_PASSWORD，并解除其登录限流锁定。
+
+        目标不能也是 admin 账号（防管理员互踢）；调用者身份由
+        is_admin_username 判定，与 users.role 独立。
+        """
+        admin = self.repo.get_by_id(admin_user_id)
+        if admin is None:
+            raise ValueError("调用者不存在")
+        if not is_admin_username(admin.username):
+            raise PermissionError("仅管理员可重置密码")
+        target = self.repo.get_by_id(target_user_id)
+        if target is None:
+            raise ValueError("目标用户不存在")
+        if is_admin_username(target.username):
+            raise ValueError("不能重置管理员账号的密码")
+
+        self.repo.update_password(target.id, INITIAL_PASSWORD, get_settings().bcrypt_rounds)
+        self.limiter.reset(target.username.strip().lower())
+        logger.info("admin %s 重置了用户 %s 的密码", admin.username, target.username)
+        return LoginResult(
+            ok=True,
+            user_id=target.id,
+            username=target.username,
+            message=f"已将 {target.username} 的密码重置为初始密码",
+        )

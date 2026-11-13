@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import select
@@ -19,7 +20,12 @@ from sqlalchemy import select
 from backend.config import Settings, get_settings
 from backend.database import SessionLocal
 from backend.models.orm import Job
-from backend.services.document import SUPPORTED_SUFFIXES, parse_document
+from backend.services.document import (
+    IMAGE_SUFFIXES,
+    SUPPORTED_SUFFIXES,
+    parse_document,
+    parse_images,
+)
 from backend.utils.logging import get_logger
 
 logger = get_logger("document_service")
@@ -38,24 +44,48 @@ class DocumentService:
         data: bytes,
         filename: str,
         *,
+        extra_files: list[tuple[bytes, str]] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
         textbook_version: str | None = None,
+        match_context: bool = False,
     ) -> tuple[str, bool]:
         """接收文档字节，落 DOC_UPLOAD_PATH 并创建异步导入任务。
 
-        返回 (job_id, duplicated)：同一用户重复上传同一文档（SHA-256 相同）
-        且已有任务未失败时，直接返回既有任务，不重复解析。
+        extra_files：整卷拍照的其余照片（(字节, 文件名)，按上传顺序，每张 = 一页）；
+        仅图片格式支持多文件，PDF/DOCX 恒为单文件。
+        返回 (job_id, duplicated)：同一用户重复上传同一文档（SHA-256 相同，
+        多文件按序拼接计算）且已有非空任务未失败时，直接返回既有任务，不重复解析；
+        match_context 时仅复用 K12 上下文一致的任务。历史空结果任务不复用。
         """
-        suffix = Path(filename).suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
-            raise ValueError(f"不支持的文档格式: {suffix}（支持 {sorted(SUPPORTED_SUFFIXES)}）")
-        if not data:
-            raise ValueError("文档内容为空")
+        files = [(data, filename), *(extra_files or [])]
+        for file_data, file_name in files:
+            file_suffix = Path(file_name).suffix.lower()
+            if file_suffix not in SUPPORTED_SUFFIXES:
+                raise ValueError(
+                    f"不支持的文档格式: {file_suffix}（支持 {sorted(SUPPORTED_SUFFIXES)}）"
+                )
+            if not file_data:
+                raise ValueError("文档内容为空")
+        if len(files) > 1 and any(
+            Path(name).suffix.lower() not in IMAGE_SUFFIXES for _, name in files
+        ):
+            raise ValueError("多文件仅支持图片格式（jpg/jpeg/png/webp，每张 = 试卷一页）")
 
-        doc_hash = hashlib.sha256(data).hexdigest()
-        existing = self._find_active_job(user_id, doc_hash)
+        hasher = hashlib.sha256()
+        for file_data, _ in files:
+            hasher.update(file_data)
+        doc_hash = hasher.hexdigest()
+        context = {
+            "subject": subject or "math",
+            "grade": grade,
+            "region": region,
+            "textbook_version": textbook_version,
+        }
+        existing = self._find_active_job(
+            user_id, doc_hash, context=context if match_context else None
+        )
         if existing is not None:
             logger.info("重复文档 job=%s user=%s，直接复用", existing, user_id)
             return existing, True
@@ -63,8 +93,15 @@ class DocumentService:
         upload_dir = self.settings.doc_upload_path
         assert upload_dir is not None  # model_validator 保证非 None
         upload_dir.mkdir(parents=True, exist_ok=True)
-        doc_path = upload_dir / f"{doc_hash}{suffix}"
-        doc_path.write_bytes(data)
+        saved_paths: list[Path] = []
+        for index, (file_data, file_name) in enumerate(files):
+            file_suffix = Path(file_name).suffix.lower()
+            stem = doc_hash if index == 0 else f"{doc_hash}-p{index + 1}"
+            saved = upload_dir / f"{stem}{file_suffix}"
+            saved.write_bytes(file_data)
+            saved_paths.append(saved)
+        doc_path = saved_paths[0]
+        is_image_job = Path(filename).suffix.lower() in IMAGE_SUFFIXES
 
         job_id = uuid.uuid4().hex
         with SessionLocal() as session:
@@ -78,6 +115,8 @@ class DocumentService:
                         "filename": filename,
                         "doc_hash": doc_hash,
                         "doc_path": str(doc_path),
+                        # 图片任务：全部照片路径（含首张），按上传顺序成页
+                        "image_paths": [str(p) for p in saved_paths] if is_image_job else None,
                         "subject": subject or "math",
                         "grade": grade,
                         "region": region,
@@ -94,15 +133,25 @@ class DocumentService:
         logger.info("文档导入任务已提交 job=%s user=%s file=%s", job_id, user_id, filename)
         return job_id, False
 
-    def _find_active_job(self, user_id: int, doc_hash: str) -> str | None:
-        """按 SHA-256 找同用户未失败的既有导入任务。"""
+    def _find_active_job(
+        self, user_id: int, doc_hash: str, *, context: dict | None = None
+    ) -> str | None:
+        """按 SHA-256 找同用户可复用任务；指定上下文时必须完全一致。"""
         with SessionLocal() as session:
             jobs = session.execute(
                 select(Job).where(Job.user_id == user_id, Job.type == JOB_TYPE)
             ).scalars()
             for job in jobs:
-                if (job.payload or {}).get("doc_hash") == doc_hash and job.status != "failed":
-                    return job.id
+                payload = job.payload or {}
+                if payload.get("doc_hash") != doc_hash or job.status == "failed":
+                    continue
+                if job.status == "success" and not (job.result or {}).get("total"):
+                    continue
+                if context is not None and any(
+                    payload.get(key) != value for key, value in context.items()
+                ):
+                    continue
+                return job.id
         return None
 
     # ---------- 异步执行 ----------
@@ -110,6 +159,7 @@ class DocumentService:
         """完整管线：解析 → 双策略切题 → 逐题结构化解构（进度写入 result）。"""
         from backend.services.ai import get_ai_service
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeometryFigureService
         from backend.services.segment import segment_document
 
         with SessionLocal() as session:
@@ -121,10 +171,12 @@ class DocumentService:
             session.commit()
 
         try:
-            pages = parse_document(
-                payload["doc_path"],
-                Path(payload["doc_path"]).parent / "pages" / job_id,
-            )
+            work_dir = Path(payload["doc_path"]).parent / "pages" / job_id
+            if payload.get("image_paths"):
+                # 整卷拍照：照片按上传顺序成页（一页一图）
+                pages = parse_images(payload["image_paths"], work_dir)
+            else:
+                pages = parse_document(payload["doc_path"], work_dir)
             ai = get_ai_service(self.settings)
             context = AnalysisContext(
                 subject=payload.get("subject") or "math",
@@ -132,11 +184,23 @@ class DocumentService:
                 region=payload.get("region"),
                 textbook_version=payload.get("textbook_version"),
             )
-            segments = segment_document(pages, ai)
+            figure_service = GeometryFigureService.from_settings(ai, self.settings)
+            segments = segment_document(
+                pages,
+                ai,
+                max_workers=self.settings.import_concurrency,
+                figures_dir=work_dir / "figures",
+                figure_service=figure_service,
+                context=context,
+            )
 
             result: dict = {
                 "pages": len(pages),
                 "scanned_pages": sum(1 for p in pages if p.is_scanned),
+                # 逐页页图路径（确认入库时按 page_start 关联到题目）
+                "page_images": [
+                    str(p.image_path) if p.image_path is not None else None for p in pages
+                ],
                 "total": len(segments),
                 "done": 0,
                 "segments": [],
@@ -144,8 +208,12 @@ class DocumentService:
             }
             self._save_result(job_id, result)
 
-            for segment in segments:
-                entry: dict = {
+            # 逐题解构是远程调用，按 import_concurrency 并发；工作线程只调
+            # analyze_text 并带回 (下标, 结果, 异常)，result 的所有改动
+            # （entries / done / _save_result）都发生在主线程，无需加锁。
+            # entries 预按题序建好，最终 segments 顺序与切题顺序一致（与完成顺序无关）。
+            entries: list[dict] = [
+                {
                     "number": segment.number,
                     "text": segment.text,
                     "page_start": segment.page_start,
@@ -153,19 +221,36 @@ class DocumentService:
                     "needs_review": segment.needs_review,
                     "continued": segment.continued,
                     "source": segment.source,
+                    "figure_paths": list(segment.figure_paths),
+                    "figure_specs": list(segment.figure_specs),
                     "analysis": None,
                     "error": None,
                 }
+                for segment in segments
+            ]
+            result["segments"] = entries
+
+            def _analyze(index: int):
                 try:
-                    analysis = ai.analyze_text(segment.text[:4000], context=context)
-                    entry["analysis"] = analysis.model_dump(mode="json")
+                    analysis = ai.analyze_text(segments[index].text[:4000], context=context)
+                    return index, analysis, None
                 except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷
-                    logger.warning("逐题解构失败 job=%s 题%s: %s", job_id, segment.number, exc)
-                    entry["error"] = str(exc)
-                    entry["needs_review"] = True
-                result["segments"].append(entry)
-                result["done"] += 1
-                self._save_result(job_id, result)
+                    return index, None, exc
+
+            workers = max(1, self.settings.import_concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_analyze, i) for i in range(len(segments))]
+                for future in as_completed(futures):
+                    index, analysis, exc = future.result()
+                    entry = entries[index]
+                    if exc is not None:
+                        logger.warning("逐题解构失败 job=%s 题%s: %s", job_id, entry["number"], exc)
+                        entry["error"] = str(exc)
+                        entry["needs_review"] = True
+                    else:
+                        entry["analysis"] = analysis.model_dump(mode="json")
+                    result["done"] += 1
+                    self._save_result(job_id, result)
 
             self._finish(job_id, status="success", result=result)
         except Exception as exc:  # noqa: BLE001 - 失败落库供轮询方查看
@@ -265,22 +350,37 @@ class DocumentService:
         text: str | None = None,
         analysis_updates: dict | None = None,
     ) -> dict:
-        """编辑题干与解构字段（白名单内逐字段覆盖，可手工补齐解构失败的题）。
-
-        人工编辑即视为已校对：清除 needs_review 与 error。
-        """
+        """编辑题干与解构字段；题干变化后要求重新进行图文对比。"""
         result, _ = self._load_editable(job_id, user_id)
         entry = self._segment_at(result, index)
+        text_changed = False
         if text is not None and text.strip():
-            entry["text"] = text.strip()
+            updated_text = text.strip()
+            text_changed = updated_text != entry.get("text")
+            entry["text"] = updated_text
         if analysis_updates:
             analysis = dict(entry.get("analysis") or {})
             for key, value in analysis_updates.items():
                 if key in self.EDITABLE_ANALYSIS_FIELDS:
                     analysis[key] = value
             entry["analysis"] = analysis
+        if text_changed:
+            specs = []
+            for current in entry.get("figure_specs") or []:
+                spec = dict(current)
+                if spec.get("validation_status") in {"ai_passed", "manual_passed"}:
+                    spec["validation_status"] = "fallback"
+                    spec["validation_issues"] = [
+                        *(spec.get("validation_issues") or []),
+                        "题干已修改，需重新进行图文对比",
+                    ]
+                specs.append(spec)
+            entry["figure_specs"] = specs
         entry["error"] = None
-        entry["needs_review"] = False
+        entry["needs_review"] = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
         self._save_edit(job_id, result, "update", index, f"编辑题 {entry.get('number')}")
         logger.info("校对编辑 job=%s index=%s", job_id, index)
         return entry
@@ -303,6 +403,14 @@ class DocumentService:
             "needs_review": True,
             "continued": first.get("continued", False),
             "source": first.get("source", "merged"),
+            "figure_paths": [
+                *(first.get("figure_paths") or []),
+                *(second.get("figure_paths") or []),
+            ],
+            "figure_specs": [
+                *(first.get("figure_specs") or []),
+                *(second.get("figure_specs") or []),
+            ],
             "analysis": first.get("analysis") or second.get("analysis"),
             "error": None,
         }
@@ -335,6 +443,8 @@ class DocumentService:
             "error": None,
             "needs_review": True,
             "continued": False,
+            "figure_paths": [],
+            "figure_specs": [],
         }
         result["segments"][index : index + 1] = [first, second]
         self._save_edit(
@@ -352,12 +462,13 @@ class DocumentService:
         logger.info("校对删除 job=%s index=%s", job_id, index)
 
     def reanalyze_segment(self, job_id: str, user_id: int, index: int) -> dict:
-        """单题重新解构：调既有 AI 文本解析管线，成功后清除 needs_review。
+        """单题重新解构，并为旧任务补齐图形定位与重绘结果。
 
         失败时错误落回 entry（needs_review 保持）并抛 RuntimeError，供界面提示。
         """
         from backend.services.ai import get_ai_service
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeometryFigureService
 
         result, payload = self._load_editable(job_id, user_id)
         entry = self._segment_at(result, index)
@@ -368,7 +479,35 @@ class DocumentService:
             region=payload.get("region"),
             textbook_version=payload.get("textbook_version"),
         )
+        figure_needs_review = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
         try:
+            if "figure_specs" not in entry:
+                page_images = result.get("page_images") or []
+                page_start = entry.get("page_start")
+                if isinstance(page_start, int) and 0 < page_start <= len(page_images):
+                    image_path = page_images[page_start - 1]
+                    if image_path:
+                        located = ai.locate_figures(
+                            Path(image_path).read_bytes(),
+                            [{"number": entry.get("number"), "text": entry["text"]}],
+                            "image/png",
+                        )
+                        outcome = GeometryFigureService.from_settings(
+                            ai, self.settings
+                        ).redraw_segment(
+                            image_path=Path(image_path),
+                            number=entry.get("number"),
+                            text=entry["text"],
+                            figure_bboxes=located[0] if located else [],
+                            figures_dir=Path(image_path).parent / "figures",
+                            context=context,
+                        )
+                        entry["figure_paths"] = list(outcome.figure_paths)
+                        entry["figure_specs"] = list(outcome.figure_specs)
+                        figure_needs_review = outcome.needs_review
             analysis = ai.analyze_text(entry["text"][:4000], context=context)
         except Exception as exc:  # noqa: BLE001 - 错误落库供界面展示
             entry["error"] = str(exc)
@@ -377,20 +516,140 @@ class DocumentService:
             raise RuntimeError(f"重新解析失败: {exc}") from exc
         entry["analysis"] = analysis.model_dump(mode="json")
         entry["error"] = None
-        entry["needs_review"] = False
+        entry["needs_review"] = figure_needs_review
         self._save_edit(job_id, result, "reanalyze", index, f"重解析题 {entry.get('number')}")
         logger.info("校对重解析 job=%s index=%s", job_id, index)
         return entry
 
+    @staticmethod
+    def _figure_spec_at(entry: dict, figure_index: int) -> dict:
+        specs = entry.get("figure_specs") or []
+        if not 0 <= figure_index < len(specs):
+            raise IndexError(f"图序号越界: {figure_index}（共 {len(specs)} 图）")
+        return specs[figure_index]
+
+    @staticmethod
+    def _effective_figure_path(spec: dict) -> str | None:
+        if spec.get("validation_status") == "fallback":
+            return spec.get("crop_path") or spec.get("render_path")
+        return spec.get("render_path") or spec.get("crop_path")
+
+    @classmethod
+    def _refresh_figure_paths(
+        cls, entry: dict, *, preserved_paths: dict[int, str | None] | None = None
+    ) -> None:
+        paths = []
+        for index, spec in enumerate(entry.get("figure_specs") or []):
+            if (
+                spec.get("validation_status") == "fallback"
+                and not spec.get("crop_path")
+                and preserved_paths is not None
+                and index in preserved_paths
+            ):
+                path = preserved_paths[index]
+            else:
+                path = cls._effective_figure_path(spec)
+            if path:
+                paths.append(path)
+        entry["figure_paths"] = paths
+        entry["needs_review"] = any(
+            spec.get("validation_status") == "fallback"
+            for spec in entry.get("figure_specs") or []
+        )
+
+    def recompile_segment_figure(
+        self,
+        job_id: str,
+        user_id: int,
+        index: int,
+        figure_index: int,
+        *,
+        tikz_source: str,
+    ) -> dict:
+        """只重编译用户提供的 TikZ；任何编译或对比异常均不改动旧图。"""
+        from backend.models.schemas import GeometryFigureDraft
+        from backend.services.ai import get_ai_service
+        from backend.services.geometry_figures import GeometryFigureService
+
+        result, _ = self._load_editable(job_id, user_id)
+        entry = self._segment_at(result, index)
+        spec = self._figure_spec_at(entry, figure_index)
+        page_images = result.get("page_images") or []
+        page_start = entry.get("page_start")
+        if not isinstance(page_start, int) or not 0 < page_start <= len(page_images):
+            raise ValueError("缺少原图参考，无法重新校对图形")
+        image_path = page_images[page_start - 1]
+        if not image_path:
+            raise ValueError("缺少原图参考，无法重新校对图形")
+        draft = GeometryFigureDraft(
+            kind=spec.get("kind") or "geometry",
+            semantic_spec=dict(spec.get("semantic_spec") or {}),
+            tikz_source=spec.get("tikz_source") or "",
+            assumptions=list(spec.get("assumptions") or []),
+        )
+        figures = GeometryFigureService.from_settings(get_ai_service(self.settings), self.settings)
+        reviewed = figures.review_tikz(
+            image_path=Path(image_path),
+            text=entry.get("text") or "",
+            figure_box=None,
+            draft=draft,
+            tikz_source=tikz_source,
+        )
+        if not reviewed.render_path:
+            raise RuntimeError("TikZ 编译未产生有效图形，已保留原图")
+        entry["figure_specs"][figure_index] = reviewed.model_dump(mode="json")
+        self._refresh_figure_paths(
+            entry,
+            preserved_paths={figure_index: self._effective_figure_path(spec)},
+        )
+        self._save_edit(
+            job_id,
+            result,
+            "recompile_figure",
+            index,
+            f"重新编译题 {entry.get('number')} 的第 {figure_index + 1} 张图",
+        )
+        logger.info("校对图形重编译 job=%s index=%s figure=%s", job_id, index, figure_index)
+        return entry
+
+    def accept_segment_figure(
+        self, job_id: str, user_id: int, index: int, figure_index: int
+    ) -> dict:
+        """人工确认已有成功渲染图；裁剪兜底图不能冒充编译成功图。"""
+        result, _ = self._load_editable(job_id, user_id)
+        entry = self._segment_at(result, index)
+        current = self._figure_spec_at(entry, figure_index)
+        render_path = current.get("render_path")
+        if not render_path:
+            raise ValueError("仅成功编译并产生渲染图后才能人工确认")
+        spec = dict(current)
+        spec["validation_status"] = "manual_passed"
+        entry["figure_specs"][figure_index] = spec
+        self._refresh_figure_paths(entry)
+        self._save_edit(
+            job_id,
+            result,
+            "accept_figure",
+            index,
+            f"人工确认题 {entry.get('number')} 的第 {figure_index + 1} 张图",
+        )
+        logger.info("人工确认图形 job=%s index=%s figure=%s", job_id, index, figure_index)
+        return entry
+
     # ---------- 确认入库 ----------
-    def confirm_import(self, job_id: str, user_id: int) -> dict:
+    def confirm_import(
+        self, job_id: str, user_id: int, *, context: dict | None = None
+    ) -> dict:
         """确认入库：把解构成功的 segments 批量写入错题本。
 
         source="document"、source_doc="文档名#页码"（跨页题为 #起-止），
-        K12 上下文取任务 payload，结构化字段取逐题解构结果。
+        K12 上下文取任务 payload；调用方可传确认时的最新上下文覆盖原值。
+        结构化字段取逐题解构结果。
         返回 imported（成功数）与 skipped（跳过题号及原因：未解构/入库失败）。
-        幂等：已确认的任务直接返回既有结果，不重复入库。
+        幂等：已确认的任务直接返回既有结果，不重复入库；确认中的并发请求返回冲突。
         """
+        from sqlalchemy import update
+
         from backend.services.question_service import QuestionService
 
         with SessionLocal() as session:
@@ -399,8 +658,6 @@ class DocumentService:
             ).scalar_one_or_none()
             if job is None:
                 raise LookupError("导入任务不存在")
-            if job.status != "success":
-                raise ValueError(f"任务尚未完成（当前状态 {job.status}）")
             result = dict(job.result or {})
             payload = dict(job.payload or {})
             if result.get("confirmed"):
@@ -409,9 +666,53 @@ class DocumentService:
                     "skipped": result.get("skipped", []),
                     "already_confirmed": True,
                 }
+            if job.status == "confirming":
+                raise ValueError("任务正在确认入库，请稍后重试")
+            if job.status != "success":
+                raise ValueError(f"任务尚未完成（当前状态 {job.status}）")
+            if context is not None:
+                for key in ("subject", "grade", "region", "textbook_version"):
+                    payload[key] = context.get(key)
+                payload["subject"] = payload["subject"] or "math"
+
+            session.rollback()
+            transition = session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.user_id == user_id,
+                    Job.type == JOB_TYPE,
+                    Job.status == "success",
+                    Job.result["confirmed"].as_boolean().is_(False),
+                )
+                .values(status="confirming", payload=payload)
+                .execution_options(synchronize_session=False)
+            )
+            if transition.rowcount != 1:
+                session.rollback()
+                current = session.execute(
+                    select(Job).where(
+                        Job.id == job_id, Job.user_id == user_id, Job.type == JOB_TYPE
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise LookupError("导入任务不存在")
+                current_result = dict(current.result or {})
+                if current_result.get("confirmed"):
+                    return {
+                        "imported": current_result.get("imported", 0),
+                        "skipped": current_result.get("skipped", []),
+                        "already_confirmed": True,
+                    }
+                if current.status == "confirming":
+                    raise ValueError("任务正在确认入库，请稍后重试")
+                raise ValueError(f"任务尚未完成（当前状态 {current.status}）")
+            session.commit()
 
         service = QuestionService(session_factory=SessionLocal)
         filename = payload.get("filename") or "document"
+        # 逐页页图（解析阶段落库），确认时按题目起始页关联到 question.image_path
+        page_images: list[str | None] = result.get("page_images") or []
         imported = 0
         skipped: list[dict] = []
         for entry in result.get("segments", []):
@@ -426,6 +727,12 @@ class DocumentService:
                 continue
             page_start, page_end = entry["page_start"], entry["page_end"]
             page_label = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
+            # 跨页题取起始页页图；页图缺失（如 DOCX）则为 None
+            image_path = (
+                page_images[page_start - 1]
+                if isinstance(page_start, int) and 0 < page_start <= len(page_images)
+                else None
+            )
             try:
                 service.create_manual_question(
                     user_id,
@@ -444,6 +751,9 @@ class DocumentService:
                     chapter=analysis.get("chapter") or None,
                     error_category=analysis.get("error_category") or None,
                     source_doc=f"{filename}#{page_label}",
+                    image_path=image_path,
+                    figure_paths=list(entry.get("figure_paths") or []),
+                    figure_specs=list(entry.get("figure_specs") or []),
                 )
                 imported += 1
             except Exception as exc:  # noqa: BLE001 - 单题失败不阻断整卷入库
@@ -453,7 +763,7 @@ class DocumentService:
         result["confirmed"] = True
         result["imported"] = imported
         result["skipped"] = skipped
-        self._save_result(job_id, result)
+        self._finish(job_id, status="success", result=result)
         logger.info(
             "确认入库完成 job=%s user=%s imported=%s skipped=%s",
             job_id, user_id, imported, len(skipped),

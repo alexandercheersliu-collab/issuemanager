@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from backend.services.entry_types import EntryResult
+from frontend.pages import tutor
 from frontend.pages.tutor import _collect_entries
 
 
@@ -70,3 +71,195 @@ def test_collect_entries_rejects_raw_tuple_contract():
 
     with pytest.raises(AttributeError):
         _collect_entries([("a.png", (SimpleNamespace(id=1), SimpleNamespace()), None)])
+
+
+def test_start_analysis_is_disabled_while_photo_job_is_planning(monkeypatch):
+    import io
+
+    from PIL import Image
+    from streamlit.testing.v1 import AppTest
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(buffer, format="JPEG")
+    image_bytes = buffer.getvalue()
+
+    class Upload:
+        name = "one.jpg"
+        type = "image/jpeg"
+
+        def getvalue(self):
+            return image_bytes
+
+    class FakeAI:
+        def provider_info(self):
+            return SimpleNamespace(demo_mode=False)
+
+    class FakeService:
+        ai = FakeAI()
+
+    class FakePhotoEntryService:
+        def get_job(self, job_id, user_id):
+            return {
+                "job_id": job_id,
+                "phase": "planning",
+                "candidates": [],
+                "fallback_count": 0,
+                "total": 0,
+                "done": 0,
+                "entries": [],
+                "error": None,
+            }
+
+    monkeypatch.setattr(tutor.st, "file_uploader", lambda *args, **kwargs: [Upload()])
+    monkeypatch.setattr(tutor, "get_question_service", lambda: FakeService())
+    monkeypatch.setattr(
+        tutor, "PhotoEntryService", lambda: FakePhotoEntryService(), raising=False
+    )
+    monkeypatch.setattr(tutor, "time", SimpleNamespace(sleep=lambda _: None), raising=False)
+    monkeypatch.setattr(tutor.st, "rerun", lambda: None)
+    at = AppTest.from_string(
+        "from frontend.pages import tutor\n"
+        "tutor.render_tutor_page({'id': 1})\n",
+        default_timeout=15,
+    )
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert not at.exception
+    button = next(button for button in at.button if button.label == "开始 AI 解析")
+    assert button.disabled is True
+
+
+def test_followup_rerun_keeps_photo_entry_analysis(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    question = {
+        "id": 7,
+        "user_id": 1,
+        "tags": ["方程"],
+        "difficulty": "medium",
+        "image_path": None,
+        "content_markdown": "题目\n\n---\n\n解析",
+        "answer": "x=2",
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "knowledge_points": ["一元二次方程"],
+        "question_type": "解答题",
+    }
+    analysis = {
+        "question_type": "解答题",
+        "chapter": "方程",
+        "error_category": None,
+        "knowledge_points": ["一元二次方程"],
+        "analysis": "### 解析\n由判别式判断根的情况。",
+        "answer": "x=2",
+        "mistake_cause": "",
+        "followup_question": "",
+    }
+
+    class FakeAI:
+        def provider_info(self):
+            return SimpleNamespace(demo_mode=False)
+
+    class FakeService:
+        ai = FakeAI()
+
+        def similar_questions(self, *args, **kwargs):
+            return SimpleNamespace(items=[])
+
+        def answer_followup(self, *args, **kwargs):
+            return "这是老师的追问答复。"
+
+    class FakePhotoEntryService:
+        def get_job(self, job_id, user_id):
+            return {
+                "job_id": job_id,
+                "phase": "done",
+                "candidates": [],
+                "fallback_count": 0,
+                "total": 1,
+                "done": 1,
+                "entries": [{
+                    "name": "one.jpg",
+                    "error": None,
+                    "question": question,
+                    "analysis": analysis,
+                    "duplicated": False,
+                }],
+                "error": None,
+            }
+
+    monkeypatch.setattr(tutor.st, "file_uploader", lambda *args, **kwargs: [])
+    monkeypatch.setattr(tutor, "get_question_service", lambda: FakeService())
+    monkeypatch.setattr(
+        tutor, "PhotoEntryService", lambda: FakePhotoEntryService(), raising=False
+    )
+    at = AppTest.from_string(
+        "from frontend.pages import tutor\n"
+        "tutor.render_tutor_page({'id': 1})\n",
+        default_timeout=15,
+    )
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert not at.exception
+    assert any("由判别式判断根的情况" in item.value for item in at.markdown)
+
+    at.chat_input(key="chat_input_7").set_value("为什么用判别式？").run()
+
+    assert not at.exception
+    assert any("由判别式判断根的情况" in item.value for item in at.markdown)
+    assert any("这是老师的追问答复" in item.value for item in at.markdown)
+
+
+def test_k12_context_inputs_use_default_study_context():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(
+        "import streamlit as st\n"
+        "from frontend.pages.tutor import _k12_context_inputs\n"
+        "st.session_state['context_result'] = _k12_context_inputs('defaults')\n"
+    ).run()
+
+    assert not at.exception
+    assert at.session_state["context_result"] == {
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "textbook_version": "沪教版",
+    }
+
+
+def test_k12_context_inputs_can_be_locked_after_import():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_string(
+        "from frontend.pages.tutor import _k12_context_inputs\n"
+        "_k12_context_inputs('locked', disabled=True)\n"
+    )
+    at.run()
+
+    assert not at.exception
+    assert all(widget.disabled for widget in at.selectbox)
+    assert all(widget.disabled for widget in at.text_input)
+
+
+def test_similar_constraints_come_from_saved_question():
+    question = SimpleNamespace(
+        subject="math",
+        grade=10,
+        region="上海",
+        difficulty="hard",
+        knowledge_points=["函数的单调性"],
+        question_type="解答题",
+    )
+
+    assert tutor._similar_constraints(question) == {
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "difficulty": "hard",
+        "knowledge_points": ["函数的单调性"],
+        "question_type": "解答题",
+    }

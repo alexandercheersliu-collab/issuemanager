@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
+import re
 import unicodedata
 from collections.abc import Callable
 
@@ -28,10 +30,45 @@ PROGRESS_VARIANT_ANSWER = "📝 正在为变式题生成参考答案…"
 PROGRESS_DONE = "✅ 出题完成"
 
 
+# 高中数学常见 LaTeX 命令 → Unicode 符号（判分前归一，避免 LaTeX 与手写 Unicode 不一致误判）
+_LATEX_SYMBOL_MAP = {
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠",
+    "pm": "±", "times": "×", "div": "÷", "cdot": "·", "pi": "π",
+    "infty": "∞", "in": "∈", "subseteq": "⊆",
+    "varnothing": "∅", "emptyset": "∅", "forall": "∀", "exists": "∃",
+    "to": "→", "rightarrow": "→", "approx": "≈",
+    "triangle": "△", "angle": "∠", "parallel": "∥", "perp": "⊥",
+    "therefore": "∴", "because": "∵",
+}
+# 函数名类命令仅去反斜杠：\log→log、\sin→sin 等
+_LATEX_PLAIN_COMMANDS = ("log", "ln", "lg", "sin", "cos", "tan")
+# 单词边界感知：负向断言 (?![a-zA-Z]) 防止 \log_2 被误拆成 lo g_2、\infty 被 \in 吃掉
+_LATEX_COMMAND_RE = re.compile(
+    r"\\("
+    + "|".join(
+        sorted(
+            [*_LATEX_SYMBOL_MAP, *_LATEX_PLAIN_COMMANDS], key=len, reverse=True
+        )
+    )
+    + r")(?![a-zA-Z])"
+)
+
+
+def _latex_to_unicode(match: re.Match[str]) -> str:
+    command = match.group(1)
+    return _LATEX_SYMBOL_MAP.get(command, command)
+
+
 def _normalize_answer(text: str | None) -> str:
-    """答案规范化：全半角统一、去空白与 LaTeX 装饰、运算符归一。"""
-    normalized = unicodedata.normalize("NFKC", text or "").lower()
-    for ch in (" ", "　", "\\", "$", "{", "}", ",", "，", "。", ".", "；", ";"):
+    """答案规范化：LaTeX→Unicode、全半角统一、去空白与 LaTeX 装饰、运算符归一。"""
+    normalized = _LATEX_COMMAND_RE.sub(_latex_to_unicode, text or "")
+    # NFKC 不处理 U+2032 PRIME，手工归一到撇号（f′(x) 与 f'(x) 视为相同）
+    normalized = normalized.replace("′", "'")
+    normalized = unicodedata.normalize("NFKC", normalized).lower()
+    # ^/_ 一并删除：NFKC 已把 Unicode 上下标（²、₂）转成普通字符，
+    # 故 x^2 与 x²、\log_2 8 与 log₂8 归一结果一致；
+    # 已知取舍：2^3 与 23 归一后相同（判分视为相等）。
+    for ch in (" ", "　", "\\", "$", "{", "}", ",", "，", "。", ".", "；", ";", "_", "^"):
         normalized = normalized.replace(ch, "")
     return (
         normalized.replace("×", "*")
@@ -156,6 +193,18 @@ class DetectionMixin:
             tested_content=tested.content_markdown,
             tested_answer=tested_answer,
         )
+        from backend.services.asset_tokens import issue_detection_figure_token
+
+        figure_paths = list(tested.figure_paths or [])
+        figure_tokens = [
+            issue_detection_figure_token(
+                log_id=log_id,
+                user_id=user_id,
+                figure_index=index,
+                path=path,
+            )
+            for index, path in enumerate(figure_paths)
+        ]
         emit_progress(on_progress, PROGRESS_DONE)
         logger.info(
             "发起检测 question=%s user=%s tested=%s source=%s",
@@ -167,6 +216,10 @@ class DetectionMixin:
             "tested": {
                 "source": tested.source,
                 "content": tested.content_markdown,
+                "stem": tested.stem,
+                "figure_paths": figure_paths,
+                "figure_tokens": figure_tokens,
+                "figure_specs": [spec.model_dump() for spec in tested.figure_specs],
                 "knowledge_points": tested.knowledge_points,
                 "difficulty": tested.difficulty,
             },
@@ -177,9 +230,16 @@ class DetectionMixin:
         """generated 题的参考答案：即时走 AI 文本解析（失败时留空，判分必 wrong）。"""
         from backend.services.ai.base import AnalysisContext
 
+        figure_hints = [
+            f"新图 {index} 语义：{json.dumps(spec.semantic_spec, ensure_ascii=False)}\n"
+            f"新图 {index} 假设：{json.dumps(spec.assumptions, ensure_ascii=False)}"
+            for index, spec in enumerate(tested.figure_specs, start=1)
+        ]
+        hint = "\n".join(figure_hints)
         try:
             analysis = self.ai.analyze_text(
                 tested.content_markdown[:4000],
+                hint=hint,
                 context=AnalysisContext(
                     subject=source.subject or "math",
                     grade=source.grade,

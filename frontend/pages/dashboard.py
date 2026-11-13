@@ -140,6 +140,12 @@ def _render_mastery_trend(trend: list[dict]) -> None:
 
 
 def render_dashboard(user: dict) -> None:
+    welcome = st.empty()
+    welcome.markdown(
+        f"""<div class="mm-welcome"><h1>你好，{user['username']}</h1>
+        <p>正在加载学习数据…</p></div>""",
+        unsafe_allow_html=True,
+    )
     service = get_question_service()
     include_others = user["role"] == "teacher"
 
@@ -162,7 +168,7 @@ def render_dashboard(user: dict) -> None:
 
     stats = service.dashboard_stats(user["id"], include_others=include_others, subject=subject)
 
-    st.markdown(
+    welcome.markdown(
         f"""
         <div class="mm-welcome">
             <h1>你好，{user['username']}</h1>

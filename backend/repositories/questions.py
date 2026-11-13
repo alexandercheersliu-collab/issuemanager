@@ -29,6 +29,8 @@ class QuestionRepository:
         difficulty: str = "medium",
         followup_question: str = "",
         image_path: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
         source: str = "ai",
         ocr_text: str | None = None,
         image_hash: str | None = None,
@@ -50,6 +52,8 @@ class QuestionRepository:
             difficulty=difficulty,
             followup_question=followup_question or None,
             image_path=image_path,
+            figure_paths=figure_paths or [],
+            figure_specs=figure_specs or [],
             source=source,
             ocr_text=ocr_text or None,
             image_hash=image_hash,
@@ -200,6 +204,8 @@ class QuestionRepository:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -220,6 +226,10 @@ class QuestionRepository:
             stmt = stmt.where(Question.subject == subject)
         if grade is not None:
             stmt = stmt.where(Question.grade == grade)
+        if region:
+            stmt = stmt.where(Question.region == region)
+        if textbook_version:
+            stmt = stmt.where(Question.textbook_version == textbook_version)
         if error_category:
             stmt = stmt.where(Question.error_category == error_category)
         if source:
@@ -251,6 +261,8 @@ class QuestionRepository:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -264,6 +276,8 @@ class QuestionRepository:
             keyword=keyword,
             subject=subject,
             grade=grade,
+            region=region,
+            textbook_version=textbook_version,
             error_category=error_category,
             source=source,
             source_doc=source_doc,
@@ -283,6 +297,8 @@ class QuestionRepository:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -295,6 +311,8 @@ class QuestionRepository:
             keyword=keyword,
             subject=subject,
             grade=grade,
+            region=region,
+            textbook_version=textbook_version,
             error_category=error_category,
             source=source,
             source_doc=source_doc,

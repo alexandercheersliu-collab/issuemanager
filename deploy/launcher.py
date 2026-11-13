@@ -15,9 +15,11 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shutil
 import sys
 import threading
 import webbrowser
+from collections.abc import Iterable
 from pathlib import Path
 
 FROZEN = getattr(sys, "frozen", False)
@@ -94,6 +96,35 @@ SEED_DEMO_PASSWORD=demo123
 """
 
 
+def pdflatex_candidates() -> list[Path]:
+    executable_name = "pdflatex.exe" if os.name == "nt" else "pdflatex"
+    candidates: list[Path] = []
+    home = Path.home()
+    roots = [EXE_DIR, BUNDLE_DIR, home, home / "Library"]
+    for variable in ("APPDATA", "PROGRAMDATA"):
+        if os.environ.get(variable):
+            roots.append(Path(os.environ[variable]))
+    for root in roots:
+        for folder in ("TinyTeX", ".TinyTeX"):
+            candidates.extend(sorted((root / folder / "bin").glob(f"*/{executable_name}")))
+    on_path = shutil.which(executable_name)
+    if on_path:
+        candidates.append(Path(on_path))
+    return candidates
+
+
+def inject_pdflatex_env(candidates: Iterable[Path]) -> Path | None:
+    if os.environ.get("PDFLATEX_PATH", "").strip():
+        return None
+    os.environ.pop("PDFLATEX_PATH", None)
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            os.environ["PDFLATEX_PATH"] = str(path)
+            return path
+    return None
+
+
 def inject_runtime_env() -> None:
     """把数据目录钉在 exe 同级；包内预置嵌入模型优先（离线可用）。"""
     os.environ.setdefault("DATA_DIR", str(EXE_DIR / "data"))
@@ -101,6 +132,7 @@ def inject_runtime_env() -> None:
     bundled_model = BUNDLE_DIR / "models" / "onnx"
     if bundled_model.is_dir():
         os.environ.setdefault("CHROMA_MODEL_DIR", str(bundled_model))
+    inject_pdflatex_env(pdflatex_candidates())
 
 
 def render_env(provider: str, base_url: str, api_key: str, model: str, auth_secret: str) -> str:

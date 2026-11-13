@@ -16,7 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sqlalchemy import select
+
 from backend.config import get_settings
+from backend.models.orm import Job
 from backend.models.schemas import QuestionAnalysis, QuestionOut, TagStat
 from backend.repositories.questions import QuestionRepository
 from backend.services.ai import get_ai_service
@@ -40,6 +43,8 @@ from backend.utils.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.orm import Session, sessionmaker
+
+    from backend.services.geometry_figures import GeneratedVariant
 
 logger = get_logger("questions")
 
@@ -110,6 +115,16 @@ class CoreMixin:
         self.ai: BaseAIProvider = get_ai_service(self.settings)
         self.vector_store = QuestionVectorStore(self.settings)
         self.scheduler = ReviewScheduler(self.settings)
+        self._geometry_figure_service = None
+
+    def _geometry_figures(self):
+        if self._geometry_figure_service is None:
+            from backend.services.geometry_figures import GeometryFigureService
+
+            self._geometry_figure_service = GeometryFigureService.from_settings(
+                self.ai, self.settings
+            )
+        return self._geometry_figure_service
 
     @contextmanager
     def _session(self) -> Iterator[QuestionRepository]:
@@ -239,8 +254,14 @@ class EntryMixin:
         chapter: str | None = None,
         error_category: str | None = None,
         source_doc: str | None = None,
+        image_path: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
     ) -> QuestionOut:
-        """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。"""
+        """手动录入文本错题：入库 + 向量索引；可选 AI 文本解析补全空缺标注。
+
+        image_path：关联的页图/配图路径（整卷导入确认时传题目所在页的页图）。
+        """
         if not content_markdown or not content_markdown.strip():
             raise ValueError("题目内容不能为空")
         clean_tags = [t.strip() for t in (tags or []) if t.strip()]
@@ -288,6 +309,9 @@ class EntryMixin:
                 chapter=chapter,
                 error_category=error_category,
                 source_doc=source_doc,
+                image_path=image_path,
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
             )
             out = QuestionOut.from_orm_model(question)
 
@@ -296,6 +320,27 @@ class EntryMixin:
             " ".join([*clean_points, content_markdown.strip(), clean_answer, *clean_tags]),
         )
         return out
+
+    def _redraw_entry_figures(
+        self, *, image_path: Path, segments: list[dict], context
+    ) -> tuple[list[str], list[dict]]:
+        figure_paths: list[str] = []
+        figure_specs: list[dict] = []
+        for segment in segments:
+            boxes = list(segment.get("figure_bboxes") or [])
+            if not boxes:
+                continue
+            outcome = self._geometry_figures().redraw_segment(
+                image_path=image_path,
+                number=str(segment.get("number") or "1"),
+                text=str(segment.get("text") or ""),
+                figure_bboxes=boxes,
+                figures_dir=image_path.parent / f"{image_path.stem}_figures",
+                context=context,
+            )
+            figure_paths.extend(outcome.figure_paths)
+            figure_specs.extend(outcome.figure_specs)
+        return figure_paths, figure_specs
 
     def analyze_and_save(
         self,
@@ -306,39 +351,54 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_hash: str | None = None,
+        segments: list[dict] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
         textbook_version: str | None = None,
     ) -> tuple[QuestionOut, QuestionAnalysis]:
-        """完整录入链路：AI 解析 → 图片落盘 →（可选 OCR）→ 数据库 → 向量索引。
+        """完整录入链路：AI 解析 → 图片落盘 → 图形重绘/兜底 → 数据库 → 向量索引。
 
         image_hash：调用方（analyze_and_save_dedup）预算好的原图哈希，入库供去重。
+        segments：调用方已有的切题结果；为空列表时不重复切题，为 None 时自行识别图形。
         subject/grade/region/textbook_version：录入上下文，随解析落库为 K12 元数据。
         """
         from backend.services.ai.base import AnalysisContext
 
+        context = AnalysisContext(
+            subject=subject,
+            grade=grade,
+            region=region,
+            textbook_version=textbook_version,
+        )
         analysis = self.ai.analyze_question(
             image_bytes,
             mime_type,
             hint,
-            context=AnalysisContext(
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-            ),
+            context=context,
         )
+        if segments is None:
+            try:
+                segments = self.ai.segment_page(image_bytes, mime_type)
+            except Exception as exc:  # noqa: BLE001 - 图形识别失败不阻断原有整图解析
+                logger.info("录题图形定位失败，保留原图: %s", exc)
+                segments = []
         tags = analysis.merged_tags(user_tags or [])
 
         image_path = self._persist_image(user_id, image_bytes)
+        figure_paths, figure_specs = self._redraw_entry_figures(
+            image_path=image_path, segments=segments or [], context=context
+        )
         from backend.services.ocr import extract_text
 
         ocr_text = extract_text(str(image_path))
-        # 大题只错一道小题时，AI 提取的做错小题题干作为题面（与文本路径格式一致：
-        # 题面 + 分隔线 + 解析），复习闪卡与错题本才能题面/解析分离展示
-        if analysis.focused_sub_question.strip():
-            content = f"{analysis.focused_sub_question.strip()}\n\n---\n\n{analysis.analysis}"
+        # 优先使用聚焦小题题干；整图单题则保留切题结果中的题干。
+        # 题面 + 分隔线 + 解析的格式供复习闪卡与错题本分离展示。
+        stem = analysis.focused_sub_question.strip()
+        if not stem and segments and len(segments) == 1:
+            stem = str(segments[0].get("text") or "").strip()
+        if stem:
+            content = f"{stem}\n\n---\n\n{analysis.analysis}"
         else:
             content = analysis.analysis
         with self._session() as repo:
@@ -351,6 +411,8 @@ class EntryMixin:
                 difficulty=analysis.difficulty,
                 followup_question=analysis.followup_question,
                 image_path=str(image_path),
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
                 ocr_text=ocr_text,
                 image_hash=image_hash,
                 subject=subject,
@@ -377,6 +439,7 @@ class EntryMixin:
         mime_type: str = "image/jpeg",
         user_tags: list[str] | None = None,
         hint: str = "",
+        segments: list[dict] | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -389,11 +452,11 @@ class EntryMixin:
         if existing is not None:
             out = QuestionOut.from_orm_model(existing)
             analysis = QuestionAnalysis(
-                knowledge_points=list(out.knowledge_points or []),
+                knowledge_points=list(out.knowledge_points or [])[:6],
                 analysis=out.content_markdown,
                 answer=out.answer,
                 difficulty=out.difficulty,  # type: ignore[arg-type]
-                tags=list(out.tags or []),
+                tags=list(out.tags or [])[:6],
                 mistake_cause="",
                 followup_question=out.followup_question or "",
                 question_type=out.question_type or "",
@@ -410,6 +473,7 @@ class EntryMixin:
             user_tags=user_tags,
             hint=hint,
             image_hash=image_hash,
+            segments=segments,
             subject=subject,
             grade=grade,
             region=region,
@@ -425,6 +489,7 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_path: str | None = None,
+        segment: dict | None = None,
         subject: str = "math",
         grade: int | None = None,
         region: str | None = None,
@@ -440,15 +505,23 @@ class EntryMixin:
             raise ValueError("题干文本不能为空")
         from backend.services.ai.base import AnalysisContext
 
+        context = AnalysisContext(
+            subject=subject,
+            grade=grade,
+            region=region,
+            textbook_version=textbook_version,
+        )
         analysis = self.ai.analyze_text(
             text.strip()[:4000],
             hint,
-            context=AnalysisContext(
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-            ),
+            context=context,
+        )
+        figure_paths, figure_specs = (
+            self._redraw_entry_figures(
+                image_path=Path(image_path), segments=[segment], context=context
+            )
+            if image_path and segment
+            else ([], [])
         )
         tags = analysis.merged_tags(user_tags or [])
         # 大题只错一道小题时，以 AI 聚焦的小题题干替换整题题干入库
@@ -465,6 +538,8 @@ class EntryMixin:
                 difficulty=analysis.difficulty,
                 followup_question=analysis.followup_question,
                 image_path=image_path,
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
                 subject=subject,
                 grade=grade,
                 region=region,
@@ -483,6 +558,33 @@ class EntryMixin:
 class QueryMixin:
     """错题查询：关键词 + 语义双路检索、计数、详情、相似题。"""
 
+    @staticmethod
+    def _matches_filters(
+        question: QuestionOut,
+        *,
+        tag: str | None = None,
+        subject: str | None = None,
+        grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
+        error_category: str | None = None,
+        source: str | None = None,
+        source_doc: str | None = None,
+    ) -> bool:
+        return not (
+            (tag and tag not in (question.tags or []))
+            or (subject and question.subject != subject)
+            or (grade is not None and question.grade != grade)
+            or (region and question.region != region)
+            or (textbook_version and question.textbook_version != textbook_version)
+            or (error_category and question.error_category != error_category)
+            or (source and question.source != source)
+            or (
+                source_doc
+                and not (question.source_doc or "").startswith(f"{source_doc}#")
+            )
+        )
+
     def list_questions(
         self,
         user_id: int,
@@ -492,6 +594,8 @@ class QueryMixin:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -502,8 +606,9 @@ class QueryMixin:
         """关键词检索；开启语义搜索时用 RRF 融合向量与关键词两路结果（可选重排）。
 
         offset/limit 在过滤后应用；不传 limit 返回全部（界面默认），API 层分页传入。
-        subject/grade/error_category：K12 元数据过滤（SQL 下推）。
-        source/source_doc：来源过滤（整卷导入题按文档名前缀匹配，SQL 下推）。
+        subject/grade/region/textbook_version/error_category：K12 元数据过滤。
+        source/source_doc：来源过滤（整卷导入题按文档名前缀匹配）。
+        SQL 结果下推过滤，向量补召回结果在融合前按相同口径过滤。
         """
         with self._session() as repo:
             primary = repo.list_for_user(
@@ -513,6 +618,8 @@ class QueryMixin:
                 keyword=keyword,
                 subject=subject,
                 grade=grade,
+                region=region,
+                textbook_version=textbook_version,
                 error_category=error_category,
                 source=source,
                 source_doc=source_doc,
@@ -557,6 +664,22 @@ class QueryMixin:
                         if q.user_id == user_id or include_others:
                             results[q.id] = QuestionOut.from_orm_model(q)
 
+            results = {
+                qid: question
+                for qid, question in results.items()
+                if self._matches_filters(
+                    question,
+                    tag=tag,
+                    subject=subject,
+                    grade=grade,
+                    region=region,
+                    textbook_version=textbook_version,
+                    error_category=error_category,
+                    source=source,
+                    source_doc=source_doc,
+                )
+            }
+
             # 融合排序覆盖默认时间排序（未入榜的题排在其后）
             order = {qid: rank for rank, qid in enumerate(fused_ids)}
             return sorted(
@@ -579,6 +702,8 @@ class QueryMixin:
         keyword: str | None = None,
         subject: str | None = None,
         grade: int | None = None,
+        region: str | None = None,
+        textbook_version: str | None = None,
         error_category: str | None = None,
         source: str | None = None,
         source_doc: str | None = None,
@@ -592,6 +717,8 @@ class QueryMixin:
                 keyword=keyword,
                 subject=subject,
                 grade=grade,
+                region=region,
+                textbook_version=textbook_version,
                 error_category=error_category,
                 source=source,
                 source_doc=source_doc,
@@ -713,13 +840,15 @@ class QueryMixin:
         )
 
     @staticmethod
-    def _generated_as_question(question: QuestionOut, variant: str) -> QuestionOut:
+    def _generated_as_question(
+        question: QuestionOut, variant: GeneratedVariant
+    ) -> QuestionOut:
         """AI 变式题包装为 QuestionOut（source="generated"，不落库）。"""
         return QuestionOut(
             id=-9999,
             user_id=0,
             image_path=None,
-            content_markdown=variant,
+            content_markdown=variant.content,
             answer="",
             knowledge_points=list(question.knowledge_points or [])[:4],
             tags=["AI 变式"],
@@ -728,26 +857,48 @@ class QueryMixin:
             subject=question.subject or "math",
             grade=question.grade,
             region=question.region,
+            textbook_version=question.textbook_version,
+            question_type=question.question_type,
+            chapter=question.chapter,
+            error_category=question.error_category,
+            figure_paths=list(variant.figure_paths),
+            figure_specs=[dict(spec) for spec in variant.figure_specs],
         )
 
-    def _generate_variant(self, question: QuestionOut) -> str | None:
-        """LLM 变式生成兜底：复用分析管线的 followup_question 能力。"""
+    def _generate_variant(self, question: QuestionOut) -> GeneratedVariant | None:
+        """带图题生成并校验新图；无图题沿用文本分析的 followup_question。"""
         from backend.services.ai.base import AnalysisContext
+        from backend.services.geometry_figures import GeneratedVariant
 
+        context = AnalysisContext(
+            subject=question.subject or "math",
+            grade=question.grade,
+            region=question.region,
+            textbook_version=question.textbook_version,
+        )
         try:
+            if question.figure_paths or question.figure_specs:
+                variant = self.ai.generate_geometry_variant(
+                    question.content_markdown[:4000],
+                    knowledge_points=list(question.knowledge_points or []),
+                    error_category=question.error_category or "",
+                    question_type=question.question_type or "",
+                    difficulty=question.difficulty or "medium",
+                    figure_specs=list(question.figure_specs or []),
+                    context=context,
+                )
+                return self._geometry_figures().render_variant(variant, source=question)
             analysis = self.ai.analyze_text(
                 question.content_markdown[:4000],
-                context=AnalysisContext(
-                    subject=question.subject or "math",
-                    grade=question.grade,
-                    region=question.region,
-                    textbook_version=question.textbook_version,
-                ),
+                context=context,
             )
         except Exception as exc:  # noqa: BLE001 - 生成失败仅少一条兜底，不影响召回
             logger.info("变式生成失败 question=%s: %s", question.id, exc)
             return None
-        return (analysis.followup_question or "").strip() or None
+        content = (analysis.followup_question or "").strip()
+        if not content:
+            return None
+        return GeneratedVariant(content=content, figure_paths=[], figure_specs=[])
 
 
 class EditTagMixin:
@@ -908,9 +1059,23 @@ class AdminMixin:
         with self._session() as repo:
             ids = repo.ids_by_subject_all(subject)
             deleted = repo.delete_by_subject_all(subject)
+            # 同步删除该学科的整卷导入任务：其确认入库的题目已清空，
+            # 残留任务的 doc_hash 会被去重命中，阻碍重新导入同一文档。
+            # 学科缺失的任务按管线默认视为 math（与 _run_import 一致）
+            import_jobs = repo.session.execute(
+                select(Job).where(Job.type == "document_import")
+            ).scalars()
+            removed_jobs = 0
+            for job in import_jobs:
+                if ((job.payload or {}).get("subject") or "math") == subject:
+                    repo.session.delete(job)
+                    removed_jobs += 1
         if ids:
             self.vector_store.delete_questions(ids)
-        logger.warning("admin user=%s 清空学科 subject=%s：删除 %s 道错题", user_id, subject, deleted)
+        logger.warning(
+            "admin user=%s 清空学科 subject=%s：删除 %s 道错题、%s 个导入任务",
+            user_id, subject, deleted, removed_jobs,
+        )
         return {"subject": subject, "deleted": deleted}
 
 

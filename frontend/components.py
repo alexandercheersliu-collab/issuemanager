@@ -7,6 +7,7 @@ import os
 import streamlit as st
 
 from backend.models.schemas import SUBJECT_NAMES
+from frontend.common import render_markdown
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
 
@@ -34,6 +35,14 @@ def k12_meta_line(q) -> str:
     return " · ".join(bits)
 
 
+def render_figures(
+    paths: list[str], *, alt_prefix: str, width: str | int = "stretch"
+) -> None:
+    for index, path in enumerate(paths, start=1):
+        if os.path.exists(path):
+            st.image(path, width=width, alt=f"{alt_prefix} {index}")
+
+
 def question_detail_view(q, show_hit: bool = True) -> None:
     """错题「查看」视图：原图/元信息/解析/笔记/答案/变式（不含交互）。
 
@@ -41,8 +50,15 @@ def question_detail_view(q, show_hit: bool = True) -> None:
     """
     img_col, content_col = st.columns([2, 3])
     with img_col:
-        if q.image_path and os.path.exists(q.image_path):
-            st.image(q.image_path, width="stretch")
+        figures = [path for path in (getattr(q, "figure_paths", None) or []) if os.path.exists(path)]
+        has_page_image = bool(q.image_path and os.path.exists(q.image_path))
+        if figures:
+            render_figures(figures, alt_prefix=f"题 {q.id} 的图形")
+            if has_page_image:
+                with st.expander("查看完整原页", expanded=False):
+                    st.image(q.image_path, width="stretch", alt=f"题 {q.id} 的完整原页")
+        elif has_page_image:
+            st.image(q.image_path, width="stretch", alt=f"题 {q.id} 的原图")
         else:
             st.caption("无原图（手动录入）")
         badges = " ".join(f"<span class='mm-badge'>{t}</span>" for t in q.tags)
@@ -60,13 +76,13 @@ def question_detail_view(q, show_hit: bool = True) -> None:
     with content_col:
         if q.user_note:
             st.info(f"📝 我的笔记：{q.user_note}")
-        st.markdown(q.content_markdown, unsafe_allow_html=True)
+        render_markdown(q.content_markdown, unsafe_allow_html=True)
         if q.answer:
-            st.markdown(f"**答案**：{q.answer}")
+            render_markdown(f"**答案**：{q.answer}")
         _hit_preview(q)
         if q.followup_question:
             with st.expander("举一反三 · 变式练习"):
-                st.markdown(q.followup_question)
+                render_markdown(q.followup_question)
 
 
 def _hit_preview(q) -> None:
@@ -125,16 +141,41 @@ def regrade_buttons(service, q, user: dict) -> None:
                 st.rerun()
 
 
-def save_followup_button(service, q, user: dict, followup: str) -> None:
-    """把变式练习一键存为新的待做错题（继承原题标签并追加「变式练习」）。"""
+def save_followup_button(
+    service,
+    q,
+    user: dict,
+    followup: str,
+    *,
+    figure_paths=None,
+    figure_specs=None,
+    key_suffix: str | None = None,
+) -> None:
+    """把变式及其自有图形存为待做错题，保留原题的 K12 元数据。"""
     if not followup:
         return
-    if st.button("📥 把变式题存入错题本", key=f"save_followup_{q.id}"):
+    button_key = f"save_followup_{q.id}_{key_suffix}" if key_suffix else f"save_followup_{q.id}"
+    if st.button("📥 把变式题存入错题本", key=button_key):
         tags = [*(q.tags or []), "变式练习"]
+        specs = [
+            spec.model_dump(mode="json") if hasattr(spec, "model_dump") else dict(spec)
+            for spec in (figure_specs or [])
+        ]
         saved = service.create_manual_question(
             user["id"],
             content_markdown=f"### 变式练习（来自错题 #{q.id}）\n\n{followup}",
+            knowledge_points=list(getattr(q, "knowledge_points", None) or []),
             tags=tags,
+            difficulty=getattr(q, "difficulty", "medium"),
             source="followup",
+            subject=getattr(q, "subject", "math"),
+            grade=getattr(q, "grade", None),
+            region=getattr(q, "region", None),
+            textbook_version=getattr(q, "textbook_version", None),
+            question_type=getattr(q, "question_type", None),
+            chapter=getattr(q, "chapter", None),
+            error_category=getattr(q, "error_category", None),
+            figure_paths=list(figure_paths or []),
+            figure_specs=specs,
         )
         st.success(f"已存入错题本（#{saved.id}），进入正常复习循环。")

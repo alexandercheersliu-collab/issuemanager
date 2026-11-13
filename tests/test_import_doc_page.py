@@ -1,7 +1,15 @@
 """整卷导入校对界面的纯函数测试：统计与列表标题（不启动 Streamlit 运行时）。"""
 from __future__ import annotations
 
-from frontend.pages.import_doc import segment_headline, summarize_segments
+from streamlit.testing.v1 import AppTest
+
+from frontend.pages import import_doc
+from frontend.pages.import_doc import (
+    segment_headline,
+    segment_preview_markdown,
+    summarize_segments,
+    validate_upload_selection,
+)
 
 
 def _segment(**overrides) -> dict:
@@ -46,6 +54,27 @@ def test_segment_headline_marks_needs_review():
     assert not ok.startswith("⚠️")
 
 
+def test_validate_upload_selection_allows_single_doc_and_multi_images():
+    assert validate_upload_selection(["paper.pdf"]) is None
+    assert validate_upload_selection(["paper.docx"]) is None
+    assert validate_upload_selection(["page1.jpg"]) is None
+    # 整卷拍照：多张图片（每张 = 一页）
+    assert validate_upload_selection(["p1.jpg", "p2.png", "p3.webp"]) is None
+
+
+def test_validate_upload_selection_rejects_multi_non_image():
+    # PDF/DOCX 仅支持单文件；图 + 文档混搭同样拒绝
+    assert validate_upload_selection(["a.pdf", "b.pdf"]) is not None
+    assert validate_upload_selection(["p.png", "a.pdf"]) is not None
+    assert validate_upload_selection(["a.docx", "b.docx"]) is not None
+
+
+def test_validate_upload_selection_rejects_empty_and_unsupported():
+    assert validate_upload_selection([]) is not None
+    assert validate_upload_selection(["notes.txt"]) is not None
+    assert validate_upload_selection(["p1.png", "notes.gif"]) is not None
+
+
 def test_segment_headline_truncates_and_handles_empty():
     long_text = "题" * 100
     headline = segment_headline(_segment(text=long_text), max_len=24)
@@ -56,3 +85,105 @@ def test_segment_headline_truncates_and_handles_empty():
     assert "（空题干）" in empty
     multiline = segment_headline(_segment(text="第一行\n第二行"))
     assert "\n" not in multiline
+
+
+def test_segment_headline_does_not_break_math_delimiter():
+    # 高中题干含 $...$，硬截断会切断定界符导致标题公式渲染破裂
+    text = "若关于 $x$ 的不等式 $x^2+2(m-1)x+m^2-m<0$ 的解集为 $(x_1,x_2)$"
+    headline = segment_headline(_segment(text=text), max_len=24)
+    # 标题中的 $ 定界符必须成对出现（可渲染），不允许残留半个公式
+    assert headline.count("$") % 2 == 0
+
+
+def test_segment_preview_markdown_includes_all_rendered_sections():
+    segment = _segment(
+        text="若关于 $x$ 的不等式 $x^2<0$",
+        analysis={
+            "answer": "$m=-1$",
+            "analysis": "由 $x\\in[m/3,n/2)$ 可得",
+            "followup_question": "不等式组 $\\begin{cases}3x-a\\\\ge0\\end{cases}$ 的整数解",
+        },
+    )
+    preview = segment_preview_markdown(segment)
+    assert "若关于 $x$ 的不等式 $x^2<0$" in preview
+    assert "**答案**：$m=-1$" in preview
+    assert "**解析**：由 $x\\in[m/3,n/2)$ 可得" in preview
+    assert "**变式练习**：不等式组" in preview
+
+
+def test_segment_preview_normalizes_multiline_display_math():
+    segment = _segment(
+        analysis={
+            "analysis": (
+                "于是\n$$|\\vec{BD_1}|^2=|\\mathbf b+\\mathbf c-\\mathbf a|^2\n"
+                "=4+4+4+2\\times2-2\\times2-2\\times2=8.$$\n"
+                "因此 $|\\vec{BD_1}|=\\sqrt8=2\\sqrt2$，选 D。"
+            )
+        }
+    )
+
+    preview = segment_preview_markdown(segment)
+
+    assert (
+        "于是\n\n$$\n|\\vec{BD_1}|^2=|\\mathbf b+\\mathbf c-\\mathbf a|^2\n"
+        "=4+4+4+2\\times2-2\\times2-2\\times2=8.\n$$\n\n"
+        "因此 $|\\vec{BD_1}|=\\sqrt8=2\\sqrt2$，选 D。"
+    ) in preview
+
+
+def test_segment_preview_markdown_skips_missing_fields():
+    # 无解析结果（解构失败）时只渲染题干；完全为空返回空串
+    assert segment_preview_markdown(_segment(analysis=None)) == "已知 x^2=9，求 x 的值。"
+    assert segment_preview_markdown(_segment(text="", analysis=None)) == ""
+
+
+def test_segment_page_image_uses_start_page():
+    segment = _segment(page_start=2, page_end=2)
+    assert import_doc.segment_page_image(["p1.jpg", "p2.jpg"], segment) == "p2.jpg"
+
+
+def test_segment_page_image_for_cross_page_question_uses_start_page():
+    segment = _segment(page_start=2, page_end=3)
+    assert import_doc.segment_page_image(["p1.jpg", "p2.jpg", "p3.jpg"], segment) == "p2.jpg"
+
+
+def test_segment_page_image_returns_none_when_unavailable():
+    assert import_doc.segment_page_image([], _segment(page_start=1, page_end=1)) is None
+    assert import_doc.segment_page_image([None], _segment(page_start=1, page_end=1)) is None
+    assert import_doc.segment_page_image(["p1.jpg"], _segment(page_start=2, page_end=2)) is None
+
+
+def test_selecting_new_upload_clears_previous_job_result():
+    script = """
+import streamlit as st
+from frontend.pages import import_doc
+
+class FakeDocumentService:
+    def get_job(self, job_id, user_id):
+        return {
+            'job_id': job_id,
+            'status': 'success',
+            'payload': {'filename': 'old.jpg', 'subject': 'math'},
+            'result': {'confirmed': True, 'imported': 1, 'skipped': []},
+            'error': None,
+        }
+
+if 'test_initialized' not in st.session_state:
+    st.session_state['import_doc_job_id'] = 'old-job'
+    st.session_state['import_doc_context_job'] = 'old-job'
+    st.session_state['import_doc_outcome'] = {'imported': 1}
+    st.session_state['test_initialized'] = True
+import_doc.DocumentService = FakeDocumentService
+import_doc.render_import_doc_page({'id': 1})
+"""
+    at = AppTest.from_string(script, default_timeout=15).run()
+    assert not at.exception
+    assert any("已确认入库 1 题" in alert.value for alert in at.success)
+
+    at.get("file_uploader")[0].upload("new.jpg", b"new image", "image/jpeg").run()
+
+    assert not at.exception
+    assert not at.success
+    assert "import_doc_job_id" not in at.session_state
+    assert "import_doc_context_job" not in at.session_state
+    assert "import_doc_outcome" not in at.session_state

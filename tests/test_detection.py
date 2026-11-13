@@ -33,7 +33,14 @@ def _bank_hit() -> RagHit:
     )
 
 
-def _make_question(question_service, student_user, text="检测编排·源题", answer="x=1"):
+def _make_question(
+    question_service,
+    student_user,
+    text="检测编排·源题",
+    answer="x=1",
+    figure_paths=None,
+    figure_specs=None,
+):
     return question_service.create_manual_question(
         student_user.id,
         content_markdown=text,
@@ -41,6 +48,8 @@ def _make_question(question_service, student_user, text="检测编排·源题", 
         knowledge_points=["一元二次方程"],
         subject="math",
         grade=9,
+        figure_paths=figure_paths,
+        figure_specs=figure_specs,
     )
 
 
@@ -66,6 +75,70 @@ def test_answers_match():
     assert not answers_match("x=1", "1")  # 单字符包含不算对
 
 
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        pytest.param(r"\log_2 8", "log₂8", id="log-LaTeX下标vsUnicode下标"),
+        pytest.param(r"$\leq$", "≤", id="leq"),
+        pytest.param(r"$\le 3$", "≤3", id="le"),
+        pytest.param(r"\geq", "≥", id="geq"),
+        pytest.param(r"x \ge 0", "x≥0", id="ge"),
+        pytest.param(r"\neq", "≠", id="neq"),
+        pytest.param(r"a \ne b", "a≠b", id="ne"),
+        pytest.param("x^2+1", "x²+1", id="插入符vs上标"),
+        pytest.param(r"\pm 2", "±2", id="pm"),
+        pytest.param(r"3 \times 4", "3×4", id="times"),
+        pytest.param(r"6 \div 2", "6÷2", id="div"),
+        pytest.param(r"a \cdot b", "a·b", id="cdot"),
+        pytest.param("f'(x)", "f′(x)", id="撇号vsPRIME"),
+        pytest.param(r"\infty", "∞", id="infty"),
+        pytest.param(r"x \in A", "x∈A", id="in"),
+        pytest.param(r"A \subseteq B", "A⊆B", id="subseteq"),
+        pytest.param(r"\varnothing", "∅", id="varnothing"),
+        pytest.param(r"\emptyset", "∅", id="emptyset"),
+        pytest.param(r"\forall x", "∀x", id="forall"),
+        pytest.param(r"\exists x", "∃x", id="exists"),
+        pytest.param(r"x \to 0", "x→0", id="to"),
+        pytest.param(r"x \rightarrow 0", "x→0", id="rightarrow"),
+        pytest.param(r"\approx 3.14", "≈3.14", id="approx"),
+        pytest.param("A_5^2", "A₅²", id="排列数记号"),
+        pytest.param(r"\pi", "π", id="pi"),
+        pytest.param(r"\triangle ABC", "△ABC", id="triangle"),
+        pytest.param(r"\angle ABC", "∠ABC", id="angle"),
+        pytest.param(r"a \parallel b", "a∥b", id="parallel"),
+        pytest.param(r"a \perp b", "a⊥b", id="perp"),
+        pytest.param(r"\therefore", "∴", id="therefore"),
+        pytest.param(r"\because", "∵", id="because"),
+        pytest.param(r"\sin x", "sinx", id="sin"),
+        pytest.param(r"\cos x", "cosx", id="cos"),
+        pytest.param(r"\tan x", "tanx", id="tan"),
+        pytest.param(r"\ln x", "lnx", id="ln"),
+        pytest.param(r"\lg 100", "lg100", id="lg"),
+    ],
+)
+def test_answers_match_latex_vs_unicode(expected, actual):
+    """高中数学判分：LaTeX 命令与 Unicode 符号应归一为同一结果。"""
+    assert answers_match(expected, actual)
+
+
+@pytest.mark.parametrize(
+    "expected,actual",
+    [
+        pytest.param("2", "3", id="不同数字"),
+        pytest.param("x^2+1", "x^3+1", id="指数不同"),
+        pytest.param(r"\log_2 8", "log₃8", id="底数不同"),
+        pytest.param(r"\sin x", "cosx", id="函数名不同"),
+    ],
+)
+def test_answers_match_latex_unicode_negative(expected, actual):
+    assert not answers_match(expected, actual)
+
+
+def test_answers_match_caret_underscore_deleted_tradeoff():
+    """已知取舍：删除 ^/_ 后 2^3 与 23 归一相同，判分视为相等（文档化行为）。"""
+    assert answers_match("2^3", "23")
+
+
 def test_tested_ref_for():
     from backend.models.schemas import QuestionOut
 
@@ -85,9 +158,17 @@ def test_tested_ref_for():
 # ---------- 服务层编排 ----------
 
 
-def test_start_detection_own_hit(question_service, student_user, monkeypatch):
+def test_start_detection_own_hit(question_service, student_user, monkeypatch, tmp_path):
+    figure = tmp_path / "figure.png"
+    figure.write_bytes(b"figure")
     source = _make_question(question_service, student_user)
-    other = _make_question(question_service, student_user, "检测编排·同类题", answer="x=1")
+    other = _make_question(
+        question_service,
+        student_user,
+        "检测编排·同类题",
+        answer="x=1",
+        figure_paths=[str(figure)],
+    )
     monkeypatch.setattr(
         question_service, "vector_store", _StubStore(own_hits=[RagHit(other.id, 0.4)])
     )
@@ -95,6 +176,7 @@ def test_start_detection_own_hit(question_service, student_user, monkeypatch):
     challenge = question_service.start_detection(source.id, student_user.id)
     assert challenge["tested"]["source"] == "manual"  # 库内题来源不变
     assert "同类题" in challenge["tested"]["content"]
+    assert challenge["tested"]["figure_paths"] == [str(figure)]
     assert "answer" not in challenge["tested"]  # 答案不下发
 
     log = _log(challenge["log_id"])
@@ -115,6 +197,84 @@ def test_start_detection_generated_fallback_gets_answer(
     log = _log(challenge["log_id"])
     assert log.tested_ref.startswith("gen:")
     assert log.tested_answer.strip()  # Mock 演示答案已快照
+
+
+def _generated_geometry_question():
+    from backend.models.schemas import QuestionOut
+
+    return QuestionOut(
+        id=-9999,
+        user_id=0,
+        image_path=None,
+        content_markdown="新几何题：已知 DE ⟂ EF，求∠DFE",
+        answer="",
+        source="generated",
+        figure_paths=["/new/variant.png"],
+        figure_specs=[
+            {
+                "kind": "geometry",
+                "semantic_spec": {
+                    "points": ["D", "E", "F"],
+                    "relations": ["DE ⟂ EF"],
+                },
+                "tikz_source": "new tikz",
+                "render_path": "/new/variant.png",
+                "crop_path": None,
+                "validation_status": "ai_passed",
+                "validation_issues": [],
+                "assumptions": ["新图仅为示意图"],
+            }
+        ],
+    )
+
+
+def test_start_detection_generated_includes_new_figure_specs(
+    question_service, student_user, monkeypatch
+):
+    from backend.services.question_mixins import SimilarQuestionsOutcome
+
+    source = _make_question(question_service, student_user)
+    tested = _generated_geometry_question()
+    monkeypatch.setattr(
+        question_service,
+        "similar_questions",
+        lambda *args, **kwargs: SimilarQuestionsOutcome(items=[tested]),
+    )
+
+    challenge = question_service.start_detection(source.id, student_user.id)
+
+    assert challenge["tested"]["figure_paths"] == ["/new/variant.png"]
+    assert challenge["tested"]["figure_specs"] == [
+        spec.model_dump() for spec in tested.figure_specs
+    ]
+
+
+def test_generated_reference_answer_receives_new_figure_semantics(
+    question_service, student_user, monkeypatch
+):
+    source = _make_question(
+        question_service,
+        student_user,
+        figure_paths=["/source/original.png"],
+    )
+    tested = _generated_geometry_question()
+    captured = {}
+    real_analyze = question_service.ai.analyze_text
+
+    def _analyze_spy(text, hint="", context=None):
+        captured["text"] = text
+        captured["hint"] = hint
+        return real_analyze(text, hint=hint, context=context)
+
+    monkeypatch.setattr(question_service.ai, "analyze_text", _analyze_spy)
+
+    answer = question_service._generate_reference_answer(tested, source)
+
+    assert answer.strip()
+    assert captured["text"] == tested.content_markdown
+    assert "DE ⟂ EF" in captured["hint"]
+    assert "新图仅为示意图" in captured["hint"]
+    assert "/source/original.png" not in captured["hint"]
 
 
 def test_submit_answer_and_demotion_e2e(question_service, student_user, monkeypatch):

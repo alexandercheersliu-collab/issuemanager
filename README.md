@@ -5,7 +5,7 @@
 > A production-grade Smart Wrong-Question Notebook powered by a Vision LLM, RAG retrieval, and spaced-repetition scheduling.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.49%2B-ff4b4b)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.65%2B-ff4b4b)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-d71f00)
 ![ChromaDB](https://img.shields.io/badge/RAG-ChromaDB-4051b5)
 ![Tests](https://img.shields.io/badge/tests-140%20passing%20%2B%203%20E2E-2ea44f)

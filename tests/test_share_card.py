@@ -50,6 +50,74 @@ def test_share_card_handles_long_content():
     assert image.height > short.height
 
 
+def test_share_card_composites_rendered_math(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from backend.services.tikz import TikzRenderer
+
+    math_path = tmp_path / "formula.png"
+    Image.new("RGB", (80, 80), "black").save(math_path)
+
+    class FakeRenderer:
+        def render(self, source):
+            assert r"\frac{x^2}{\sqrt{2}}" in source
+            return SimpleNamespace(png_path=str(math_path))
+
+    monkeypatch.setattr(
+        TikzRenderer, "from_settings", classmethod(lambda cls, settings: FakeRenderer())
+    )
+    plain = _question().model_copy(update={"content_markdown": "公式"})
+    with_math = _question().model_copy(
+        update={"content_markdown": r"公式 $\frac{x^2}{\sqrt{2}}$"}
+    )
+
+    plain_image = Image.open(render_share_card(plain))
+    math_image = Image.open(render_share_card(with_math))
+
+    assert math_image.height >= plain_image.height + 46
+
+
+def test_share_card_scales_math_to_match_body_text(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from backend.services.tikz import TikzRenderer
+
+    math_path = tmp_path / "small_formula.png"
+    Image.new("RGB", (40, 20), "black").save(math_path)
+
+    class FakeRenderer:
+        def render(self, source):
+            return SimpleNamespace(png_path=str(math_path))
+
+    monkeypatch.setattr(
+        TikzRenderer, "from_settings", classmethod(lambda cls, settings: FakeRenderer())
+    )
+
+    formula = share_card._MathRenderer().render("x", max_width=960)
+
+    assert formula.size == (60, 30)
+
+
+def test_share_card_layout_omits_blank_markdown_separator_lines():
+    draw = share_card.ImageDraw.Draw(Image.new("RGB", (10, 10)))
+
+    lines = share_card._layout_rich(
+        draw,
+        "第一段\n\n---\n\n第二段",
+        share_card._font(30),
+        max_width=960,
+        math_renderer=share_card._MathRenderer(),
+    )
+
+    assert len(lines) == 2
+
+
+def test_share_card_math_line_has_vertical_spacing():
+    formula = Image.new("RGBA", (60, 40))
+
+    assert share_card._line_height([("math", formula)]) == 52
+
+
 def _existing_platform_font() -> str | None:
     """当前平台上真实存在的候选字体（用于配置项测试）。"""
     for path in share_card._font_candidates():

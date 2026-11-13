@@ -11,82 +11,86 @@ from frontend.common import login_user
 
 def render_auth_page() -> None:
     init_db()
-    st.markdown(
-        """
-        <div class="mm-login">
-            <div class="mm-login__logo">📘</div>
-            <h1 class="mm-login__title">Issues Manager</h1>
-            <p class="mm-login__subtitle">基于视觉大模型与 RAG 的智能错题本</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    auth_container = st.container()
+    with auth_container:
+        st.markdown(
+            """
+            <div class="mm-login">
+                <img class="mm-login__logo-image" src="app/static/icon.png" alt="智能错题本图标">
+                <h1 class="mm-login__title">智能错题本</h1>
+                <p class="mm-login__subtitle">基于视觉大模型与 RAG 的个性化学习助手</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    _pad_l, center, _pad_r = st.columns([1, 1.1, 1])
-    with center:
-        tab_login, tab_register = st.tabs(["登录", "注册"])
+        _pad_l, center, _pad_r = st.columns([1, 1.1, 1])
+        with center:
+            tab_login, tab_register = st.tabs(["登录", "注册"])
 
-    st.markdown(
-        """
-        <div class="mm-features">
-          <div class="mm-feature-card">
-            <div class="mm-feature-card__icon">📸</div>
-            <div class="mm-feature-card__title">拍照录题</div>
-            <div class="mm-feature-card__desc">视觉大模型识别手写题，自动生成考点解析</div>
-          </div>
-          <div class="mm-feature-card">
-            <div class="mm-feature-card__icon">🔁</div>
-            <div class="mm-feature-card__title">间隔重复</div>
-            <div class="mm-feature-card__desc">SM-2 算法科学排期，对抗遗忘曲线</div>
-          </div>
-          <div class="mm-feature-card">
-            <div class="mm-feature-card__icon">🧠</div>
-            <div class="mm-feature-card__title">知识图谱</div>
-            <div class="mm-feature-card__desc">RAG 向量检索举一反三，薄弱点一目了然</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        st.markdown(
+            """
+            <div class="mm-features">
+              <div class="mm-feature-card">
+                <div class="mm-feature-card__icon">📸</div>
+                <div class="mm-feature-card__title">拍照录题</div>
+                <div class="mm-feature-card__desc">视觉大模型识别手写题，自动生成考点解析</div>
+              </div>
+              <div class="mm-feature-card">
+                <div class="mm-feature-card__icon">🔁</div>
+                <div class="mm-feature-card__title">间隔重复</div>
+                <div class="mm-feature-card__desc">SM-2 算法科学排期，对抗遗忘曲线</div>
+              </div>
+              <div class="mm-feature-card">
+                <div class="mm-feature-card__icon">🧠</div>
+                <div class="mm-feature-card__title">知识图谱</div>
+                <div class="mm-feature-card__desc">RAG 向量检索举一反三，薄弱点一目了然</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with tab_login:
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("用户名", placeholder="admin / demo")
-            password = st.text_input("密码", type="password")
-            if st.form_submit_button("登录", type="primary", width="stretch"):
-                if not username or not password:
-                    st.warning("请输入用户名和密码")
-                else:
-                    with get_session() as session:
-                        result = AuthService(session).login(username, password)
-                    if result.ok:
-                        login_user(result.user_id, result.username, result.role)
-                        st.rerun()
+        with tab_login:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("用户名", placeholder="admin / demo")
+                password = st.text_input("密码", type="password")
+                if st.form_submit_button("登录", type="primary", width="stretch"):
+                    if not username or not password:
+                        st.warning("请输入用户名和密码")
                     else:
-                        st.error(result.message)
-        st.caption("首次运行自动创建种子账号：admin / admin123（教师）　demo / demo123（学生）")
+                        with get_session() as session:
+                            result = AuthService(session).login(username, password)
+                        if result.ok:
+                            login_user(result.user_id, result.username, result.role)
+                            auth_container.empty()
+                            st.rerun()
+                        else:
+                            st.error(result.message)
+            st.caption("首次运行自动创建种子账号：admin / admin123（教师）　demo / demo123（学生）")
 
-    with tab_register:
-        with st.form("register_form"):
-            new_username = st.text_input("用户名（2-32 字符）")
-            new_password = st.text_input("密码（至少 6 位）", type="password")
-            new_password2 = st.text_input("确认密码", type="password")
-            role = st.selectbox("角色", ["student", "teacher"], format_func=lambda v: "学生" if v == "student" else "教师")
-            if st.form_submit_button("创建账号", width="stretch"):
-                if new_password != new_password2:
-                    st.error("两次输入的密码不一致")
-                else:
-                    try:
-                        payload = RegisterInput(
-                            username=new_username, password=new_password, role=role
-                        )
-                    except Exception as exc:  # noqa: BLE001 - 展示校验错误
-                        st.error(f"输入不合法：{exc}")
-                        st.stop()
-                    with get_session() as session:
-                        result = AuthService(session).register(payload)
-                    if result.ok:
-                        login_user(result.user_id, result.username, result.role)
-                        st.rerun()
+        with tab_register:
+            with st.form("register_form"):
+                new_username = st.text_input("用户名（2-32 字符）")
+                new_password = st.text_input("密码（至少 6 位）", type="password")
+                new_password2 = st.text_input("确认密码", type="password")
+                role = st.selectbox("角色", ["student", "teacher"], format_func=lambda v: "学生" if v == "student" else "教师")
+                if st.form_submit_button("创建账号", width="stretch"):
+                    if new_password != new_password2:
+                        st.error("两次输入的密码不一致")
                     else:
-                        st.error(result.message)
+                        try:
+                            payload = RegisterInput(
+                                username=new_username, password=new_password, role=role
+                            )
+                        except Exception as exc:  # noqa: BLE001 - 展示校验错误
+                            st.error(f"输入不合法：{exc}")
+                            st.stop()
+                        with get_session() as session:
+                            result = AuthService(session).register(payload)
+                        if result.ok:
+                            login_user(result.user_id, result.username, result.role)
+                            auth_container.empty()
+                            st.rerun()
+                        else:
+                            st.error(result.message)

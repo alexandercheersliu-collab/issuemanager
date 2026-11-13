@@ -2,9 +2,9 @@
 # Python >= 3.10
 
 # Web 框架
-streamlit>=1.49
+streamlit>=1.65
 streamlit-antd-components>=0.3.2
-plotly>=7.0.0
+plotly>=7.1.0
 networkx>=3.0            # 知识图谱力导向布局（spring_layout）
 
 # REST API 网关（多端复用）
@@ -20,7 +20,7 @@ pydantic-settings>=2.15.0
 python-dotenv>=1.2.3
 
 # 认证
-bcrypt>=4.1
+bcrypt>=5.0.0
 
 # AI 提供商
 openai>=1.40            # OpenAI 兼容接入（SiliconFlow / Qwen / GLM / DeepSeek / Ollama ...）
@@ -37,6 +37,9 @@ pymupdf>=1.24          # PDF 解析与逐页渲染（整卷导入）
 Pillow>=10.3
 reportlab>=4.0
 alembic>=1.13
+
+# TikZ 几何图需要外部 TinyTeX / TeX Live 2026（不是 pip 依赖）。
+# 顶层宏包见 deploy/tinytex-requirements.txt；运行 scripts/install_tinytex.py 自动配置。
 
 # 可选：OCR 原图文字识别（.env 设 OCR_ENABLED=true 并安装后启用）
 # rapidocr-onnxruntime>=1.3

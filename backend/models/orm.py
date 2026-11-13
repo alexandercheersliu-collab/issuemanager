@@ -49,6 +49,22 @@ def resolve_image_path(stored: str | None, user_id: int) -> Path | None:
     return fallback if fallback.exists() else None
 
 
+def _resolve_figure_path(stored: str | None, user_id: int) -> Path | None:
+    resolved = resolve_image_path(stored, user_id)
+    if resolved is not None or not stored:
+        return resolved
+    path = Path(stored)
+    if len(path.parts) >= 3 and path.parts[-3:-1] == ("figures", "tikz"):
+        candidate = get_settings().data_dir / "figures" / "tikz" / path.name
+        if candidate.exists():
+            return candidate
+    if "docs" not in path.parts:
+        return None
+    marker = len(path.parts) - 1 - path.parts[::-1].index("docs")
+    candidate = get_settings().doc_upload_path.joinpath(*path.parts[marker + 1 :])
+    return candidate if candidate.exists() else None
+
+
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -83,6 +99,8 @@ class Question(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
 
     image_path: Mapped[str | None] = mapped_column(String(512))
+    figure_paths: Mapped[list | None] = mapped_column(JSON, default=list)
+    figure_specs: Mapped[list | None] = mapped_column(JSON, default=list)
     # AI 解析（Markdown）
     content_markdown: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text, default="")
@@ -115,6 +133,24 @@ class Question(Base):
     def resolved_image_path(self) -> Path | None:
         """当前真实可用的原图路径（DATA_DIR 迁移后自动自愈），无图返回 None。"""
         return resolve_image_path(self.image_path, self.user_id)
+
+    def resolved_figure_paths(self) -> list[Path]:
+        resolved_paths: list[Path] = []
+        for stored in self.figure_paths or []:
+            resolved = _resolve_figure_path(stored, self.user_id)
+            if resolved is not None:
+                resolved_paths.append(resolved)
+        return resolved_paths
+
+    def resolved_figure_specs(self) -> list[dict]:
+        resolved_specs: list[dict] = []
+        for stored_spec in self.figure_specs or []:
+            spec = dict(stored_spec)
+            for key in ("render_path", "crop_path"):
+                resolved = _resolve_figure_path(spec.get(key), self.user_id)
+                spec[key] = str(resolved) if resolved else None
+            resolved_specs.append(spec)
+        return resolved_specs
 
     # SM-2 调度状态
     reps: Mapped[int] = mapped_column(Integer, default=0)

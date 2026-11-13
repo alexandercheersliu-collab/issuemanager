@@ -68,8 +68,8 @@ def _start_warmup_once() -> bool:
 settings = get_settings()
 
 st.set_page_config(
-    page_title=f"{settings.app_name} · 智能错题本",
-    page_icon="📘",
+    page_title="智能错题本",
+    page_icon="static/icon.png",
     layout="wide",
     initial_sidebar_state="auto",  # 窄屏自动折叠，兼顾移动端
 )
@@ -124,23 +124,23 @@ _ADMIN_PAGES = {
     t("nav.admin"): "admin",
 }
 
-# 侧边栏导航图标（emoji，深浅色通吃；自定义组件 iframe 无法跟随主题故弃用 sac.menu）
+# 侧边栏导航统一使用 Material Symbols，保持深浅色下一致的线性风格。
 _NAV_ICONS = {
-    "dashboard": "🏠",
-    "tutor": "📸",
-    "import_doc": "📄",
-    "notebook": "📒",
-    "review": "🔁",
-    "graph": "🧠",
-    "students": "👥",
-    "admin": "🛡️",
-    "assistant": "🤖",
-    "settings": "⚙️",
+    "dashboard": ":material/dashboard:",
+    "tutor": ":material/photo_camera:",
+    "import_doc": ":material/description:",
+    "notebook": ":material/menu_book:",
+    "review": ":material/autorenew:",
+    "graph": ":material/account_tree:",
+    "students": ":material/group:",
+    "admin": ":material/admin_panel_settings:",
+    "assistant": ":material/smart_toy:",
+    "settings": ":material/settings:",
 }
 
 
 def _render_sidebar(user: dict) -> str:
-    from frontend.common import initials, is_admin
+    from frontend.common import is_admin
 
     ordered = list(_PAGES.items())
     if user.get("role") == "teacher":
@@ -160,43 +160,46 @@ def _render_sidebar(user: dict) -> str:
     visible = dict(ordered)
 
     with st.sidebar:
-        st.markdown(
-            """
-            <div class="mm-brand">
-              <div class="mm-brand__logo">📘</div>
-              <div class="mm-brand__title">Issues Manager</div>
-              <div class="mm-brand__tag">视觉大模型 × RAG 错题本</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        pending = st.session_state.pop("_pending_nav", None)  # 必须在菜单实例化前写入其 key
-        if pending:
+        with st.container(key="sidebar_brand"):
+            st.image("static/icon.png", width=44, alt="智能错题本图标")
+        pending = st.session_state.pop("_pending_nav", None)
+        if pending in visible:
             st.session_state["nav"] = pending
-        menu = st.radio(
-            "导航",
-            list(visible.keys()),
-            format_func=lambda lbl: f"{_NAV_ICONS.get(visible[lbl], '')} {lbl}",
-            key="nav",
-            label_visibility="collapsed",
-        )
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="mm-user-card">
-              <div class="user-avatar">{initials(user['username'])}</div>
-              <div>
-                <div class="mm-user-card__name">{user['username']}</div>
-                <div class="mm-user-card__role">{"教师" if user['role'] == "teacher" else "学生"}</div>
-              </div>
-            </div>
-            <div class="mm-version"><span>v{settings.app_version}</span></div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("退出登录", width="stretch"):
-            logout_user()
-            st.rerun()
+        menu = st.session_state.get("nav")
+        if menu not in visible:
+            menu = next(iter(visible))
+            st.session_state["nav"] = menu
+        with st.container(key="sidebar_nav", gap=None):
+            for label, key in visible.items():
+                if st.button(
+                    label,
+                    icon=_NAV_ICONS[key],
+                    key=f"nav_{key}",
+                    type="secondary" if label == menu else "tertiary",
+                    width="stretch",
+                ):
+                    st.session_state["nav"] = label
+                    st.rerun()
+        st.space("small")
+        with st.container(key="sidebar_account", border=True):
+            st.markdown(
+                f"""
+                <div class="mm-user-card">
+                  <div class="mm-user-card__name">{user['username']}</div>
+                  <div class="mm-user-card__role">{"教师" if user['role'] == "teacher" else "学生"}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                "退出登录",
+                icon=":material/logout:",
+                key="sidebar_logout",
+                type="tertiary",
+                width="stretch",
+            ):
+                logout_user()
+                st.rerun()
     all_pages = {**visible}
     return all_pages.get(menu or t("nav.dashboard"), "dashboard")
 

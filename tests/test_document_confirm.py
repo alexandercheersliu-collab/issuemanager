@@ -1,10 +1,12 @@
 """确认入库测试：segments 端点、confirm 落库（source/source_doc）、幂等。"""
 from __future__ import annotations
 
+import threading
 import time
+from pathlib import Path
 
 import pytest
-from doc_samples import make_text_pdf
+from doc_samples import make_image, make_text_pdf
 from fastapi.testclient import TestClient
 
 from api.main import create_app
@@ -52,6 +54,24 @@ def _import_and_wait(question_service, student_user, tmp_path, name="confirm.pdf
 
 def test_confirm_import_persists_source_fields(question_service, student_user, tmp_path):
     service, job_id = _import_and_wait(question_service, student_user, tmp_path)
+    figure = tmp_path / "confirm-figure.png"
+    figure.write_bytes(b"figure")
+    spec = {
+        "kind": "geometry",
+        "semantic_spec": {"shape": "triangle"},
+        "tikz_source": "\\draw (0,0)--(1,0);",
+        "render_path": None,
+        "crop_path": str(figure),
+        "validation_status": "fallback",
+        "validation_issues": ["需人工确认"],
+        "assumptions": [],
+    }
+    job = service.get_job(job_id, student_user.id)
+    result = job["result"]
+    result["segments"][0]["figure_paths"] = [str(figure)]
+    result["segments"][0]["figure_specs"] = [spec]
+    result["segments"][1].pop("figure_specs", None)  # 兼容功能上线前的任务
+    service._save_result(job_id, result)
 
     outcome = service.confirm_import(job_id, student_user.id)
     assert outcome == {"imported": 2, "skipped": [], "already_confirmed": False}
@@ -66,6 +86,7 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     assert {q.source_doc for q in docs} == {"confirm.pdf#1"}
 
     first = next(q for q in docs if "第一题" in q.content_markdown)
+    second = next(q for q in docs if "第二题" in q.content_markdown)
     assert first.subject == "math"
     assert first.grade == 9
     assert first.region == "北京"
@@ -75,6 +96,97 @@ def test_confirm_import_persists_source_fields(question_service, student_user, t
     assert first.chapter == "一元二次方程"
     assert "第一题" in first.content_markdown
     assert first.answer
+    assert first.figure_paths == [str(figure)]
+    assert [item.model_dump() for item in first.figure_specs] == [spec]
+    assert second.figure_specs == []
+
+
+def test_confirm_import_applies_latest_context(question_service, student_user, tmp_path):
+    service, job_id = _import_and_wait(
+        question_service, student_user, tmp_path, "latest-context.pdf"
+    )
+    context = {
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "textbook_version": "沪教版",
+    }
+
+    outcome = service.confirm_import(job_id, student_user.id, context=context)
+
+    assert outcome["imported"] == 2
+    job = service.get_job(job_id, student_user.id)
+    assert job is not None
+    assert {key: job["payload"][key] for key in context} == context
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("latest-context.pdf#")
+    ]
+    assert len(docs) == 2
+    assert all(q.grade == 10 for q in docs)
+    assert all(q.region == "上海" for q in docs)
+    assert all(q.textbook_version == "沪教版" for q in docs)
+
+
+def test_confirm_import_links_page_image(question_service, student_user, tmp_path):
+    """确认入库：题目 image_path 关联其所在页的渲染页图（PDF 页）。"""
+    pdf = make_text_pdf(
+        tmp_path / "img.pdf", ["1. 页图题一：求 x。\n2. 页图题二：求 y。"]
+    )
+    service = DocumentService()
+    job_id, _ = service.import_document(student_user.id, pdf.read_bytes(), "img.pdf")
+    job = _wait_job(service, job_id, student_user.id)
+    assert job["status"] == "success", job["error"]
+
+    outcome = service.confirm_import(job_id, student_user.id)
+    assert outcome["imported"] == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if q.source == "document" and (q.source_doc or "").startswith("img.pdf#")
+    ]
+    assert len(docs) == 2
+    for q in docs:
+        assert q.image_path, "确认入库应关联页图"
+        path = Path(q.image_path)
+        assert path.is_file()
+        assert path.name == "page-1.png"  # 两题同在第 1 页
+
+
+def test_confirm_import_links_photo_page_by_order(question_service, student_user, tmp_path):
+    """整卷拍照：第 2 页照片切出的题关联第 2 张页图（跨页题取起始页）。"""
+    photo1 = make_image(tmp_path / "c1.png", size=(601, 801))
+    photo2 = make_image(tmp_path / "c2.png", size=(411, 311))
+    service = DocumentService()
+    job_id, _ = service.import_document(
+        student_user.id,
+        photo1.read_bytes(),
+        "c1.png",
+        extra_files=[(photo2.read_bytes(), "c2.png")],
+    )
+    job = _wait_job(service, job_id, student_user.id)
+    assert job["status"] == "success", job["error"]
+    page_images = job["result"]["page_images"]
+    assert len(page_images) == 2
+
+    outcome = service.confirm_import(job_id, student_user.id)
+    assert outcome["imported"] == 4  # mock 视觉切题每页 2 题
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if q.source == "document" and (q.source_doc or "").startswith("c1.png#")
+    ]
+    assert len(docs) == 4
+    assert all(q.image_path and Path(q.image_path).is_file() for q in docs)
+    # 第 2 页切出的题（source_doc = 文件名#2）关联第 2 张照片
+    page2_docs = [q for q in docs if q.source_doc == "c1.png#2"]
+    assert len(page2_docs) == 2
+    assert all(q.image_path == page_images[1] for q in page2_docs)
+    page1_docs = [q for q in docs if q.source_doc == "c1.png#1"]
+    assert all(q.image_path == page_images[0] for q in page1_docs)
 
 
 def test_confirm_import_is_idempotent(question_service, student_user, tmp_path):
@@ -87,6 +199,67 @@ def test_confirm_import_is_idempotent(question_service, student_user, tmp_path):
     assert second == {"imported": 2, "skipped": [], "already_confirmed": True}
     after = len(question_service.list_questions(student_user.id, semantic=False))
     assert after == before  # 重复确认不产生新题
+
+
+def test_concurrent_confirm_imports_each_segment_once(
+    question_service, student_user, tmp_path, monkeypatch
+):
+    service, job_id = _import_and_wait(
+        question_service, student_user, tmp_path, "concurrent-confirm.pdf"
+    )
+    from backend.services.question_service import QuestionService
+
+    start = threading.Barrier(3)
+    concurrent_imports = threading.Barrier(2)
+    created: list[str] = []
+    outcomes: list[dict] = []
+    errors: list[Exception] = []
+    original_create = QuestionService.create_manual_question
+
+    def gated_create(*args, **kwargs):
+        created.append(kwargs["content_markdown"])
+        try:
+            concurrent_imports.wait(timeout=2)
+        except threading.BrokenBarrierError:
+            pass
+        return original_create(*args, **kwargs)
+
+    def confirm():
+        start.wait()
+        try:
+            outcomes.append(service.confirm_import(job_id, student_user.id))
+        except Exception as exc:  # noqa: BLE001 - 在线程外断言两种调用结果
+            errors.append(exc)
+
+    monkeypatch.setattr(QuestionService, "create_manual_question", gated_create)
+    threads = [threading.Thread(target=confirm) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert len(outcomes) == 1
+    assert outcomes[0] == {"imported": 2, "skipped": [], "already_confirmed": False}
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "正在确认入库" in str(errors[0])
+    assert len(created) == 2
+    assert len(set(created)) == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("concurrent-confirm.pdf#")
+    ]
+    assert len(docs) == 2
+    final = service.confirm_import(job_id, student_user.id)
+    assert final == {
+        "imported": outcomes[0]["imported"],
+        "skipped": outcomes[0]["skipped"],
+        "already_confirmed": True,
+    }
 
 
 def test_confirm_import_rejects_missing_or_unfinished(student_user):

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from backend.config import get_settings
+from backend.services.ai.base import normalize_math_delimiters
 from backend.utils.logging import get_logger
 
 logger = get_logger("share_card")
@@ -65,21 +67,166 @@ def has_cjk_font() -> bool:
     return any(os.path.exists(p) for p in _font_candidates())
 
 
-def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
-    """按像素宽度断行（先按换行拆段；中文逐字、英文按词）。"""
-    lines: list[str] = []
-    for segment in text.split("\n"):
-        current = ""
-        for ch in segment:
-            trial = current + ch
-            if draw.textlength(trial, font=font) <= max_width or not current:
-                current = trial
+_MATH_RE = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$", re.DOTALL)
+_MATH_SCALE = 1.5
+_TEXT_LINE_H = 46
+_MATH_LINE_PADDING = 12
+_LATEX_SYMBOLS = {
+    "circ": "°", "cdot": "·", "times": "×", "div": "÷", "pm": "±",
+    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ne": "≠", "neq": "≠",
+    "pi": "π", "infty": "∞", "angle": "∠", "perp": "⊥", "parallel": "∥",
+    "sin": "sin", "cos": "cos", "tan": "tan", "log": "log", "ln": "ln",
+}
+
+
+def _readable_math(latex: str) -> str:
+    text = latex.replace(r"^\circ", "°").replace(r"^{\circ}", "°")
+    text = re.sub(r"\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", text)
+    text = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", text)
+    text = re.sub(r"\\(?:overrightarrow|vec)\s*\{([^{}]*)\}", r"\1⃗", text)
+    text = re.sub(r"\\(?:overrightarrow|vec)\s+([A-Za-z0-9]+)", r"\1⃗", text)
+    text = re.sub(
+        r"\\([A-Za-z]+)",
+        lambda match: _LATEX_SYMBOLS.get(match.group(1), match.group(1)),
+        text,
+    )
+    return text.replace("{", "").replace("}", "").replace(r"\,", " ")
+
+
+class _MathRenderer:
+    def __init__(self) -> None:
+        self._renderer = None
+        self._cache: dict[tuple[str, int], Image.Image] = {}
+
+    def render(self, latex: str, max_width: int) -> Image.Image:
+        key = (latex, max_width)
+        if key in self._cache:
+            return self._cache[key]
+        if self._renderer is None:
+            from backend.services.tikz import TikzRenderer
+
+            self._renderer = TikzRenderer.from_settings(get_settings())
+        source = (
+            "\\begin{tikzpicture}\n"
+            "\\node[inner sep=0pt, outer sep=0pt] {$" + latex + "$};\n"
+            "\\end{tikzpicture}"
+        )
+        rendered = self._renderer.render(source)
+        with Image.open(rendered.png_path) as source_image:
+            alpha = ImageOps.invert(source_image.convert("L"))
+        bbox = alpha.getbbox()
+        if bbox is None:
+            raise ValueError("公式渲染结果为空")
+        alpha = alpha.crop(bbox)
+        formula = Image.new("RGBA", alpha.size, _COLORS["text"])
+        formula.putalpha(alpha)
+        scale = min(_MATH_SCALE, max_width / formula.width)
+        formula = formula.resize(
+            (
+                max(1, round(formula.width * scale)),
+                max(1, round(formula.height * scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+        self._cache[key] = formula
+        return formula
+
+
+def _line_height(line: list[tuple[str, object]]) -> int:
+    return max(
+        [_TEXT_LINE_H]
+        + [
+            value.height + _MATH_LINE_PADDING
+            for kind, value in line
+            if kind == "math"
+        ]
+    )
+
+
+def _layout_rich(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font,
+    max_width: int,
+    math_renderer: _MathRenderer,
+) -> list[list[tuple[str, object]]]:
+    text = normalize_math_delimiters(text)
+    for token in ("###", "**", "`"):
+        text = text.replace(token, "")
+    lines: list[list[tuple[str, object]]] = []
+    for paragraph in text.split("\n"):
+        if not paragraph.strip() or paragraph.strip() == "---":
+            continue
+        atoms: list[str | Image.Image] = []
+        cursor = 0
+        for match in _MATH_RE.finditer(paragraph):
+            atoms.extend(paragraph[cursor : match.start()])
+            latex = (match.group(1) or match.group(2) or "").strip()
+            try:
+                atoms.append(math_renderer.render(latex, max_width))
+            except Exception as exc:  # noqa: BLE001 - 无 TeX 时仍生成可读卡片
+                logger.warning("分享卡片公式渲染失败，使用文本回退: %s", exc)
+                atoms.extend(_readable_math(latex))
+            cursor = match.end()
+        atoms.extend(paragraph[cursor:])
+
+        line: list[tuple[str, object]] = []
+        line_width = 0.0
+        for atom in atoms:
+            is_text = isinstance(atom, str)
+            width = (
+                draw.textlength(atom, font=font) if is_text else atom.width
+            )
+            if line and line_width + width > max_width:
+                lines.append(line)
+                line = []
+                line_width = 0.0
+            if is_text:
+                if line and line[-1][0] == "text":
+                    line[-1] = ("text", str(line[-1][1]) + atom)
+                else:
+                    line.append(("text", atom))
             else:
-                lines.append(current)
-                current = ch
-        if current:
-            lines.append(current)
-    return lines or [""]
+                line.append(("math", atom))
+            line_width += width
+        lines.append(line)
+    return lines or [[]]
+
+
+def _rich_height(lines: list[list[tuple[str, object]]]) -> int:
+    return sum(_line_height(line) for line in lines)
+
+
+def _draw_rich(
+    image: Image.Image,
+    lines: list[list[tuple[str, object]]],
+    x: int,
+    y: int,
+    font,
+) -> None:
+    draw = ImageDraw.Draw(image)
+    for line in lines:
+        height = _line_height(line)
+        cursor_x = x
+        for kind, value in line:
+            if kind == "text":
+                text = str(value)
+                draw.text(
+                    (cursor_x, y + (height - _TEXT_LINE_H) // 2),
+                    text,
+                    font=font,
+                    fill=_COLORS["text"],
+                )
+                cursor_x += round(draw.textlength(text, font=font))
+            else:
+                formula = value
+                image.paste(
+                    formula,
+                    (cursor_x, y + (height - formula.height) // 2),
+                    formula,
+                )
+                cursor_x += formula.width
+        y += height
 
 
 def render_share_card(question, base_url: str = "") -> io.BytesIO:
@@ -90,19 +237,26 @@ def render_share_card(question, base_url: str = "") -> io.BytesIO:
     font_body = _font(30)
     font_small = _font(22)
 
-    content = question.content_markdown or ""
-    # 去掉 Markdown 标记，保留纯文本可读性
-    for token in ("###", "**", "$$", "$", "`"):
-        content = content.replace(token, "")
-    content_lines = _wrap(draw_probe, content.strip() or "（无题面）", font_body, _CARD_W - 2 * _MARGIN)
-    answer_lines = _wrap(draw_probe, question.answer or "—", font_body, _CARD_W - 2 * _MARGIN)
-    footer = "Issues Manager · 智能错题本"
-
-    body_h = 34 * len(content_lines) + 24
-    answer_h = 34 * len(answer_lines) + 70
-    card_h = (
-        _MARGIN * 3 + 60 + 44 + body_h + answer_h + 60 + 40
+    math_renderer = _MathRenderer()
+    content_lines = _layout_rich(
+        draw_probe,
+        (question.content_markdown or "").strip() or "（无题面）",
+        font_body,
+        _CARD_W - 2 * _MARGIN,
+        math_renderer,
     )
+    answer_lines = _layout_rich(
+        draw_probe,
+        question.answer or "—",
+        font_body,
+        _CARD_W - 2 * _MARGIN - 48,
+        math_renderer,
+    )
+    footer = "智能错题本 · AI 学习助手"
+
+    body_h = _rich_height(content_lines) + 24
+    answer_h = _rich_height(answer_lines) + 70
+    card_h = _MARGIN * 3 + 60 + 44 + body_h + answer_h + 60 + 40
 
     image = Image.new("RGB", (_CARD_W, card_h), _COLORS["bg"])
     draw = ImageDraw.Draw(image)
@@ -114,10 +268,8 @@ def render_share_card(question, base_url: str = "") -> io.BytesIO:
     draw.text((_MARGIN, _MARGIN + 62), meta, font=font_meta, fill=_COLORS["muted"])
 
     y = _MARGIN + 130
-    for line in content_lines:
-        draw.text((_MARGIN, y), line, font=font_body, fill=_COLORS["text"])
-        y += 34
-    y += 16
+    _draw_rich(image, content_lines, _MARGIN, y, font_body)
+    y += body_h - 8
 
     # 答案区块
     draw.rounded_rectangle(
@@ -127,10 +279,7 @@ def render_share_card(question, base_url: str = "") -> io.BytesIO:
         outline=_COLORS["border"],
     )
     draw.text((_MARGIN + 24, y + 18), "✅ 答案", font=font_meta, fill=_COLORS["accent"])
-    ay = y + 60
-    for line in answer_lines:
-        draw.text((_MARGIN + 24, ay), line, font=font_body, fill=_COLORS["text"])
-        ay += 34
+    _draw_rich(image, answer_lines, _MARGIN + 24, y + 60, font_body)
 
     # 底部
     draw.text((_MARGIN, card_h - _MARGIN - 26), footer, font=font_small, fill=_COLORS["muted"])

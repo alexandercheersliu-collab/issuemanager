@@ -25,9 +25,9 @@ def _login(page, username: str, password: str) -> None:
 
 
 def _goto(page, label: str, marker: str | None = None, timeout: int = 30000) -> None:
-    """点击侧边栏导航（st.radio，选项文本为「emoji + 标签」），并等待目标页标志出现。"""
+    """点击侧边栏 Material 图标按钮，并等待目标页标志出现。"""
     page.wait_for_timeout(1200)
-    page.locator("section[data-testid='stSidebar'] label", has_text=label).first.click()
+    page.locator("section[data-testid='stSidebar'] button", has_text=label).first.click()
     if marker:
         deadline = time.monotonic() + timeout / 1000
         while time.monotonic() < deadline:
@@ -65,8 +65,9 @@ def test_full_tutor_flow(page, _sample_jpeg):
     page.wait_for_selector("text=去错题本查看", timeout=15000)
 
     _goto(page, "错题本", "语义搜索")
-    # mock 解析标志在折叠面板内（rerun 后隐藏），attached 即可证明归档成功
-    page.wait_for_selector("text=演示模式", timeout=15000, state="attached")
+    # 折叠面板采用懒渲染，展开后才会加载 mock 解析内容
+    page.locator("summary", has_text="⏰").first.click()
+    page.wait_for_selector("text=演示模式", timeout=15000, state="visible")
 
 
 def test_followup_chat_on_question(page, _sample_jpeg):
