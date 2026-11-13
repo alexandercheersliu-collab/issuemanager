@@ -177,6 +177,9 @@ class PhotoEntryService:
                     fallbacks.append(
                         {
                             **image,
+                            "image_hash": hashlib.sha256(
+                                Path(image["path"]).read_bytes()
+                            ).hexdigest(),
                             "segments": segments if isinstance(segments, list) else [],
                         }
                     )
@@ -285,8 +288,19 @@ class PhotoEntryService:
             ]
             path_cache: dict[str, str] = {}
             path_lock = threading.Lock()
-            fallback_locks: dict[str, threading.Lock] = {}
-            fallback_locks_guard = threading.Lock()
+            fallback_groups: dict[str, list[int]] = {}
+            for index, (kind, item) in enumerate(items):
+                if kind == "fallback":
+                    fallback_groups.setdefault(item["image_hash"], []).append(index)
+            fallback_positions = {
+                index: position
+                for group in fallback_groups.values()
+                for position, index in enumerate(group)
+            }
+            fallback_conditions = {
+                image_hash: threading.Condition() for image_hash in fallback_groups
+            }
+            fallback_turns = {image_hash: 0 for image_hash in fallback_groups}
 
             def _import(index: int):
                 kind, item = items[index]
@@ -320,26 +334,30 @@ class PhotoEntryService:
                         return index, _entry(name, None, str(exc))
 
                 name = item["name"]
+                image_hash = item["image_hash"]
+                condition = fallback_conditions[image_hash]
                 try:
-                    image_bytes = Path(item["path"]).read_bytes()
-                    image_hash = hashlib.sha256(image_bytes).hexdigest()
-                    with fallback_locks_guard:
-                        fallback_lock = fallback_locks.setdefault(
-                            image_hash, threading.Lock()
+                    with condition:
+                        condition.wait_for(
+                            lambda: fallback_turns[image_hash]
+                            == fallback_positions[index]
                         )
-                    with fallback_lock:
-                        entry = service.analyze_and_save_dedup(
-                            user_id,
-                            image_bytes,
-                            mime_type=item.get("mime_type") or "image/jpeg",
-                            user_tags=list(payload.get("tags") or []),
-                            hint=payload.get("hint", ""),
-                            segments=list(item.get("segments") or []),
-                            subject=payload.get("subject") or "math",
-                            grade=payload.get("grade"),
-                            region=payload.get("region"),
-                            textbook_version=payload.get("textbook_version"),
-                        )
+                        try:
+                            entry = service.analyze_and_save_dedup(
+                                user_id,
+                                Path(item["path"]).read_bytes(),
+                                mime_type=item.get("mime_type") or "image/jpeg",
+                                user_tags=list(payload.get("tags") or []),
+                                hint=payload.get("hint", ""),
+                                segments=list(item.get("segments") or []),
+                                subject=payload.get("subject") or "math",
+                                grade=payload.get("grade"),
+                                region=payload.get("region"),
+                                textbook_version=payload.get("textbook_version"),
+                            )
+                        finally:
+                            fallback_turns[image_hash] += 1
+                            condition.notify_all()
                     return index, _entry(name, entry, None)
                 except Exception as exc:  # noqa: BLE001 - 单图失败不影响其余
                     return index, _entry(name, None, str(exc))
