@@ -22,14 +22,13 @@ const TABS: { key: Tab; label: string; icon: typeof Repeat }[] = [
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
-  const [restoring, setRestoring] = useState(true)
+  const [restoring, setRestoring] = useState(() => Boolean(getToken()))
   const [tab, setTab] = useState<Tab>('review')
 
   // 启动时用本地令牌恢复会话（/auth/me），过期则回落登录页；
   // 本地无令牌时直接进登录页，避免一次必失败的请求
   useEffect(() => {
     if (!getToken()) {
-      setRestoring(false)
       return
     }
     api

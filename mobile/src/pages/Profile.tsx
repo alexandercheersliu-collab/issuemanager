@@ -73,9 +73,7 @@ export default function Profile({ user, onLogout }: { user: User; onLogout: () =
       <Button
         variant="outline"
         className="mt-8 w-full text-red-600"
-        onClick={() => {
-          api && onLogout()
-        }}
+        onClick={onLogout}
       >
         <LogOut className="mr-2 h-4 w-4" /> 退出登录
       </Button>

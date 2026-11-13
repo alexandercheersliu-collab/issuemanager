@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import select
@@ -133,15 +135,31 @@ class PhotoEntryService:
                 session.commit()
 
             service = self._question_service()
-            candidates: list[dict] = []
-            fallbacks: list[dict] = []
-            for image_index, image in enumerate(payload["images"]):
+
+            def _segment(image_index: int):
+                image = payload["images"][image_index]
                 data = Path(image["path"]).read_bytes()
                 try:
-                    segments = service.ai.segment_page(data, image["mime_type"])
+                    return image_index, service.ai.segment_page(data, image["mime_type"])
                 except Exception as exc:  # noqa: BLE001 - 单图切题失败回退整图
                     logger.info("切题失败，回退整图 job=%s image=%s: %s", job_id, image["name"], exc)
-                    segments = None
+                    return image_index, None
+
+            segment_results: list[list[dict] | None] = [None] * len(payload["images"])
+            workers = max(1, self.settings.import_concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_segment, index) for index in range(len(payload["images"]))
+                ]
+                for future in as_completed(futures):
+                    image_index, segments = future.result()
+                    segment_results[image_index] = segments
+
+            candidates: list[dict] = []
+            fallbacks: list[dict] = []
+            for image_index, (image, segments) in enumerate(
+                zip(payload["images"], segment_results, strict=True)
+            ):
                 if isinstance(segments, list) and len(segments) >= 2:
                     for segment_index, segment in enumerate(segments):
                         text = str(segment.get("text", "") or "").strip()
@@ -159,6 +177,9 @@ class PhotoEntryService:
                     fallbacks.append(
                         {
                             **image,
+                            "image_hash": hashlib.sha256(
+                                Path(image["path"]).read_bytes()
+                            ).hexdigest(),
                             "segments": segments if isinstance(segments, list) else [],
                         }
                     )
@@ -261,56 +282,97 @@ class PhotoEntryService:
                 for candidate in payload.get("candidates") or []
                 if candidate["id"] in selected_ids
             ]
+            items = [
+                *[("candidate", candidate) for candidate in selected],
+                *[("fallback", fallback) for fallback in payload.get("fallbacks") or []],
+            ]
             path_cache: dict[str, str] = {}
-            for candidate in selected:
-                name = f"{candidate['image']} · 第 {candidate['number']} 题"
-                try:
-                    source_path = candidate["image_path"]
-                    if source_path not in path_cache:
-                        path_cache[source_path] = str(
-                            service._persist_image(user_id, Path(source_path).read_bytes())
+            path_lock = threading.Lock()
+            fallback_groups: dict[str, list[int]] = {}
+            for index, (kind, item) in enumerate(items):
+                if kind == "fallback":
+                    fallback_groups.setdefault(item["image_hash"], []).append(index)
+            fallback_positions = {
+                index: position
+                for group in fallback_groups.values()
+                for position, index in enumerate(group)
+            }
+            fallback_conditions = {
+                image_hash: threading.Condition() for image_hash in fallback_groups
+            }
+            fallback_turns = {image_hash: 0 for image_hash in fallback_groups}
+
+            def _import(index: int):
+                kind, item = items[index]
+                if kind == "candidate":
+                    name = f"{item['image']} · 第 {item['number']} 题"
+                    try:
+                        source_path = item["image_path"]
+                        with path_lock:
+                            if source_path not in path_cache:
+                                path_cache[source_path] = str(
+                                    service._persist_image(
+                                        user_id, Path(source_path).read_bytes()
+                                    )
+                                )
+                        out, analysis = service.analyze_text_and_save(
+                            user_id,
+                            item["text"],
+                            user_tags=list(payload.get("tags") or []),
+                            hint=payload.get("hint", ""),
+                            image_path=path_cache[source_path],
+                            segment=item,
+                            subject=payload.get("subject") or "math",
+                            grade=payload.get("grade"),
+                            region=payload.get("region"),
+                            textbook_version=payload.get("textbook_version"),
                         )
-                    out, analysis = service.analyze_text_and_save(
-                        user_id,
-                        candidate["text"],
-                        user_tags=list(payload.get("tags") or []),
-                        hint=payload.get("hint", ""),
-                        image_path=path_cache[source_path],
-                        segment=candidate,
-                        subject=payload.get("subject") or "math",
-                        grade=payload.get("grade"),
-                        region=payload.get("region"),
-                        textbook_version=payload.get("textbook_version"),
-                    )
-                    result["entries"].append(
-                        _entry(name, EntryResult(out, analysis, duplicated=False), None)
-                    )
-                except Exception as exc:  # noqa: BLE001 - 单题失败不影响其余
-                    result["entries"].append(_entry(name, None, str(exc)))
-                result["done"] += 1
-                self._save_result(job_id, result)
+                        return index, _entry(
+                            name, EntryResult(out, analysis, duplicated=False), None
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 单题失败不影响其余
+                        return index, _entry(name, None, str(exc))
 
-            for fallback in payload.get("fallbacks") or []:
-                name = fallback["name"]
+                name = item["name"]
+                image_hash = item["image_hash"]
+                condition = fallback_conditions[image_hash]
                 try:
-                    entry = service.analyze_and_save_dedup(
-                        user_id,
-                        Path(fallback["path"]).read_bytes(),
-                        mime_type=fallback.get("mime_type") or "image/jpeg",
-                        user_tags=list(payload.get("tags") or []),
-                        hint=payload.get("hint", ""),
-                        segments=list(fallback.get("segments") or []),
-                        subject=payload.get("subject") or "math",
-                        grade=payload.get("grade"),
-                        region=payload.get("region"),
-                        textbook_version=payload.get("textbook_version"),
-                    )
-                    result["entries"].append(_entry(name, entry, None))
+                    with condition:
+                        condition.wait_for(
+                            lambda: fallback_turns[image_hash]
+                            == fallback_positions[index]
+                        )
+                        try:
+                            entry = service.analyze_and_save_dedup(
+                                user_id,
+                                Path(item["path"]).read_bytes(),
+                                mime_type=item.get("mime_type") or "image/jpeg",
+                                user_tags=list(payload.get("tags") or []),
+                                hint=payload.get("hint", ""),
+                                segments=list(item.get("segments") or []),
+                                subject=payload.get("subject") or "math",
+                                grade=payload.get("grade"),
+                                region=payload.get("region"),
+                                textbook_version=payload.get("textbook_version"),
+                            )
+                        finally:
+                            fallback_turns[image_hash] += 1
+                            condition.notify_all()
+                    return index, _entry(name, entry, None)
                 except Exception as exc:  # noqa: BLE001 - 单图失败不影响其余
-                    result["entries"].append(_entry(name, None, str(exc)))
-                result["done"] += 1
-                self._save_result(job_id, result)
+                    return index, _entry(name, None, str(exc))
 
+            entries: list[dict] = [{} for _ in items]
+            workers = max(1, self.settings.import_concurrency)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_import, index) for index in range(len(items))]
+                for future in as_completed(futures):
+                    index, entry = future.result()
+                    entries[index] = entry
+                    result["done"] += 1
+                    self._save_result(job_id, result)
+
+            result["entries"] = entries
             result["phase"] = "done"
             self._save_state(job_id, status="success", result=result, finished=True)
         except Exception as exc:  # noqa: BLE001 - 任务级失败持久化供轮询

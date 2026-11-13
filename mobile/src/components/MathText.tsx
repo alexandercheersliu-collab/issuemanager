@@ -9,7 +9,7 @@ import { lazy, Suspense } from 'react'
 
 const Inner = lazy(() => import('./MathTextInner'))
 
-export function normalizeMathDelimiters(text: string): string {
+function normalizeMathDelimiters(text: string): string {
   return text
     .replace(/\\\[([\s\S]*?)\\\]/g, (_, m) => `$$${m}$$`)
     .replace(/\\\(([\s\S]*?)\\\)/g, (_, m) => `$${m}$`)

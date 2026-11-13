@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     # 自定义 DATA_DIR 时自动跟随。显式指定示例：
     # DOC_UPLOAD_PATH=D:\workspace\learning-tour\data\uploads\docs
     doc_upload_path: Path | None = None
-    # 整卷导入并发度：逐题解构与逐页视觉切题的线程池大小（1 = 保持顺序执行）
+    # 拍照/整卷导入并发度：切题、逐题解构与归档的线程池大小（1 = 保持顺序执行）
     import_concurrency: int = Field(default=3, ge=1, le=16)
 
     # ---------- 复习算法 (SM-2) ----------
