@@ -6,7 +6,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { api, ApiError } from '@/lib/api'
-import { splitStem, type DetectionAnswerResult, type DetectionStart } from '@/types'
+import type { DetectionAnswerResult, DetectionStart } from '@/types'
+import AuthImage from '@/components/AuthImage'
 import MathText from '@/components/MathText'
 
 type Stage =
@@ -61,7 +62,6 @@ export default function DetectionPanel({ questionId }: { questionId: number }) {
   }
 
   const { detection } = stage
-  const stem = splitStem(detection.tested.content).stem
 
   return (
     <div className="space-y-3 rounded-lg border border-blue-100 bg-blue-50/50 p-3">
@@ -73,7 +73,19 @@ export default function DetectionPanel({ questionId }: { questionId: number }) {
           {detection.tested.difficulty}
         </Badge>
       </div>
-      <MathText text={stem} className="text-sm text-slate-800" />
+      {detection.tested.figure_tokens.map((token, index) => (
+        <div key={index} className="space-y-1">
+          <AuthImage
+            src={`/detection/${detection.log_id}/figures/${index}?token=${encodeURIComponent(token)}`}
+            alt={`检测题图 ${index + 1}`}
+            fallback={<p className="text-xs text-amber-700">图形暂不可用</p>}
+          />
+          {detection.tested.figure_specs[index]?.validation_status === 'fallback' && (
+            <p className="text-xs text-amber-700">图形为原图裁剪，请核对准确性</p>
+          )}
+        </div>
+      ))}
+      <MathText text={detection.tested.stem} className="text-sm text-slate-800" />
 
       {(stage.name === 'answering' || stage.name === 'submitting') && (
         <>

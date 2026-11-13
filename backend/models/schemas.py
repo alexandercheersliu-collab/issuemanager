@@ -195,6 +195,22 @@ class QuestionOut(BaseModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def stem(self) -> str:
+        """从原始 Markdown 内容派生题面。"""
+        from backend.services.question_content import split_stem_and_analysis
+
+        return split_stem_and_analysis(self.content_markdown)[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def analysis(self) -> str | None:
+        """从原始 Markdown 内容派生解析；旧题或无解析时为 None。"""
+        from backend.services.question_content import split_stem_and_analysis
+
+        return split_stem_and_analysis(self.content_markdown)[1]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def mastered(self) -> bool:
         """掌握归档：连续记牢 ≥3 次且调度间隔 ≥21 天的题移出每日复习池。"""
         return self.reps >= 3 and self.interval_days >= 21

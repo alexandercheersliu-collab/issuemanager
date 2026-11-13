@@ -364,3 +364,169 @@ def test_import_api_rejects_invalid_grade(client, headers, tmp_path):
         data={"grade": "13"},
     )
     assert resp.status_code == 422
+
+
+def _wait_api_document(client, headers, job_id: str) -> dict:
+    deadline = time.time() + 30
+    body = {}
+    while time.time() < deadline:
+        resp = client.get(f"/api/documents/{job_id}/segments", headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        if body["status"] in ("success", "failed"):
+            return body
+        time.sleep(0.1)
+    raise TimeoutError(f"任务 {job_id} 在 30s 内未完成")
+
+
+def test_import_api_default_context_is_applied_after_confirm(
+    client, headers, question_service, student_user, tmp_path
+):
+    """Mobile 显式选择默认上下文时，确认入库使用共享的数学/高中默认值的实际行为。"""
+    pdf = make_text_pdf(
+        tmp_path / "default-context.pdf",
+        ["1. 默认上下文题一：求 x。\n2. 默认上下文题二：求 y。"],
+    )
+    resp = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": ("default-context.pdf", pdf.read_bytes(), "application/pdf")},
+        data={"use_default_context": "true"},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+    assert _wait_api_document(client, headers, job_id)["status"] == "success"
+    confirm = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["imported"] == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("default-context.pdf#")
+    ]
+    assert len(docs) == 2
+    assert {(q.subject, q.grade, q.region, q.textbook_version) for q in docs} == {
+        ("math", 10, "上海", "沪教版")
+    }
+
+
+def test_import_api_without_default_context_flag_preserves_legacy_grade(
+    client, headers, question_service, student_user, tmp_path
+):
+    """既有调用方不传标志时，不能在确认入库时静默获得默认年级。"""
+    pdf = make_text_pdf(
+        tmp_path / "legacy-context.pdf",
+        ["1.  legacy 题一：求 x。\n2. legacy 题二：求 y。"],
+    )
+    resp = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": ("legacy-context.pdf", pdf.read_bytes(), "application/pdf")},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+    assert _wait_api_document(client, headers, job_id)["status"] == "success"
+    confirm = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
+    assert confirm.status_code == 200, confirm.text
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("legacy-context.pdf#")
+    ]
+    assert len(docs) == 2
+    assert [q.grade for q in docs] == [None, None]
+
+
+def test_same_bytes_legacy_then_default_context_confirm_separately(
+    client, headers, question_service, student_user, tmp_path
+):
+    """显式默认上下文不能复用同字节但无上下文的历史任务。"""
+    pdf = make_text_pdf(
+        tmp_path / "legacy-then-default.pdf",
+        ["1. 同字节上下文题一：求 x。\n2. 同字节上下文题二：求 y。"],
+    )
+    files = {
+        "document": ("legacy-then-default.pdf", pdf.read_bytes(), "application/pdf")
+    }
+    legacy = client.post("/api/documents/import", headers=headers, files=files)
+    assert legacy.status_code == 202, legacy.text
+    legacy_id = legacy.json()["job_id"]
+    assert _wait_api_document(client, headers, legacy_id)["status"] == "success"
+
+    defaulted = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files=files,
+        data={"use_default_context": "true"},
+    )
+    assert defaulted.status_code == 202, defaulted.text
+    assert defaulted.json()["duplicated"] is False
+    default_id = defaulted.json()["job_id"]
+    assert default_id != legacy_id
+    assert _wait_api_document(client, headers, default_id)["status"] == "success"
+
+    for job_id in (legacy_id, default_id):
+        confirmed = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()["imported"] == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("legacy-then-default.pdf#")
+    ]
+    assert len(docs) == 4
+    contexts = {(q.subject, q.grade, q.region, q.textbook_version) for q in docs}
+    assert contexts == {
+        ("math", None, None, None),
+        ("math", 10, "上海", "沪教版"),
+    }
+
+
+@pytest.mark.parametrize("suffix", ["pdf", "docx"])
+def test_import_api_accepts_direct_pdf_and_docx(client, headers, tmp_path, suffix):
+    """不必先转 PDF：PDF 与 DOCX 原文件都能直接创建并完成任务。"""
+    path = tmp_path / f"direct.{suffix}"
+    if suffix == "pdf":
+        make_text_pdf(path, ["1. 直接 PDF 题：求 x。\n2. 直接 PDF 题二：求 y。"])
+    else:
+        make_docx(path, ["1. 直接 DOCX 题：求 x。", "2. 直接 DOCX 题二：求 y。"], with_image=False)
+    mime = (
+        "application/pdf"
+        if suffix == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    resp = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": (path.name, path.read_bytes(), mime)},
+    )
+    assert resp.status_code == 202, resp.text
+    body = _wait_api_document(client, headers, resp.json()["job_id"])
+    assert body["status"] == "success", body["error"]
+    assert body["pages"] == 1
+    assert body["total"] == 2
+
+
+def test_import_api_invalid_and_empty_files_create_no_job(client, headers):
+    """格式校验或空文件失败时不能留下 pending 任务。"""
+    from backend.database import SessionLocal
+
+    with SessionLocal() as session:
+        before = session.query(Job).count()
+    invalid = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": ("invalid.txt", b"not a document", "text/plain")},
+    )
+    assert invalid.status_code == 415
+    empty = client.post(
+        "/api/documents/import",
+        headers=headers,
+        files={"document": ("empty.pdf", b"", "application/pdf")},
+    )
+    assert empty.status_code == 400
+    with SessionLocal() as session:
+        assert session.query(Job).count() == before

@@ -1,6 +1,7 @@
 """确认入库测试：segments 端点、confirm 落库（source/source_doc）、幂等。"""
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -198,6 +199,67 @@ def test_confirm_import_is_idempotent(question_service, student_user, tmp_path):
     assert second == {"imported": 2, "skipped": [], "already_confirmed": True}
     after = len(question_service.list_questions(student_user.id, semantic=False))
     assert after == before  # 重复确认不产生新题
+
+
+def test_concurrent_confirm_imports_each_segment_once(
+    question_service, student_user, tmp_path, monkeypatch
+):
+    service, job_id = _import_and_wait(
+        question_service, student_user, tmp_path, "concurrent-confirm.pdf"
+    )
+    from backend.services.question_service import QuestionService
+
+    start = threading.Barrier(3)
+    concurrent_imports = threading.Barrier(2)
+    created: list[str] = []
+    outcomes: list[dict] = []
+    errors: list[Exception] = []
+    original_create = QuestionService.create_manual_question
+
+    def gated_create(*args, **kwargs):
+        created.append(kwargs["content_markdown"])
+        try:
+            concurrent_imports.wait(timeout=2)
+        except threading.BrokenBarrierError:
+            pass
+        return original_create(*args, **kwargs)
+
+    def confirm():
+        start.wait()
+        try:
+            outcomes.append(service.confirm_import(job_id, student_user.id))
+        except Exception as exc:  # noqa: BLE001 - 在线程外断言两种调用结果
+            errors.append(exc)
+
+    monkeypatch.setattr(QuestionService, "create_manual_question", gated_create)
+    threads = [threading.Thread(target=confirm) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert len(outcomes) == 1
+    assert outcomes[0] == {"imported": 2, "skipped": [], "already_confirmed": False}
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "正在确认入库" in str(errors[0])
+    assert len(created) == 2
+    assert len(set(created)) == 2
+
+    docs = [
+        q
+        for q in question_service.list_questions(student_user.id, semantic=False)
+        if (q.source_doc or "").startswith("concurrent-confirm.pdf#")
+    ]
+    assert len(docs) == 2
+    final = service.confirm_import(job_id, student_user.id)
+    assert final == {
+        "imported": outcomes[0]["imported"],
+        "skipped": outcomes[0]["skipped"],
+        "already_confirmed": True,
+    }
 
 
 def test_confirm_import_rejects_missing_or_unfinished(student_user):

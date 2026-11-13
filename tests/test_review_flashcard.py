@@ -1,32 +1,24 @@
-"""闪卡题面/解析拆分纯函数测试：split_stem_and_analysis。"""
+"""共享题面/解析拆分纯函数测试：split_stem_and_analysis。"""
 from __future__ import annotations
 
-from frontend.pages.review import split_stem_and_analysis
+from backend.services.question_content import split_stem_and_analysis
 
 SEP = "\n\n---\n\n"
 
 
 def test_split_with_separator():
     """切题录入格式：题干 + 分隔线 + 解析 → 两段各归其位。"""
-    content = f"计算 $3.7 \\div 3$ 的余数。{SEP}**1. 梳理错误原因** ……"
-    stem, analysis = split_stem_and_analysis(content)
-    assert stem == "计算 $3.7 \\div 3$ 的余数。"
-    assert analysis == "**1. 梳理错误原因** ……"
+    stem, analysis = split_stem_and_analysis("题干\n\n---\n\n解析")
+    assert stem == "题干"
+    assert analysis == "解析"
 
 
 def test_split_document_import_headings():
     """整卷导入格式：逐题题干应在复习正面完整展示，解析留到翻卡后。"""
-    content = (
-        "### 题目\n"
-        "已知 $A=\\{x|x^2+px+1=0\\}$，求实数 $p$ 的取值范围。\n\n"
-        "### 解析\n"
-        "按方程根的分布分类讨论。"
-    )
+    stem, analysis = split_stem_and_analysis("### 题目\n题干\n\n### 解析\n解析")
 
-    stem, analysis = split_stem_and_analysis(content)
-
-    assert stem == "已知 $A=\\{x|x^2+px+1=0\\}$，求实数 $p$ 的取值范围。"
-    assert analysis == "按方程根的分布分类讨论。"
+    assert stem == "题干"
+    assert analysis == "解析"
 
 
 def test_split_without_separator():

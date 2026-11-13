@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 
 from PIL import Image
 
@@ -55,7 +56,7 @@ class _FakeEntryFigures:
 
 
 def test_single_question_entry_reuses_segmentation_and_saves_redraw(
-    question_service, student_user, tmp_path
+    monkeypatch, question_service, student_user, tmp_path
 ):
     class SingleGeometryProvider(MockProvider):
         def __init__(self):
@@ -72,26 +73,34 @@ def test_single_question_entry_reuses_segmentation_and_saves_redraw(
                 }
             ]
 
-    from frontend.pages.tutor import _plan_photo_entry
+    from backend.services.entry_types import PhotoImage
+    from backend.services.photo_entry import PhotoEntryService
 
     provider = SingleGeometryProvider()
     figures = _FakeEntryFigures(tmp_path)
     question_service.ai = provider
     question_service._geometry_figure_service = figures
+    service = PhotoEntryService()
+    monkeypatch.setattr(service, "_question_service", lambda: question_service)
     image = _tiny_jpeg(color=(1, 2, 3))
-    plan = _plan_photo_entry(provider, [("one.jpg", image, "image/jpeg")])
-    fallback = plan["fallbacks"][0]
-
-    entry = question_service.analyze_and_save_dedup(
-        student_user.id,
-        image,
-        segments=fallback["segments"],
+    job_id = service.create_job(
+        student_user.id, [PhotoImage("one.jpg", image, "image/jpeg")]
     )
 
-    assert entry.duplicated is False
-    assert entry.question.content_markdown.startswith("单题几何\n\n---\n\n")
-    assert entry.question.figure_paths == [str(tmp_path / "redraw-1.png")]
-    assert entry.question.figure_specs[0].tikz_source == "tikz"
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        job = service.get_job(job_id, student_user.id)
+        if job["phase"] == "done":
+            break
+        assert job["phase"] != "failed", job["error"]
+        time.sleep(0.02)
+    assert job["phase"] == "done"
+
+    entry = job["entries"][0]
+    assert entry["duplicated"] is False
+    assert entry["question"]["content_markdown"].startswith("单题几何\n\n---\n\n")
+    assert entry["question"]["figure_paths"] == [str(tmp_path / "redraw-1.png")]
+    assert entry["question"]["figure_specs"][0]["tikz_source"] == "tikz"
     assert provider.segment_calls == 1
     assert figures.calls == ["1"]
 

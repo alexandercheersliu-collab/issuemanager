@@ -23,6 +23,7 @@ from api.routers import (
     detection,
     documents,
     jobs,
+    photo_entry,
     questions,
     review,
     stats,
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
     app.include_router(agent.router, prefix=settings.api_prefix)
     app.include_router(jobs.router, prefix=settings.api_prefix)
     app.include_router(documents.router, prefix=settings.api_prefix)
+    app.include_router(photo_entry.router, prefix=settings.api_prefix)
     app.include_router(detection.router, prefix=settings.api_prefix)
     app.include_router(admin.router, prefix=settings.api_prefix)
 

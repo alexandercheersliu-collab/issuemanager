@@ -1,269 +1,191 @@
-"""拍照切题录入（从图中找题）测试：候选整形、回退判定、默认勾选、逐题入库。
-
-全部走 MockProvider / 测试替身，不调真实 API。
-界面层逻辑以纯函数（tutor.py 中无 Streamlit 依赖的部分）为目标。
-"""
+"""拍照录题页面委托共享任务服务的回归测试。"""
 from __future__ import annotations
 
 import io
-from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
+from streamlit.testing.v1 import AppTest
 
-from backend.services.ai.mock import MockProvider
-from backend.services.geometry_figures import FigureOutcome
-from frontend.pages.tutor import (
-    _plan_photo_entry,
-    _save_checked_candidates,
-    build_candidates,
-    default_checked,
-    should_use_segmentation,
-    summarize_stem,
-)
+from backend.services.ai.base import AnalysisContext
+from frontend.pages import tutor
 
 
-def _jpeg_bytes(color=(255, 255, 255)) -> bytes:
-    buf = io.BytesIO()
-    Image.new("RGB", (80, 80), color).save(buf, "JPEG")
-    return buf.getvalue()
+def _job(phase: str, **overrides) -> dict:
+    job = {
+        "job_id": "job-1",
+        "phase": phase,
+        "candidates": [],
+        "fallback_count": 0,
+        "total": 0,
+        "done": 0,
+        "entries": [],
+        "error": None,
+    }
+    job.update(overrides)
+    return job
 
 
-# ---------- 回退判定 ----------
+class _FakePhotoEntryService:
+    def __init__(self, job: dict | None = None):
+        self.job = job
+        self.create_calls = []
+        self.get_calls = []
+        self.confirm_calls = []
 
-def test_should_use_segmentation_requires_two_or_more():
-    assert should_use_segmentation([{"number": "1"}, {"number": "2"}]) is True
-    assert should_use_segmentation([{"number": "1"}]) is False
-    assert should_use_segmentation([]) is False
-    assert should_use_segmentation(None) is False
+    def create_job(self, user_id, images, *, tags=None, hint="", context=None):
+        self.create_calls.append((user_id, images, tags, hint, context))
+        self.job = _job("review")
+        return self.job["job_id"]
+
+    def get_job(self, job_id, user_id):
+        self.get_calls.append((job_id, user_id))
+        return self.job
+
+    def confirm(self, job_id, user_id, candidate_ids):
+        self.confirm_calls.append((job_id, user_id, candidate_ids))
+        self.job = _job("done")
 
 
-# ---------- 候选整形与默认勾选 ----------
+class _FakeAI:
+    def provider_info(self):
+        return SimpleNamespace(demo_mode=False)
 
-def test_build_candidates_labels_source_image_and_defaults():
-    segments = [
+
+class _FakeQuestionService:
+    ai = _FakeAI()
+
+
+class _Upload:
+    name = "paper.jpg"
+    type = "image/jpeg"
+
+    def getvalue(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), "white").save(buffer, format="JPEG")
+        return buffer.getvalue()
+
+
+def _patch_page(monkeypatch, photo_service, uploads=None):
+    monkeypatch.setattr(tutor, "PhotoEntryService", lambda: photo_service, raising=False)
+    monkeypatch.setattr(tutor, "get_question_service", lambda: _FakeQuestionService())
+    monkeypatch.setattr(
+        tutor.st, "file_uploader", lambda *args, **kwargs: list(uploads or [])
+    )
+
+
+def _app() -> AppTest:
+    return AppTest.from_string(
+        "from frontend.pages import tutor\n"
+        "tutor.render_tutor_page({'id': 7})\n",
+        default_timeout=15,
+    )
+
+
+def test_start_analysis_creates_shared_photo_job(monkeypatch):
+    service = _FakePhotoEntryService()
+    upload = _Upload()
+    _patch_page(monkeypatch, service, [upload])
+    at = _app().run()
+    at.text_input(key="photo_tags").set_value("期末, 几何")
+    at.text_input[1].set_value("第二问不会")
+
+    at.button[0].click().run()
+
+    assert not at.exception
+    assert len(service.create_calls) == 1
+    user_id, images, tags, hint, context = service.create_calls[0]
+    assert user_id == 7
+    assert [(image.name, image.data, image.mime_type) for image in images] == [
+        ("paper.jpg", upload.getvalue(), "image/jpeg")
+    ]
+    assert tags == ["期末", "几何"]
+    assert hint == "第二问不会"
+    assert context == AnalysisContext(
+        subject="math", grade=10, region="上海", textbook_version="沪教版"
+    )
+    assert at.session_state["photo_job_id"] == "job-1"
+
+
+def test_active_photo_job_is_polled_until_candidate_review(monkeypatch):
+    service = _FakePhotoEntryService(_job("planning"))
+    _patch_page(monkeypatch, service)
+    monkeypatch.setattr(tutor, "time", SimpleNamespace(sleep=lambda _: None), raising=False)
+    monkeypatch.setattr(tutor.st, "rerun", lambda: None)
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
+
+    at.run()
+    assert service.get_calls == [("job-1", 7)]
+    service.job = _job(
+        "review",
+        candidates=[
+            {
+                "id": "0:0",
+                "image": "paper.jpg",
+                "number": "1",
+                "text": "题干",
+                "summary": "题干",
+                "likely_wrong": True,
+                "figure_bboxes": [],
+            }
+        ],
+    )
+    at.run()
+
+    assert not at.exception
+    assert service.get_calls == [("job-1", 7), ("job-1", 7)]
+    assert any("从图中识别出 1 道题" in item.value for item in at.success)
+    assert at.checkbox[0].value is True
+
+
+def test_candidate_confirmation_delegates_stable_ids(monkeypatch):
+    candidates = [
         {
-            "number": "3",
-            "text": "  已知   x^2=9，求 x。 ",
+            "id": "0:0",
+            "image": "paper.jpg",
+            "number": "1",
+            "text": "第一题",
+            "summary": "第一题",
             "likely_wrong": True,
-            "figure_bboxes": [[10, 20, 30, 40]],
+            "figure_bboxes": [],
         },
-        {"number": "4", "text": "计算 1+1。"},  # 无 likely_wrong 字段
+        {
+            "id": "0:1",
+            "image": "paper.jpg",
+            "number": "2",
+            "text": "第二题",
+            "summary": "第二题",
+            "likely_wrong": False,
+            "figure_bboxes": [],
+        },
     ]
-    candidates = build_candidates("homework.jpg", segments)
-
-    assert [c["image"] for c in candidates] == ["homework.jpg", "homework.jpg"]
-    assert candidates[0]["number"] == "3"
-    assert candidates[0]["text"] == "已知   x^2=9，求 x。"  # 仅去首尾空白，内部保留
-    assert candidates[0]["summary"] == "已知 x^2=9，求 x。"  # 摘要压缩空白
-    assert candidates[0]["likely_wrong"] is True
-    assert candidates[0]["figure_bboxes"] == [[10, 20, 30, 40]]
-    assert candidates[1]["figure_bboxes"] == []
-    assert candidates[1]["likely_wrong"] is False  # 缺省 False
-    assert default_checked(candidates[0]) is True
-    assert default_checked(candidates[1]) is False
-
-
-def test_summarize_stem_collapses_whitespace_and_truncates():
-    assert summarize_stem("  已知\n x^2=9 ") == "已知 x^2=9"
-    long_text = "题" * 100
-    summary = summarize_stem(long_text, limit=50)
-    assert len(summary) == 51 and summary.endswith("…")
-
-
-# ---------- 切题计划（多图合并 + 回退） ----------
-
-class _SingleQuestionProvider(MockProvider):
-    def segment_page(self, image_bytes, mime_type="image/png"):
-        return [{"number": "1", "text": "唯一一道题", "likely_wrong": False}]
-
-
-class _BrokenProvider(MockProvider):
-    def segment_page(self, image_bytes, mime_type="image/png"):
-        raise RuntimeError("model down")
-
-
-def test_plan_multi_question_image_yields_candidates():
-    plan = _plan_photo_entry(MockProvider(), [("a.jpg", b"img-a", "image/jpeg")])
-    assert len(plan["candidates"]) == 2
-    assert plan["fallbacks"] == []
-    assert all(c["image"] == "a.jpg" for c in plan["candidates"])
-    assert all(c["image_bytes"] == b"img-a" for c in plan["candidates"])
-    # MockProvider 演示数据：第 1 题疑似做错
-    assert [c["likely_wrong"] for c in plan["candidates"]] == [True, False]
-
-
-def test_plan_single_question_image_falls_back():
-    plan = _plan_photo_entry(
-        _SingleQuestionProvider(), [("one.jpg", b"img-1", "image/jpeg")]
+    service = _FakePhotoEntryService(
+        _job("review", candidates=candidates, fallback_count=1)
     )
-    assert plan["candidates"] == []
-    assert [f["name"] for f in plan["fallbacks"]] == ["one.jpg"]
-    assert plan["fallbacks"][0]["segments"] == [
-        {"number": "1", "text": "唯一一道题", "likely_wrong": False}
-    ]
+    _patch_page(monkeypatch, service)
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert [checkbox.value for checkbox in at.checkbox] == [True, False]
+    confirm = [button for button in at.button if button.label.startswith("确认录入")]
+    assert len(confirm) == 1
+    confirm[0].click().run()
+
+    assert not at.exception
+    assert service.confirm_calls == [("job-1", 7, ["0:0"])]
 
 
-def test_plan_segment_exception_falls_back():
-    plan = _plan_photo_entry(_BrokenProvider(), [("bad.jpg", b"img-b", "image/jpeg")])
-    assert plan["candidates"] == []
-    assert [f["name"] for f in plan["fallbacks"]] == ["bad.jpg"]
-    assert plan["fallbacks"][0]["segments"] == []
+def test_photo_job_failure_is_recoverable(monkeypatch):
+    service = _FakePhotoEntryService(_job("failed", error="model down"))
+    _patch_page(monkeypatch, service, [_Upload()])
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
 
+    at.run()
 
-def test_plan_merges_candidates_across_images():
-    plan = _plan_photo_entry(
-        MockProvider(),
-        [("p1.jpg", b"img-1", "image/jpeg"), ("p2.jpg", b"img-2", "image/jpeg")],
-    )
-    assert len(plan["candidates"]) == 4
-    assert [c["image"] for c in plan["candidates"]] == ["p1.jpg", "p1.jpg", "p2.jpg", "p2.jpg"]
-
-
-# ---------- 逐题解构入库（MockProvider + 真实落库） ----------
-
-def test_checked_candidates_saved_per_question(question_service, student_user, tmp_path):
-    """多题图片 → 切题 → 全选 → 逐题入库：题目数、来源、原图路径正确。"""
-    image_bytes = _jpeg_bytes()
-    plan = _plan_photo_entry(
-        question_service.ai, [("paper.jpg", image_bytes, "image/jpeg")]
-    )
-    assert len(plan["candidates"]) == 2
-
-    context = {"subject": "math", "grade": 9, "region": None, "textbook_version": None}
-    results = _save_checked_candidates(
-        question_service, student_user.id, plan["candidates"], ["期末"], "hint", context
-    )
-
-    assert [err for _, _, err in results] == [None, None]
-    entries = [r for _, r, _ in results]
-    questions = [e.question for e in entries]
-
-    # 逐题入库：2 道题、来源 ai、共享同一份落盘原图
-    assert len({q.id for q in questions}) == 2
-    assert all(q.source == "ai" for q in questions)
-    image_paths = {q.image_path for q in questions}
-    assert len(image_paths) == 1
-    saved_path = image_paths.pop()
-    assert saved_path and Path(saved_path).is_file()
-
-    # 题干原文进 content（可回溯原题），K12 元数据随题落库
-    assert "【演示切题】" in questions[0].content_markdown
-    assert all(q.grade == 9 for q in questions)
-    assert all("期末" in q.tags for q in questions)
-
-
-def test_checked_candidates_redraw_only_questions_with_figures(
-    question_service, student_user, tmp_path
-):
-    class GeometryProvider(MockProvider):
-        def segment_page(self, image_bytes, mime_type="image/png"):
-            return [
-                {
-                    "number": "1",
-                    "text": "带图几何题",
-                    "likely_wrong": True,
-                    "figure_bboxes": [[10, 20, 200, 180]],
-                },
-                {
-                    "number": "2",
-                    "text": "无图计算题",
-                    "likely_wrong": False,
-                    "figure_bboxes": [],
-                },
-            ]
-
-    class FakeFigures:
-        def __init__(self):
-            self.calls = []
-
-        def redraw_segment(self, **kwargs):
-            self.calls.append(kwargs["number"])
-            path = tmp_path / f"redraw-{kwargs['number']}.png"
-            Image.new("RGB", (20, 20), "white").save(path)
-            return FigureOutcome(
-                figure_paths=[str(path)],
-                figure_specs=[
-                    {
-                        "kind": "geometry",
-                        "semantic_spec": {"points": ["A", "B"]},
-                        "tikz_source": "tikz",
-                        "render_path": str(path),
-                        "crop_path": None,
-                        "validation_status": "ai_passed",
-                        "validation_issues": [],
-                        "assumptions": [],
-                    }
-                ],
-                needs_review=False,
-            )
-
-    provider = GeometryProvider()
-    figures = FakeFigures()
-    question_service.ai = provider
-    question_service._geometry_figure_service = figures
-    plan = _plan_photo_entry(provider, [("paper.jpg", _jpeg_bytes(), "image/jpeg")])
-    context = {"subject": "math", "grade": 9, "region": None, "textbook_version": None}
-
-    results = _save_checked_candidates(
-        question_service, student_user.id, plan["candidates"], [], "", context
-    )
-
-    assert [error for _, _, error in results] == [None, None]
-    questions = [entry.question for _, entry, _ in results]
-    assert questions[0].figure_paths == [str(tmp_path / "redraw-1.png")]
-    assert questions[0].figure_specs[0].tikz_source == "tikz"
-    assert questions[1].figure_paths == []
-    assert questions[1].figure_specs == []
-    assert figures.calls == ["1"]
-
-
-def test_partial_selection_saves_only_checked(question_service, student_user):
-    plan = _plan_photo_entry(question_service.ai, [("p.jpg", _jpeg_bytes(), "image/jpeg")])
-    checked = [c for c in plan["candidates"] if default_checked(c)]
-    assert len(checked) == 1  # 仅疑似做错的第 1 题
-
-    context = {"subject": "math", "grade": None, "region": None, "textbook_version": None}
-    results = _save_checked_candidates(
-        question_service, student_user.id, checked, [], "", context
-    )
-    assert len(results) == 1 and results[0][2] is None
-    assert "第 1 题" in results[0][0]
-
-
-def test_analyze_text_and_save_rejects_empty_text(question_service, student_user):
-    import pytest
-
-    with pytest.raises(ValueError):
-        question_service.analyze_text_and_save(student_user.id, "   ")
-
-
-def test_on_progress_fires_before_each_candidate_saved(question_service, student_user):
-    """进度回调在每题开始解构前触发（而非完成后）：回调发生时该题尚未入库。
-
-    录题等待体验依赖此语义——单题 AI 解构要 20–60 秒，回调若在最后才触发，
-    用户全程看不到任何进行中反馈（真实 bug：进度条定格在「准备解析…」像卡死）。
-    """
-    plan = _plan_photo_entry(
-        question_service.ai, [("p.jpg", _jpeg_bytes(), "image/jpeg")]
-    )
-    context = {"subject": "math", "grade": None, "region": None, "textbook_version": None}
-    baseline = len(question_service.list_questions(student_user.id))
-    seen: list[tuple[str, int]] = []
-
-    _save_checked_candidates(
-        question_service,
-        student_user.id,
-        plan["candidates"],
-        [],
-        "",
-        context,
-        on_progress=lambda name: seen.append(
-            (name, len(question_service.list_questions(student_user.id)))
-        ),
-    )
-
-    assert [name for name, _ in seen] == [
-        f"p.jpg · 第 {c['number']} 题" for c in plan["candidates"]
-    ]
-    # 第 1 题回调时该题尚未入库、第 2 题回调时仅第 1 题已入库 → 回调在开始解构前
-    assert [count for _, count in seen] == [baseline, baseline + 1]
+    assert not at.exception
+    assert any("model down" in item.value for item in at.error)
+    start = next(button for button in at.button if button.label == "开始 AI 解析")
+    assert start.disabled is False

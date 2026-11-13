@@ -7,6 +7,7 @@ import type {
   DetectionAnswerResult,
   DetectionStart,
   DocumentImport,
+  PhotoJob,
   Question,
   SegmentsResult,
   User,
@@ -108,6 +109,26 @@ export const api = {
     return request<AnalyzeResult>('/questions/analyze', { method: 'POST', body: form })
   },
 
+  createPhotoJob: (files: File[], extra: { tags?: string; hint?: string }) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('images', file))
+    form.append('tags', extra.tags ?? '')
+    form.append('hint', extra.hint ?? '')
+    return request<{ job_id: string; status: string }>('/photo-entry/jobs', {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  getPhotoJob: (jobId: string) => request<PhotoJob>(`/photo-entry/jobs/${jobId}`),
+
+  confirmPhotoJob: (jobId: string, candidateIds: string[]) =>
+    request<PhotoJob>(`/photo-entry/jobs/${jobId}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candidate_ids: candidateIds }),
+    }),
+
   dashboard: () => request<DashboardStats>('/stats/dashboard'),
 
   // ---------- 同类题检测（发起 → 作答判分，含降级/回升联动） ----------
@@ -122,11 +143,12 @@ export const api = {
       body: JSON.stringify({ answer }),
     }),
 
-  // ---------- 整卷导入（拍照合成 PDF → 异步切题解构 → 确认入库） ----------
+  // ---------- 整卷导入（PDF/DOCX/逐页图片 → 异步切题解构 → 确认入库） ----------
 
-  importDocument: (pdf: File) => {
+  importDocument: (files: File[], useDefaultContext = true) => {
     const form = new FormData()
-    form.append('document', pdf)
+    files.forEach((file) => form.append('document', file))
+    form.append('use_default_context', String(useDefaultContext))
     return request<DocumentImport>('/documents/import', { method: 'POST', body: form })
   },
 
@@ -139,15 +161,29 @@ export const api = {
   deleteSegment: (jobId: string, index: number) =>
     request<{ deleted: number }>(`/documents/${jobId}/segments/${index}`, { method: 'DELETE' }),
 
-  /** 错题原图：带 JWT 拉 blob 转 objectURL（<img> 无法带 Authorization 头）。 */
-  async imageUrl(questionId: number): Promise<string | null> {
+  reanalyzeSegment: (jobId: string, index: number) =>
+    request<{ segment: SegmentsResult['segments'][number] }>(
+      `/documents/${jobId}/segments/${index}/reanalyze`,
+      { method: 'POST' },
+    ),
+
+  /** 鉴权图片：带 JWT 拉 blob 转 objectURL（<img> 无法带 Authorization 头）。 */
+  async assetUrl(src: string): Promise<string | null> {
     const token = getToken()
     if (!token) return null
-    const resp = await fetch(`${BASE}/questions/${questionId}/image`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (!resp.ok) return null
-    return URL.createObjectURL(await resp.blob())
+    try {
+      const resp = await fetch(`${BASE}${src}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!resp.ok) return null
+      return URL.createObjectURL(await resp.blob())
+    } catch {
+      return null
+    }
+  },
+
+  imageUrl(questionId: number): Promise<string | null> {
+    return this.assetUrl(`/questions/${questionId}/image`)
   },
 
   /** AI 助手：POST /agent/chat/stream 的 SSE 流，逐 delta 回调，[DONE] 结束。 */
