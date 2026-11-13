@@ -1,12 +1,19 @@
 """AI 录题页：上传错题图片 → 结构化解析 → 自动入库与向量索引 → 举一反三。"""
 from __future__ import annotations
 
+import time
+
 import streamlit as st
 
-from backend.models.schemas import ERROR_CATEGORIES, SUBJECT_NAMES
-from backend.services.entry_types import EntryResult
+from backend.models.schemas import (
+    ERROR_CATEGORIES,
+    SUBJECT_NAMES,
+    QuestionAnalysis,
+    QuestionOut,
+)
+from backend.services.ai.base import AnalysisContext
+from backend.services.photo_entry import PhotoEntryService, PhotoImage
 from backend.services.question_service import sanitize_tags
-from backend.utils.logging import get_logger
 from frontend.common import (
     followup_chat,
     get_question_service,
@@ -16,8 +23,6 @@ from frontend.common import (
     safe_truncate_math,
 )
 from frontend.components import render_figures, save_followup_button
-
-logger = get_logger("tutor")
 
 _GRADE_OPTIONS = ["不限"] + [f"{g} 年级" for g in range(1, 13)]
 
@@ -74,6 +79,7 @@ def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
 
 def render_tutor_page(user: dict) -> None:
     service = get_question_service()
+    photo_service = PhotoEntryService()
     page_header("AI 录题", "上传错题照片，自动完成考点分析、详解与归档")
 
     info = service.ai.provider_info()
@@ -88,6 +94,8 @@ def render_tutor_page(user: dict) -> None:
                 "📸 点击或拖拽上传错题图片（支持多选）",
                 type=["jpg", "jpeg", "png", "webp"],
                 accept_multiple_files=True,
+                key="photo_uploads",
+                on_change=lambda: st.session_state.pop("photo_job_id", None),
             )
             if uploads:
                 preview_cols = st.columns(min(len(uploads), 4))
@@ -108,54 +116,63 @@ def render_tutor_page(user: dict) -> None:
             with st.expander("🎓 学科 / 年级 / 教材等补充信息（可选）", expanded=False):
                 context = _k12_context_inputs("photo")
 
-            # 切题计划跨 rerun 存于 session_state；上传集合变化即作废
-            plan = st.session_state.get("photo_plan")
-            current_names = [u.name for u in uploads] if uploads else []
-            if plan is not None and plan.get("upload_names") != current_names:
-                plan = None
-                st.session_state.pop("photo_plan", None)
+            job_id = st.session_state.get("photo_job_id")
+            job = photo_service.get_job(job_id, user["id"]) if job_id else None
+            if job_id and job is None:
+                st.error("拍照录入任务不存在（可能已被清理）")
+                st.session_state.pop("photo_job_id", None)
 
-            # 从找题到解构入库完成前都禁用，已有计划表示录入流程尚未结束。
             seg_busy = st.session_state.get("photo_seg_busy", False)
+            job_busy = job is not None and job["phase"] in {"planning", "review", "importing"}
             if uploads and st.button(
                 "开始 AI 解析",
                 type="primary",
                 width="stretch",
-                disabled=seg_busy or plan is not None,
+                disabled=seg_busy or job_busy,
             ):
-                st.session_state.pop("photo_entry_results", None)
                 st.session_state["photo_seg_busy"] = True
-                st.rerun()
-            if seg_busy:
                 try:
-                    with st.spinner("正在从图中找题…"):
-                        plan = _plan_photo_entry(
-                            service.ai,
-                            [(u.name, u.getvalue(), u.type or "image/jpeg") for u in uploads],
-                        )
-                        plan["upload_names"] = current_names
-                    st.session_state["photo_plan"] = plan
-                    st.session_state["photo_seg_busy"] = False
-                    st.rerun()
-                except Exception as exc:  # noqa: BLE001 - 找题失败恢复可点击态
-                    st.session_state["photo_seg_busy"] = False
+                    new_job_id = photo_service.create_job(
+                        user["id"],
+                        [
+                            PhotoImage(u.name, u.getvalue(), u.type or "image/jpeg")
+                            for u in uploads
+                        ],
+                        tags=sanitize_tags(tags_input),
+                        hint=hint,
+                        context=AnalysisContext(**context),
+                    )
+                except Exception as exc:  # noqa: BLE001 - 创建失败恢复可点击态
                     st.error(f"从图中找题失败：{exc}")
-
-            if plan is not None:
-                if not plan["candidates"]:
-                    # 单题也沿用计划中的图形坐标，避免重复切题并进入 TikZ 重绘
-                    _process_plan(
-                        service, user, plan, [], sanitize_tags(tags_input), hint, context
-                    )
-                    st.session_state.pop("photo_plan", None)
                 else:
-                    _render_candidate_review(
-                        service, user, plan, tags_input, hint, context
-                    )
+                    st.session_state["photo_job_id"] = new_job_id
+                    st.rerun()
+                finally:
+                    st.session_state["photo_seg_busy"] = False
 
-            entries = st.session_state.get("photo_entry_results", [])
-            if entries:
-                _render_entry_results(service, user, entries, unit="项")
+            if job is not None:
+                phase = job["phase"]
+                if phase == "planning":
+                    with st.spinner("正在从图中找题…"):
+                        time.sleep(0.5)
+                    st.rerun()
+                elif phase == "review":
+                    _render_candidate_review(photo_service, user, job)
+                elif phase == "importing":
+                    total = job["total"]
+                    done = job["done"]
+                    with st.status(f"正在录入 {total} 道题…", expanded=True) as status:
+                        status.update(label=f"正在录入…（已完成 {done}/{total} 题）")
+                        if total:
+                            st.progress(done / total)
+                    time.sleep(0.5)
+                    st.rerun()
+                elif phase == "failed":
+                    st.error(f"拍照录入失败：{job.get('error') or '未知错误'}")
+                elif phase == "done" and job["entries"]:
+                    _render_entry_results(
+                        service, user, _photo_job_entries(job["entries"]), unit="项"
+                    )
 
     with tab_manual:
         _render_manual_entry(service, user)
@@ -250,113 +267,21 @@ def _collect_entries(results: list) -> list[dict]:
     return entries
 
 
-# ---------- 拍照切题（从图中找题）----------
-# 以下函数均不依赖 Streamlit，可单测：切题判定 / 候选整形 / 默认勾选 / 批量入库。
+def _photo_job_entries(entries: list[dict]) -> list[dict]:
+    hydrated = []
+    for entry in entries:
+        item = dict(entry)
+        if item.get("question") is not None:
+            item["question"] = QuestionOut.model_validate(item["question"])
+        if item.get("analysis") is not None:
+            item["analysis"] = QuestionAnalysis.model_validate(item["analysis"])
+        hydrated.append(item)
+    return hydrated
 
 
-def should_use_segmentation(segments) -> bool:
-    """切出 ≥2 道题才走逐题勾选；单题、空结果或异常（None）回退整图解析。"""
-    return isinstance(segments, list) and len(segments) >= 2
-
-
-def summarize_stem(text: str, limit: int = 50) -> str:
-    """题干摘要：压缩空白后截断，供候选清单展示。"""
-    clean = " ".join((text or "").split())
-    return clean if len(clean) <= limit else clean[:limit] + "…"
-
-
-def build_candidates(image_name: str, segments: list[dict]) -> list[dict]:
-    """把一张图的切题结果整形成候选清单条目（标注来源图片）。"""
-    return [
-        {
-            "image": image_name,
-            "number": str(s.get("number", "")).strip() or "?",
-            "text": str(s.get("text", "") or "").strip(),
-            "summary": summarize_stem(str(s.get("text", "") or "")),
-            "likely_wrong": bool(s.get("likely_wrong", False)),
-            "figure_bboxes": list(s.get("figure_bboxes") or []),
-        }
-        for s in segments
-    ]
-
-
-def default_checked(candidate: dict) -> bool:
-    """勾选框默认值：疑似做错的题（likely_wrong）默认勾选。"""
-    return bool(candidate.get("likely_wrong", False))
-
-
-def _plan_photo_entry(ai, images: list[tuple[str, bytes, str]]) -> dict:
-    """逐张切题并合并候选清单；单题/空结果/切题异常的图进 fallbacks 走整图解析。
-
-    images: [(文件名, 字节, MIME), ...]。返回 {"candidates": [...], "fallbacks": [...]}。
-    """
-    candidates: list[dict] = []
-    fallbacks: list[dict] = []
-    for name, data, mime in images:
-        try:
-            segments = ai.segment_page(data, mime)
-        except Exception as exc:  # noqa: BLE001 - 切题失败回退整图解析
-            logger.info("切题失败，回退整图解析 image=%s: %s", name, exc)
-            segments = None
-        if should_use_segmentation(segments):
-            for cand in build_candidates(name, segments):
-                candidates.append({**cand, "image_bytes": data})
-        else:
-            fallbacks.append(
-                {"name": name, "bytes": data, "mime": mime, "segments": segments or []}
-            )
-    return {"candidates": candidates, "fallbacks": fallbacks}
-
-
-def _save_checked_candidates(
-    service,
-    user_id: int,
-    candidates: list[dict],
-    tags: list[str],
-    hint: str,
-    context: dict,
-    on_progress=None,
-) -> list:
-    """勾选题逐题解构入库（同一图片的多题共享同一份落盘原图）。
-
-    on_progress 在每题开始解构前触发（单题 AI 调用要 20–60 秒，事后触发
-    用户全程看不到进行中反馈）。返回 _collect_entries 兼容的
-    (名称, EntryResult|None, 错误) 三元组列表。
-    """
-    results = []
-    path_cache: dict[str, str] = {}
-    for cand in candidates:
-        name = f"{cand['image']} · 第 {cand['number']} 题"
-        if on_progress is not None:
-            on_progress(name)
-        try:
-            if cand["image"] not in path_cache:
-                path_cache[cand["image"]] = str(
-                    service._persist_image(user_id, cand["image_bytes"])
-                )
-            out, analysis = service.analyze_text_and_save(
-                user_id,
-                cand["text"],
-                user_tags=tags,
-                hint=hint,
-                image_path=path_cache[cand["image"]],
-                segment=cand,
-                subject=context["subject"],
-                grade=context["grade"],
-                region=context["region"],
-                textbook_version=context["textbook_version"],
-            )
-            results.append(
-                (name, EntryResult(question=out, analysis=analysis, duplicated=False), None)
-            )
-        except Exception as exc:  # noqa: BLE001 - 单题失败不影响其余
-            results.append((name, None, str(exc)))
-    return results
-
-
-def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: str, context: dict) -> None:
+def _render_candidate_review(service, user, job: dict) -> None:
     """候选清单勾选界面：疑似做错的题默认勾选，确认后批量解构入库。"""
-    candidates = plan["candidates"]
+    candidates = job["candidates"]
     wrong_count = sum(1 for c in candidates if c["likely_wrong"])
     st.success(
         f"从图中识别出 {len(candidates)} 道题"
@@ -368,14 +293,13 @@ def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: s
         mark = " 🟥疑似做错" if cand["likely_wrong"] else ""
         label = f"[{cand['image']}] 第 {cand['number']} 题：{cand['summary']}{mark}"
         with st.container(border=True):
-            if st.checkbox(label, value=default_checked(cand), key=f"photo_seg_{i}"):
+            if st.checkbox(
+                label, value=bool(cand.get("likely_wrong", False)), key=f"photo_seg_{i}"
+            ):
                 checked.append(cand)
-    if plan["fallbacks"]:
-        names = "、".join(f["name"] for f in plan["fallbacks"])
-        st.caption(f"以下图片未切出多题，将按整图单题解析：{names}")
+    if job["fallback_count"]:
+        st.caption(f"另有 {job['fallback_count']} 张图片未切出多题，将按整图单题解析。")
 
-    # 批量解构可能长达数分钟，确认期间禁用按钮防重复提交：
-    # 点击后先置忙并重渲染（按钮变灰），下一轮再执行入库
     confirm_busy = st.session_state.get("photo_confirm_busy", False)
     if st.button(
         f"确认录入（{len(checked)} 题）",
@@ -383,70 +307,18 @@ def _render_candidate_review(service, user, plan: dict, tags_input: str, hint: s
         width="stretch",
         disabled=confirm_busy,
     ):
-        if not checked and not plan["fallbacks"]:
+        if not checked and not job["fallback_count"]:
             st.warning("请至少勾选一道题。")
             return
         st.session_state["photo_confirm_busy"] = True
-        st.rerun()
-    if confirm_busy:
         try:
-            _process_plan(service, user, plan, checked, sanitize_tags(tags_input), hint, context)
+            service.confirm(job["job_id"], user["id"], [cand["id"] for cand in checked])
+        except Exception as exc:  # noqa: BLE001 - 确认失败保留候选供重试
+            st.error(f"确认录入失败：{exc}")
+        else:
+            st.rerun()
         finally:
             st.session_state["photo_confirm_busy"] = False
-            st.session_state.pop("photo_plan", None)
-
-
-def _process_plan(service, user, plan: dict, checked: list[dict], tags: list[str], hint: str, context: dict) -> None:
-    """批量入库：勾选题逐题解构 + 回退图整图解析，保存结果供后续刷新渲染。
-
-    进度用 st.status 分步展示（与同类题检测同一模式）：单题 AI 调用要
-    20–60 秒，静态进度条在等待期间纹丝不动，用户会以为页面卡死。
-    """
-    total = len(checked) + len(plan["fallbacks"])
-    state = {"started": 0}
-
-    with st.status(f"正在录入 {total} 道题…", expanded=True) as status:
-
-        def _announce(msg: str) -> None:
-            state["started"] += 1
-            status.update(
-                label=f"正在录入…（第 {state['started']}/{total} 题，单题约需 20–60 秒）"
-            )
-            st.write(msg)
-
-        results = _save_checked_candidates(
-            service, user["id"], checked, tags, hint, context,
-            on_progress=lambda name: _announce(f"🔍 正在解构 {name}…"),
-        )
-        for fb in plan["fallbacks"]:
-            _announce(f"🔍 正在解析 {fb['name']}（整图）…")
-            try:
-                entry = service.analyze_and_save_dedup(
-                    user["id"],
-                    fb["bytes"],
-                    mime_type=fb["mime"],
-                    user_tags=tags,
-                    hint=hint,
-                    segments=fb["segments"],
-                    subject=context["subject"],
-                    grade=context["grade"],
-                    region=context["region"],
-                    textbook_version=context["textbook_version"],
-                )
-                results.append((fb["name"], entry, None))
-            except Exception as exc:  # noqa: BLE001 - 单张失败不影响其余
-                results.append((fb["name"], None, str(exc)))
-                st.write(f"❌ {fb['name']} 解析失败：{exc}")
-        failures = sum(1 for _, _, err in results if err is not None)
-        if failures:
-            status.update(
-                label=f"⚠️ 录入完成，{failures}/{total} 项失败（详见下方）",
-                state="error",
-                expanded=False,
-            )
-        else:
-            status.update(label=f"✅ {total} 道题全部录入完成", state="complete", expanded=False)
-    st.session_state["photo_entry_results"] = _collect_entries(results)
 
 
 def _process_uploads(service, user, uploads, tags: list[str], hint: str, context: dict) -> None:

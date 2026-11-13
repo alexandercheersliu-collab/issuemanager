@@ -11,6 +11,7 @@ from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
 from backend.services.document import IMAGE_SUFFIXES
 from backend.services.document_service import DocumentService
+from backend.services.entry_types import DEFAULT_IMPORT_CONTEXT
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -32,6 +33,7 @@ async def import_document(
     grade: int | None = Form(default=None),
     region: str = Form(default=""),
     textbook_version: str = Form(default=""),
+    use_default_context: bool = Form(default=False),
     user: User = Depends(get_current_user),
 ) -> dict:
     """上传整卷文档，创建异步导入任务；重复上传返回既有任务。
@@ -53,6 +55,11 @@ async def import_document(
             status.HTTP_400_BAD_REQUEST,
             "多文件上传仅支持图片格式（jpg/jpeg/png/webp，每张 = 试卷一页）",
         )
+    if use_default_context:
+        subject = subject or DEFAULT_IMPORT_CONTEXT.subject
+        grade = grade if grade is not None else DEFAULT_IMPORT_CONTEXT.grade
+        region = region or DEFAULT_IMPORT_CONTEXT.region
+        textbook_version = textbook_version or DEFAULT_IMPORT_CONTEXT.textbook_version
 
     (first_data, first_name) = files[0]
     try:
@@ -65,10 +72,51 @@ async def import_document(
             grade=grade,
             region=region or None,
             textbook_version=textbook_version or None,
+            match_context=use_default_context,
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from exc
     return {"job_id": job_id, "duplicated": duplicated, "status": "pending"}
+
+
+def _document_file(path: str | None):
+    from fastapi.responses import FileResponse
+
+    if not path or not Path(path).is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "资源不存在")
+    return FileResponse(path)
+
+
+@router.get("/{job_id}/segments/{index}/figures/{figure_index}")
+def get_segment_figure(
+    job_id: str,
+    index: int,
+    figure_index: int,
+    user: User = Depends(get_current_user),
+):
+    """读取当前用户导入任务中一道题的有效图，下标从 0 开始。"""
+    job = _service().get_job(job_id, user.id)
+    if job is None or index < 0 or figure_index < 0:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    segments = (job.get("result") or {}).get("segments") or []
+    if index >= len(segments):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    paths = segments[index].get("figure_paths") or []
+    if figure_index >= len(paths):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    return _document_file(paths[figure_index])
+
+
+@router.get("/{job_id}/pages/{page}")
+def get_document_page(job_id: str, page: int, user: User = Depends(get_current_user)):
+    """读取当前用户导入任务的页图，页码从 1 开始。"""
+    job = _service().get_job(job_id, user.id)
+    if job is None or page < 1:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "页面不存在")
+    paths = (job.get("result") or {}).get("page_images") or []
+    if page > len(paths):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "页面不存在")
+    return _document_file(paths[page - 1])
 
 
 @router.get("/{job_id}/segments")

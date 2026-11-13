@@ -294,6 +294,22 @@ def export_word_exam(
     )
 
 
+@router.get("/{question_id}/figures/{index}")
+def question_figure(
+    question_id: int, index: int, user: User = Depends(get_current_user)
+) -> FileResponse:
+    """读取当前用户已入库题的有效图，下标从 0 开始。"""
+    import os
+
+    question = _service().get_question(question_id, user.id)
+    if question is None or index < 0 or index >= len(question.figure_paths):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    path = question.figure_paths[index]
+    if not os.path.isfile(path):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "图形不存在")
+    return FileResponse(path)
+
+
 @router.get("/{question_id}/image")
 def question_image(question_id: int, user: User = Depends(get_current_user)) -> FileResponse:
     """错题原图（移动端/第三方客户端按 id 拉取，鉴权后不落公开目录）。"""

@@ -73,54 +73,7 @@ def test_collect_entries_rejects_raw_tuple_contract():
         _collect_entries([("a.png", (SimpleNamespace(id=1), SimpleNamespace()), None)])
 
 
-def test_start_analysis_is_disabled_while_entry_plan_is_processing():
-    from streamlit.testing.v1 import AppTest
-
-    at = AppTest.from_string(
-        "import io\n"
-        "import streamlit as st\n"
-        "from PIL import Image\n"
-        "from types import SimpleNamespace\n"
-        "from frontend.pages import tutor\n"
-        "buffer = io.BytesIO()\n"
-        "Image.new('RGB', (2, 2), 'white').save(buffer, format='JPEG')\n"
-        "image_bytes = buffer.getvalue()\n"
-        "class Upload:\n"
-        "    name = 'one.jpg'\n"
-        "    type = 'image/jpeg'\n"
-        "    def getvalue(self):\n"
-        "        return image_bytes\n"
-        "tutor.st.file_uploader = lambda *args, **kwargs: [Upload()]\n"
-        "class FakeAI:\n"
-        "    def provider_info(self):\n"
-        "        return SimpleNamespace(demo_mode=False)\n"
-        "class FakeService:\n"
-        "    ai = FakeAI()\n"
-        "tutor.get_question_service = lambda: FakeService()\n"
-        "tutor._process_plan = lambda *args, **kwargs: None\n"
-        "st.session_state['photo_plan'] = {\n"
-        "    'upload_names': ['one.jpg'], 'candidates': [],\n"
-        "    'fallbacks': [{'name': 'one.jpg'}],\n"
-        "}\n"
-        "tutor.render_tutor_page({'id': 1})\n",
-        default_timeout=15,
-    )
-    original_file_uploader = tutor.st.file_uploader
-    original_get_service = tutor.get_question_service
-    original_process_plan = tutor._process_plan
-    try:
-        at = at.run()
-    finally:
-        tutor.st.file_uploader = original_file_uploader
-        tutor.get_question_service = original_get_service
-        tutor._process_plan = original_process_plan
-
-    assert not at.exception
-    button = next(button for button in at.button if button.label == "开始 AI 解析")
-    assert button.disabled is True
-
-
-def test_followup_rerun_keeps_photo_entry_analysis(monkeypatch):
+def test_start_analysis_is_disabled_while_photo_job_is_planning(monkeypatch):
     import io
 
     from PIL import Image
@@ -137,27 +90,73 @@ def test_followup_rerun_keeps_photo_entry_analysis(monkeypatch):
         def getvalue(self):
             return image_bytes
 
-    question = SimpleNamespace(
-        id=7,
-        tags=["方程"],
-        difficulty="medium",
-        image_path=None,
-        subject="math",
-        grade=10,
-        region="上海",
-        knowledge_points=["一元二次方程"],
-        question_type="解答题",
+    class FakeAI:
+        def provider_info(self):
+            return SimpleNamespace(demo_mode=False)
+
+    class FakeService:
+        ai = FakeAI()
+
+    class FakePhotoEntryService:
+        def get_job(self, job_id, user_id):
+            return {
+                "job_id": job_id,
+                "phase": "planning",
+                "candidates": [],
+                "fallback_count": 0,
+                "total": 0,
+                "done": 0,
+                "entries": [],
+                "error": None,
+            }
+
+    monkeypatch.setattr(tutor.st, "file_uploader", lambda *args, **kwargs: [Upload()])
+    monkeypatch.setattr(tutor, "get_question_service", lambda: FakeService())
+    monkeypatch.setattr(
+        tutor, "PhotoEntryService", lambda: FakePhotoEntryService(), raising=False
     )
-    analysis = SimpleNamespace(
-        question_type="解答题",
-        chapter="方程",
-        error_category=None,
-        knowledge_points=["一元二次方程"],
-        analysis="### 解析\n由判别式判断根的情况。",
-        answer="x=2",
-        mistake_cause=None,
-        followup_question=None,
+    monkeypatch.setattr(tutor, "time", SimpleNamespace(sleep=lambda _: None), raising=False)
+    monkeypatch.setattr(tutor.st, "rerun", lambda: None)
+    at = AppTest.from_string(
+        "from frontend.pages import tutor\n"
+        "tutor.render_tutor_page({'id': 1})\n",
+        default_timeout=15,
     )
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert not at.exception
+    button = next(button for button in at.button if button.label == "开始 AI 解析")
+    assert button.disabled is True
+
+
+def test_followup_rerun_keeps_photo_entry_analysis(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+
+    question = {
+        "id": 7,
+        "user_id": 1,
+        "tags": ["方程"],
+        "difficulty": "medium",
+        "image_path": None,
+        "content_markdown": "题目\n\n---\n\n解析",
+        "answer": "x=2",
+        "subject": "math",
+        "grade": 10,
+        "region": "上海",
+        "knowledge_points": ["一元二次方程"],
+        "question_type": "解答题",
+    }
+    analysis = {
+        "question_type": "解答题",
+        "chapter": "方程",
+        "error_category": None,
+        "knowledge_points": ["一元二次方程"],
+        "analysis": "### 解析\n由判别式判断根的情况。",
+        "answer": "x=2",
+        "mistake_cause": "",
+        "followup_question": "",
+    }
 
     class FakeAI:
         def provider_info(self):
@@ -166,32 +165,42 @@ def test_followup_rerun_keeps_photo_entry_analysis(monkeypatch):
     class FakeService:
         ai = FakeAI()
 
-        def analyze_and_save_dedup(self, *args, **kwargs):
-            return EntryResult(question=question, analysis=analysis, duplicated=False)
-
         def similar_questions(self, *args, **kwargs):
             return SimpleNamespace(items=[])
 
         def answer_followup(self, *args, **kwargs):
             return "这是老师的追问答复。"
 
-    monkeypatch.setattr(tutor.st, "file_uploader", lambda *args, **kwargs: [Upload()])
+    class FakePhotoEntryService:
+        def get_job(self, job_id, user_id):
+            return {
+                "job_id": job_id,
+                "phase": "done",
+                "candidates": [],
+                "fallback_count": 0,
+                "total": 1,
+                "done": 1,
+                "entries": [{
+                    "name": "one.jpg",
+                    "error": None,
+                    "question": question,
+                    "analysis": analysis,
+                    "duplicated": False,
+                }],
+                "error": None,
+            }
+
+    monkeypatch.setattr(tutor.st, "file_uploader", lambda *args, **kwargs: [])
     monkeypatch.setattr(tutor, "get_question_service", lambda: FakeService())
+    monkeypatch.setattr(
+        tutor, "PhotoEntryService", lambda: FakePhotoEntryService(), raising=False
+    )
     at = AppTest.from_string(
-        """
-from frontend.pages import tutor
-tutor.render_tutor_page({"id": 1})
-""",
+        "from frontend.pages import tutor\n"
+        "tutor.render_tutor_page({'id': 1})\n",
         default_timeout=15,
     )
-    at.session_state["photo_plan"] = {
-        "upload_names": ["one.jpg"],
-        "candidates": [],
-        "fallbacks": [{
-            "name": "one.jpg", "bytes": image_bytes,
-            "mime": "image/jpeg", "segments": [],
-        }],
-    }
+    at.session_state["photo_job_id"] = "job-1"
     at.run()
 
     assert not at.exception

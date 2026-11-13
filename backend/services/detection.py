@@ -193,6 +193,18 @@ class DetectionMixin:
             tested_content=tested.content_markdown,
             tested_answer=tested_answer,
         )
+        from backend.services.asset_tokens import issue_detection_figure_token
+
+        figure_paths = list(tested.figure_paths or [])
+        figure_tokens = [
+            issue_detection_figure_token(
+                log_id=log_id,
+                user_id=user_id,
+                figure_index=index,
+                path=path,
+            )
+            for index, path in enumerate(figure_paths)
+        ]
         emit_progress(on_progress, PROGRESS_DONE)
         logger.info(
             "发起检测 question=%s user=%s tested=%s source=%s",
@@ -204,7 +216,9 @@ class DetectionMixin:
             "tested": {
                 "source": tested.source,
                 "content": tested.content_markdown,
-                "figure_paths": list(tested.figure_paths or []),
+                "stem": tested.stem,
+                "figure_paths": figure_paths,
+                "figure_tokens": figure_tokens,
                 "figure_specs": [spec.model_dump() for spec in tested.figure_specs],
                 "knowledge_points": tested.knowledge_points,
                 "difficulty": tested.difficulty,

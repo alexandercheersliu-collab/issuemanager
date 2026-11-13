@@ -804,6 +804,13 @@ def test_reanalyze_endpoint(client, headers, tmp_path):
     assert segment["analysis"] is not None
     assert segment["needs_review"] is False
 
+    persisted = client.get(f"/api/documents/{job_id}/segments", headers=headers)
+    assert persisted.status_code == 200
+    assert persisted.json()["segments"][1]["analysis"] is not None
+    confirm = client.post(f"/api/documents/{job_id}/confirm", headers=headers)
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json() == {"imported": 2, "skipped": [], "already_confirmed": False}
+
 
 def test_edit_endpoints_reject_after_confirm(client, headers, tmp_path):
     job_id = _api_import_and_wait(client, headers, tmp_path, "api_locked.pdf")

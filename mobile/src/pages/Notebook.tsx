@@ -8,15 +8,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api, ApiError } from '@/lib/api'
-import { splitStem, type Question } from '@/types'
+import type { Question } from '@/types'
+import AuthImage from '@/components/AuthImage'
 import DetectionPanel from '@/components/DetectionPanel'
 import MathText from '@/components/MathText'
 
 const PAGE_SIZE = 15
 
 function snippet(q: Question): string {
-  const text = splitStem(q.content_markdown).stem
-  return text.replace(/\s+/g, ' ').slice(0, 60)
+  return q.stem.replace(/\s+/g, ' ').slice(0, 60)
 }
 
 export default function Notebook() {
@@ -126,16 +126,42 @@ export default function Notebook() {
                   </Badge>
                 ))}
               </div>
-              <MathText
-                text={splitStem(detail.content_markdown).stem}
-                className="text-sm text-slate-800"
-              />
-              {splitStem(detail.content_markdown).analysis && (
-                <div className="border-t pt-3">
-                  <MathText
-                    text={splitStem(detail.content_markdown).analysis!}
-                    className="text-sm text-slate-600"
+              {detail.figure_paths.map((_, index) => (
+                <div key={index} className="space-y-1">
+                  <AuthImage
+                    src={`/questions/${detail.id}/figures/${index}`}
+                    alt={`题图 ${index + 1}`}
+                    fallback={
+                      detail.image_path ? (
+                        <AuthImage src={`/questions/${detail.id}/image`} alt="错题原图" />
+                      ) : (
+                        <p className="text-xs text-amber-700">图形暂不可用</p>
+                      )
+                    }
                   />
+                  {detail.figure_specs[index]?.validation_status === 'fallback' && (
+                    <p className="text-xs text-amber-700">图形为原图裁剪，请核对准确性</p>
+                  )}
+                </div>
+              ))}
+              {detail.figure_specs.length > detail.figure_paths.length && (
+                <div className="space-y-1">
+                  {detail.image_path ? (
+                    <AuthImage src={`/questions/${detail.id}/image`} alt="错题原图" />
+                  ) : (
+                    <p className="text-xs text-amber-700">图形暂不可用</p>
+                  )}
+                  {detail.figure_specs
+                    .slice(detail.figure_paths.length)
+                    .some((spec) => spec.validation_status === 'fallback') && (
+                    <p className="text-xs text-amber-700">图形为原图裁剪，请核对准确性</p>
+                  )}
+                </div>
+              )}
+              <MathText text={detail.stem} className="text-sm text-slate-800" />
+              {detail.analysis && (
+                <div className="border-t pt-3">
+                  <MathText text={detail.analysis} className="text-sm text-slate-600" />
                 </div>
               )}
               <div className="flex flex-wrap items-baseline gap-1 text-sm font-semibold text-slate-900">

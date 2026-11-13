@@ -5,11 +5,19 @@ export interface User {
   role: string
 }
 
+export interface FigureSpec {
+  validation_status: 'ai_passed' | 'manual_passed' | 'fallback'
+}
+
 export interface Question {
   id: number
   user_id: number
   image_path: string | null
+  figure_paths: string[]
+  figure_specs: FigureSpec[]
   content_markdown: string
+  stem: string
+  analysis: string | null
   answer: string
   knowledge_points: string[]
   tags: string[]
@@ -47,6 +55,35 @@ export interface AnalyzeResult {
   }
 }
 
+export interface PhotoCandidate {
+  id: string
+  image: string
+  number: string
+  text: string
+  summary: string
+  likely_wrong: boolean
+  figure_bboxes: number[][]
+}
+
+export interface PhotoEntry {
+  name: string
+  error: string | null
+  question: Question | null
+  analysis: AnalyzeResult['analysis'] | null
+  duplicated: boolean
+}
+
+export interface PhotoJob {
+  job_id: string
+  phase: 'planning' | 'review' | 'importing' | 'done' | 'failed'
+  candidates: PhotoCandidate[]
+  fallback_count: number
+  total: number
+  done: number
+  entries: PhotoEntry[]
+  error: string | null
+}
+
 /** 同类题检测：POST /questions/{id}/detection/start 的响应 */
 export interface DetectionStart {
   log_id: number
@@ -54,6 +91,9 @@ export interface DetectionStart {
   tested: {
     source: string
     content: string
+    stem: string
+    figure_tokens: string[]
+    figure_specs: FigureSpec[]
     knowledge_points: string[]
     difficulty: string
   }
@@ -89,6 +129,8 @@ export interface Segment {
   needs_review: boolean
   continued: boolean
   source: string
+  figure_paths: string[]
+  figure_specs: FigureSpec[]
   analysis: { knowledge_points?: string[]; difficulty?: string } | null
   error: string | null
 }
@@ -99,6 +141,7 @@ export interface SegmentsResult {
   status: 'pending' | 'running' | 'success' | 'failed'
   error: string | null
   pages: number
+  scanned_pages: number
   total: number
   done: number
   needs_review_count: number
@@ -111,15 +154,6 @@ export interface ConfirmResult {
   imported: number
   skipped: { number: string | null; reason: string }[]
   already_confirmed: boolean
-}
-
-/** 题面/解析分隔符（与后端 question_mixins.analyze_text_and_save 落库格式一致） */
-export const STEM_SEP = '\n\n---\n\n'
-
-export function splitStem(content: string): { stem: string; analysis: string | null } {
-  if (!content.includes(STEM_SEP)) return { stem: content.trim(), analysis: null }
-  const [stem, rest] = content.split(STEM_SEP)
-  return { stem: stem.trim(), analysis: rest?.trim() || null }
 }
 
 /** AI 助手对话消息（与 /agent/chat/stream 的 history 结构一致） */

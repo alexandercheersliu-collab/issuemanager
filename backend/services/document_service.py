@@ -49,6 +49,7 @@ class DocumentService:
         grade: int | None = None,
         region: str | None = None,
         textbook_version: str | None = None,
+        match_context: bool = False,
     ) -> tuple[str, bool]:
         """接收文档字节，落 DOC_UPLOAD_PATH 并创建异步导入任务。
 
@@ -56,7 +57,7 @@ class DocumentService:
         仅图片格式支持多文件，PDF/DOCX 恒为单文件。
         返回 (job_id, duplicated)：同一用户重复上传同一文档（SHA-256 相同，
         多文件按序拼接计算）且已有非空任务未失败时，直接返回既有任务，不重复解析；
-        历史空结果任务不复用，允许重新上传后再次解析。
+        match_context 时仅复用 K12 上下文一致的任务。历史空结果任务不复用。
         """
         files = [(data, filename), *(extra_files or [])]
         for file_data, file_name in files:
@@ -76,7 +77,15 @@ class DocumentService:
         for file_data, _ in files:
             hasher.update(file_data)
         doc_hash = hasher.hexdigest()
-        existing = self._find_active_job(user_id, doc_hash)
+        context = {
+            "subject": subject or "math",
+            "grade": grade,
+            "region": region,
+            "textbook_version": textbook_version,
+        }
+        existing = self._find_active_job(
+            user_id, doc_hash, context=context if match_context else None
+        )
         if existing is not None:
             logger.info("重复文档 job=%s user=%s，直接复用", existing, user_id)
             return existing, True
@@ -124,16 +133,23 @@ class DocumentService:
         logger.info("文档导入任务已提交 job=%s user=%s file=%s", job_id, user_id, filename)
         return job_id, False
 
-    def _find_active_job(self, user_id: int, doc_hash: str) -> str | None:
-        """按 SHA-256 找同用户可复用的既有任务；失败及空结果任务除外。"""
+    def _find_active_job(
+        self, user_id: int, doc_hash: str, *, context: dict | None = None
+    ) -> str | None:
+        """按 SHA-256 找同用户可复用任务；指定上下文时必须完全一致。"""
         with SessionLocal() as session:
             jobs = session.execute(
                 select(Job).where(Job.user_id == user_id, Job.type == JOB_TYPE)
             ).scalars()
             for job in jobs:
-                if (job.payload or {}).get("doc_hash") != doc_hash or job.status == "failed":
+                payload = job.payload or {}
+                if payload.get("doc_hash") != doc_hash or job.status == "failed":
                     continue
                 if job.status == "success" and not (job.result or {}).get("total"):
+                    continue
+                if context is not None and any(
+                    payload.get(key) != value for key, value in context.items()
+                ):
                     continue
                 return job.id
         return None
@@ -630,8 +646,10 @@ class DocumentService:
         K12 上下文取任务 payload；调用方可传确认时的最新上下文覆盖原值。
         结构化字段取逐题解构结果。
         返回 imported（成功数）与 skipped（跳过题号及原因：未解构/入库失败）。
-        幂等：已确认的任务直接返回既有结果，不重复入库。
+        幂等：已确认的任务直接返回既有结果，不重复入库；确认中的并发请求返回冲突。
         """
+        from sqlalchemy import update
+
         from backend.services.question_service import QuestionService
 
         with SessionLocal() as session:
@@ -640,8 +658,6 @@ class DocumentService:
             ).scalar_one_or_none()
             if job is None:
                 raise LookupError("导入任务不存在")
-            if job.status != "success":
-                raise ValueError(f"任务尚未完成（当前状态 {job.status}）")
             result = dict(job.result or {})
             payload = dict(job.payload or {})
             if result.get("confirmed"):
@@ -650,12 +666,48 @@ class DocumentService:
                     "skipped": result.get("skipped", []),
                     "already_confirmed": True,
                 }
+            if job.status == "confirming":
+                raise ValueError("任务正在确认入库，请稍后重试")
+            if job.status != "success":
+                raise ValueError(f"任务尚未完成（当前状态 {job.status}）")
             if context is not None:
                 for key in ("subject", "grade", "region", "textbook_version"):
                     payload[key] = context.get(key)
                 payload["subject"] = payload["subject"] or "math"
-                job.payload = payload
-                session.commit()
+
+            session.rollback()
+            transition = session.execute(
+                update(Job)
+                .where(
+                    Job.id == job_id,
+                    Job.user_id == user_id,
+                    Job.type == JOB_TYPE,
+                    Job.status == "success",
+                    Job.result["confirmed"].as_boolean().is_(False),
+                )
+                .values(status="confirming", payload=payload)
+                .execution_options(synchronize_session=False)
+            )
+            if transition.rowcount != 1:
+                session.rollback()
+                current = session.execute(
+                    select(Job).where(
+                        Job.id == job_id, Job.user_id == user_id, Job.type == JOB_TYPE
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise LookupError("导入任务不存在")
+                current_result = dict(current.result or {})
+                if current_result.get("confirmed"):
+                    return {
+                        "imported": current_result.get("imported", 0),
+                        "skipped": current_result.get("skipped", []),
+                        "already_confirmed": True,
+                    }
+                if current.status == "confirming":
+                    raise ValueError("任务正在确认入库，请稍后重试")
+                raise ValueError(f"任务尚未完成（当前状态 {current.status}）")
+            session.commit()
 
         service = QuestionService(session_factory=SessionLocal)
         filename = payload.get("filename") or "document"
@@ -711,7 +763,7 @@ class DocumentService:
         result["confirmed"] = True
         result["imported"] = imported
         result["skipped"] = skipped
-        self._save_result(job_id, result)
+        self._finish(job_id, status="success", result=result)
         logger.info(
             "确认入库完成 job=%s user=%s imported=%s skipped=%s",
             job_id, user_id, imported, len(skipped),

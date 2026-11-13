@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight, ImageIcon, PartyPopper } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -7,7 +7,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api, ApiError } from '@/lib/api'
-import { splitStem, type Question } from '@/types'
+import type { Question } from '@/types'
+import AuthImage from '@/components/AuthImage'
 import DetectionPanel from '@/components/DetectionPanel'
 import MathText from '@/components/MathText'
 
@@ -19,23 +20,11 @@ const GRADES = [
 ] as const
 
 function QuestionImage({ questionId }: { questionId: number }) {
-  const [url, setUrl] = useState<string | null>(null)
-  useEffect(() => {
-    let revoke: string | null = null
-    api.imageUrl(questionId).then((u) => {
-      revoke = u
-      setUrl(u)
-    })
-    return () => {
-      if (revoke) URL.revokeObjectURL(revoke)
-    }
-  }, [questionId])
-  if (!url) return <Skeleton className="h-40 w-full" />
   return (
-    <img
-      src={url}
+    <AuthImage
+      src={`/questions/${questionId}/image`}
       alt="错题原图"
-      className="mx-auto max-h-[38vh] w-auto max-w-full rounded-lg object-contain"
+      fallback={<p className="text-xs text-amber-700">原图暂不可用</p>}
     />
   )
 }
@@ -67,10 +56,8 @@ export default function Review() {
   }, [load])
 
   const question = due && due.length > 0 ? due[Math.min(cursor, due.length - 1)] : null
-  const { stem, analysis } = useMemo(
-    () => (question ? splitStem(question.content_markdown) : { stem: '', analysis: null }),
-    [question],
-  )
+  const stem = question?.stem ?? ''
+  const analysis = question?.analysis ?? null
   const visibleTags = question ? question.tags.slice(0, 5) : []
 
   const advance = useCallback(async () => {
@@ -175,6 +162,39 @@ export default function Review() {
         <CardContent className="space-y-4 p-4">
           {question.last_reviewed_at && (
             <p className="text-xs text-slate-400">已连续记牢 {question.reps} 次</p>
+          )}
+
+          {question.figure_paths.map((_, index) => (
+            <div key={index} className="space-y-1">
+              <AuthImage
+                src={`/questions/${question.id}/figures/${index}`}
+                alt={`题图 ${index + 1}`}
+                fallback={
+                  question.image_path ? (
+                    <QuestionImage questionId={question.id} />
+                  ) : (
+                    <p className="text-xs text-amber-700">图形暂不可用</p>
+                  )
+                }
+              />
+              {question.figure_specs[index]?.validation_status === 'fallback' && (
+                <p className="text-xs text-amber-700">图形为原图裁剪，请核对准确性</p>
+              )}
+            </div>
+          ))}
+          {question.figure_specs.length > question.figure_paths.length && (
+            <div className="space-y-1">
+              {question.image_path ? (
+                <QuestionImage questionId={question.id} />
+              ) : (
+                <p className="text-xs text-amber-700">图形暂不可用</p>
+              )}
+              {question.figure_specs
+                .slice(question.figure_paths.length)
+                .some((spec) => spec.validation_status === 'fallback') && (
+                <p className="text-xs text-amber-700">图形为原图裁剪，请核对准确性</p>
+              )}
+            </div>
           )}
 
           {/* 题面：文字优先（Markdown + 公式渲染），原图折叠 */}
