@@ -4,7 +4,7 @@
 # Web 框架
 streamlit>=1.65
 streamlit-antd-components>=0.3.2
-plotly>=7.0.0
+plotly>=7.1.0
 networkx>=3.0            # 知识图谱力导向布局（spring_layout）
 
 # REST API 网关（多端复用）
@@ -20,7 +20,7 @@ pydantic-settings>=2.15.0
 python-dotenv>=1.2.3
 
 # 认证
-bcrypt>=4.1
+bcrypt>=5.0.0
 
 # AI 提供商
 openai>=1.40            # OpenAI 兼容接入（SiliconFlow / Qwen / GLM / DeepSeek / Ollama ...）

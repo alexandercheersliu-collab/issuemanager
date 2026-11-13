@@ -1,8 +1,8 @@
 -r requirements.txt
 
 pytest>=9.1.1
-ruff>=0.16.7
+ruff>=0.16.10
 pytest-cov
-locust>=2.30
-playwright>=1.40
+locust>=2.46.0
+playwright>=1.63.0
 psutil>=5.9
