@@ -1,8 +1,8 @@
-"""公共种子题库生成与导入（P3.1）。
+"""公共种子题库生成与导入（SQL 权威 + 可重建向量）。
 
 生成器为纯函数（确定性，random.Random(42)），可按学科×年级产出 ≥200 道
-带完整 K12 元数据的模板变体题；导入走 QuestionVectorStore.upsert_bank_question
-（幂等，bank_id 确定性生成，可反复执行）。
+带完整题干、答案、解析和 K12 元数据的模板变体题。导入按规范化题干哈希幂等复用
+SQL 标准题，再以 canonical_questions.id 写入 ChromaDB；不完整条目不会入库。
 
 用法：
     python scripts/seed_question_bank.py            # 生成并导入公共题库
@@ -171,6 +171,7 @@ def generate_bank_items(seed: int = 42) -> list[dict]:
                     {
                         "bank_id": f"{subject}-g{grade}-{counters[key]:03d}",
                         "content": content,
+                        "analysis": f"根据{points[0]}的运算法则逐步计算，得到答案：{answer}。",
                         "answer": answer,
                         "subject": subject,
                         "grade": grade,
@@ -183,9 +184,89 @@ def generate_bank_items(seed: int = 42) -> list[dict]:
     return items
 
 
+def import_bank_items(items: list[dict], *, session_factory, vector_store) -> dict:
+    """把完整种子写入权威 SQL，并以标准题 SQL ID 重建向量。"""
+    from backend.repositories.question_bank import QuestionBankRepository
+
+    stats = {"created": 0, "reused": 0, "skipped_incomplete": 0, "indexed": 0}
+    canonicals = []
+    with session_factory() as session:
+        repository = QuestionBankRepository(session)
+        for item in items:
+            if not all(str(item.get(key) or "").strip() for key in ("content", "analysis", "answer")):
+                stats["skipped_incomplete"] += 1
+                continue
+            canonical = repository.find_by_stem(item["content"])
+            if canonical is None:
+                canonical = repository.create(
+                    stem_markdown=item["content"],
+                    analysis_markdown=item["analysis"],
+                    answer=item["answer"],
+                    knowledge_points=list(item.get("knowledge_points") or []),
+                    difficulty=item.get("difficulty") or "medium",
+                    question_type=item.get("question_type"),
+                    chapter=item.get("chapter"),
+                    subject=item.get("subject") or "math",
+                    grade=item.get("grade"),
+                    origin="seed",
+                    validation_state="machine_validated",
+                )
+                stats["created"] += 1
+            else:
+                was_incomplete = not repository.is_reusable(canonical)
+                for field, value in (
+                    ("analysis_markdown", item["analysis"]),
+                    ("answer", item["answer"]),
+                    ("knowledge_points", list(item.get("knowledge_points") or [])),
+                    ("question_type", item.get("question_type")),
+                    ("chapter", item.get("chapter")),
+                    ("grade", item.get("grade")),
+                ):
+                    current = getattr(canonical, field)
+                    empty = not current or (isinstance(current, str) and not current.strip())
+                    if empty and value:
+                        setattr(canonical, field, value)
+                if was_incomplete and canonical.origin == "student":
+                    canonical.origin = "seed"
+                stats["reused"] += 1
+            canonicals.append(canonical)
+        session.commit()
+        canonicals = [
+            {
+                "id": canonical.id,
+                "stem": canonical.stem_markdown,
+                "subject": canonical.subject,
+                "grade": canonical.grade,
+                "region": canonical.region,
+                "knowledge_points": list(canonical.knowledge_points or []),
+                "difficulty": canonical.difficulty,
+                "answer": canonical.answer,
+                "question_type": canonical.question_type or "",
+                "chapter": canonical.chapter or "",
+            }
+            for canonical in canonicals
+        ]
+
+    for canonical in canonicals:
+        indexed = vector_store.upsert_bank_question(
+            str(canonical["id"]),
+            canonical["stem"],
+            subject=canonical["subject"],
+            grade=canonical["grade"],
+            region=canonical["region"],
+            knowledge_points=canonical["knowledge_points"],
+            difficulty=canonical["difficulty"],
+            answer=canonical["answer"],
+            question_type=canonical["question_type"],
+            chapter=canonical["chapter"],
+        )
+        stats["indexed"] += int(indexed)
+    return stats
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="生成并导入公共种子题库（ChromaDB bank collection）")
-    parser.add_argument("--dry-run", action="store_true", help="只打印统计，不写入向量库")
+    parser = argparse.ArgumentParser(description="生成并导入公共种子题库（SQL + ChromaDB）")
+    parser.add_argument("--dry-run", action="store_true", help="只打印统计，不写入 SQL 或向量库")
     args = parser.parse_args(argv)
 
     items = generate_bank_items()
@@ -199,28 +280,22 @@ def main(argv: list[str] | None = None) -> int:
     print(f"按年级：{dict(sorted(by_grade.items()))}")
 
     if args.dry_run:
-        print("dry-run：未写入向量库")
+        print("dry-run：未写入 SQL 或向量库")
         return 0
 
+    from backend.database import SessionLocal, init_db
     from backend.services.rag import QuestionVectorStore
 
+    init_db()
     store = QuestionVectorStore()
-    ok = 0
-    for item in items:
-        if store.upsert_bank_question(
-            item["bank_id"],
-            item["content"],
-            subject=item["subject"],
-            grade=item["grade"],
-            knowledge_points=item["knowledge_points"],
-            difficulty=item["difficulty"],
-            answer=item["answer"],
-            question_type=item["question_type"],
-            chapter=item["chapter"],
-        ):
-            ok += 1
-    print(f"已导入 {ok}/{len(items)} 道，公共题库当前总量：{store.bank_size()}")
-    return 0 if ok == len(items) else 1
+    stats = import_bank_items(items, session_factory=SessionLocal, vector_store=store)
+    expected = len(items) - stats["skipped_incomplete"]
+    print(
+        f"SQL 新建 {stats['created']}，复用 {stats['reused']}，"
+        f"跳过不完整 {stats['skipped_incomplete']}；"
+        f"向量成功 {stats['indexed']}/{expected}，当前总量：{store.bank_size()}"
+    )
+    return 0 if stats["indexed"] == expected else 1
 
 
 if __name__ == "__main__":

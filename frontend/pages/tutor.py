@@ -1,8 +1,6 @@
 """AI 录题页：上传错题图片 → 结构化解析 → 自动入库与向量索引 → 举一反三。"""
 from __future__ import annotations
 
-import time
-
 import streamlit as st
 
 from backend.models.schemas import (
@@ -77,6 +75,26 @@ def _k12_context_inputs(key_prefix: str, *, disabled: bool = False) -> dict:
     }
 
 
+@st.fragment(run_every=1.0)
+def _render_photo_job_progress(photo_service, user_id: int, job_id: str) -> None:
+    job = photo_service.get_job(job_id, user_id)
+    if job is None:
+        return
+    phase = job["phase"]
+    if phase == "planning":
+        with st.container(border=True):
+            st.markdown("正在从图中找题…")
+    elif phase == "importing":
+        total = job["total"]
+        done = job["done"]
+        with st.container(border=True):
+            st.markdown(f"正在录入…（已完成 {done}/{total} 题）")
+            if total:
+                st.progress(done / total)
+    else:
+        st.rerun()
+
+
 def render_tutor_page(user: dict) -> None:
     service = get_question_service()
     photo_service = PhotoEntryService()
@@ -101,7 +119,12 @@ def render_tutor_page(user: dict) -> None:
                 preview_cols = st.columns(min(len(uploads), 4))
                 for i, upload in enumerate(uploads[:4]):
                     with preview_cols[i]:
-                        st.image(upload.getvalue(), width="stretch", caption=upload.name)
+                        st.image(
+                            upload.getvalue(),
+                            width="stretch",
+                            caption=upload.name,
+                            alt=f"待录入照片 {upload.name}",
+                        )
                 if len(uploads) > 4:
                     st.caption(f"已选择 {len(uploads)} 张图片")
 
@@ -152,21 +175,10 @@ def render_tutor_page(user: dict) -> None:
 
             if job is not None:
                 phase = job["phase"]
-                if phase == "planning":
-                    with st.spinner("正在从图中找题…"):
-                        time.sleep(0.5)
-                    st.rerun()
+                if phase in {"planning", "importing"}:
+                    _render_photo_job_progress(photo_service, user["id"], job_id)
                 elif phase == "review":
                     _render_candidate_review(photo_service, user, job)
-                elif phase == "importing":
-                    total = job["total"]
-                    done = job["done"]
-                    with st.status(f"正在录入 {total} 道题…", expanded=True) as status:
-                        status.update(label=f"正在录入…（已完成 {done}/{total} 题）")
-                        if total:
-                            st.progress(done / total)
-                    time.sleep(0.5)
-                    st.rerun()
                 elif phase == "failed":
                     st.error(f"拍照录入失败：{job.get('error') or '未知错误'}")
                 elif phase == "done" and job["entries"]:
@@ -289,30 +301,87 @@ def _render_candidate_review(service, user, job: dict) -> None:
         + "请勾选要录入的错题："
     )
     checked: list[dict] = []
+    match_choices: dict[str, int | None] = {}
     for i, cand in enumerate(candidates):
         mark = " 🟥疑似做错" if cand["likely_wrong"] else ""
         label = f"[{cand['image']}] 第 {cand['number']} 题：{cand['summary']}{mark}"
         with st.container(border=True):
-            if st.checkbox(
+            selected = st.checkbox(
                 label, value=bool(cand.get("likely_wrong", False)), key=f"photo_seg_{i}"
-            ):
+            )
+            if selected:
                 checked.append(cand)
+            match_status = cand.get("match_status") or "new"
+            if match_status == "exact":
+                st.markdown("**精确复用**：已匹配共享标准题，将保留本次私有原图。")
+            elif match_status == "similar":
+                st.markdown("**相似待确认**：请核对候选，不会自动按同题复用。")
+                offered = cand.get("match_candidates") or []
+                candidate_ids = [
+                    item["question"]["id"]
+                    for item in offered
+                    if item.get("question", {}).get("id") is not None
+                ]
+                labels = {"new": "作为新题解析"}
+                for item in offered:
+                    question = item.get("question") or {}
+                    canonical_id = question.get("id")
+                    if canonical_id is None:
+                        continue
+                    source = {
+                        "teacher": "教师发布",
+                        "student": "学生机器校验",
+                        "seed": "预置题库",
+                    }.get(question.get("origin"), "共享题库")
+                    st.caption(
+                        f"候选 #{canonical_id} · {source} · 相似度 {item.get('score', 0):.0%}"
+                    )
+                    st.markdown(safe_truncate_math(question.get("stem_markdown") or "", 120))
+                    if question.get("analysis_markdown"):
+                        st.caption(
+                            "解析摘要："
+                            + safe_truncate_math(question["analysis_markdown"], 100)
+                        )
+                    labels[canonical_id] = "引用此题：" + safe_truncate_math(
+                        question.get("stem_markdown") or "", 36
+                    )
+                choice = st.selectbox(
+                    "相似题处理（必须明确选择）",
+                    ["new", *candidate_ids],
+                    index=None,
+                    placeholder="请选择引用此题或作为新题解析",
+                    format_func=lambda value, options=labels: options[value],
+                    key=f"photo_match_{job['job_id']}_{cand['id']}",
+                )
+                if selected and choice is not None:
+                    match_choices[cand["id"]] = None if choice == "new" else choice
+            else:
+                st.markdown("**新题解析**：未命中共享标准题，确认后调用 AI 解析。")
     if job["fallback_count"]:
         st.caption(f"另有 {job['fallback_count']} 张图片未切出多题，将按整图单题解析。")
 
+    unresolved_similar = any(
+        cand.get("match_status") == "similar" and cand["id"] not in match_choices
+        for cand in checked
+    )
     confirm_busy = st.session_state.get("photo_confirm_busy", False)
     if st.button(
         f"确认录入（{len(checked)} 题）",
         type="primary",
         width="stretch",
-        disabled=confirm_busy,
+        disabled=confirm_busy or unresolved_similar,
     ):
         if not checked and not job["fallback_count"]:
             st.warning("请至少勾选一道题。")
             return
         st.session_state["photo_confirm_busy"] = True
         try:
-            service.confirm(job["job_id"], user["id"], [cand["id"] for cand in checked])
+            service.confirm(
+                job["job_id"],
+                user["id"],
+                [cand["id"] for cand in checked],
+                match_choices=match_choices,
+            )
         except Exception as exc:  # noqa: BLE001 - 确认失败保留候选供重试
             st.error(f"确认录入失败：{exc}")
         else:
@@ -391,11 +460,41 @@ def _similar_constraints(question) -> dict:
     }
 
 
+def _render_reference_result(saved, service, user) -> None:
+    img_col, content_col = st.columns([2, 3])
+    with img_col:
+        if saved.image_path:
+            st.image(
+                saved.image_path,
+                width="stretch",
+                alt=f"题 {saved.id} 的本次私有原图",
+            )
+        else:
+            st.info("本次私有原图已不可用，共享标准内容仍可查看。")
+        render_figures(
+            list(saved.figure_paths or []),
+            alt_prefix=f"题 {saved.id} 的共享 AI 重绘图",
+        )
+    with content_col:
+        st.caption("已引用共享标准题；题干与解析来自标准题，原图仅属于本次录入。")
+        render_markdown(saved.content_markdown, unsafe_allow_html=True)
+        render_markdown(f"**正确答案**：{saved.answer}")
+    with st.expander("💬 就这道题追问老师"):
+        followup_chat(service, saved, user)
+
+
 def _render_analysis(saved, analysis, service, user) -> None:
+    if analysis is None and saved.canonical_id is not None:
+        _render_reference_result(saved, service, user)
+        return
     img_col, content_col = st.columns([2, 3])
     with img_col:
         if getattr(saved, "image_path", None):
-            st.image(saved.image_path, width="stretch")
+            st.image(
+                saved.image_path,
+                width="stretch",
+                alt=f"题 {saved.id} 的本次私有原图",
+            )
         else:
             st.info("原图已不可用（可能经过数据目录迁移），解析结果不受影响。")
         badges = " ".join(f'<span class="mm-badge">{t}</span>' for t in saved.tags)

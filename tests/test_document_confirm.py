@@ -13,6 +13,17 @@ from api.main import create_app
 from backend.services.document_service import DocumentService
 
 
+@pytest.fixture(autouse=True)
+def no_uncontrolled_similar_candidates(monkeypatch):
+    from backend.services.rag import QuestionVectorStore, SimilarResult
+
+    monkeypatch.setattr(
+        QuestionVectorStore,
+        "similar_canonical_questions",
+        lambda self, *args, **kwargs: SimilarResult(),
+    )
+
+
 @pytest.fixture(scope="module")
 def client():
     return TestClient(create_app())
@@ -41,7 +52,7 @@ def _wait_job(service: DocumentService, job_id: str, user_id: int, timeout: floa
 def _import_and_wait(question_service, student_user, tmp_path, name="confirm.pdf"):
     pdf = make_text_pdf(
         tmp_path / name,
-        ["1. 第一题：已知 x^2=9，求 x 的值。\n2. 第二题：计算 1+1 的结果。"],
+        [f"1. 第一题【{name}】：已知 x^2=9，求 x 的值。\n2. 第二题【{name}】：计算 1+1 的结果。"],
     )
     service = DocumentService()
     job_id, _ = service.import_document(
@@ -214,10 +225,10 @@ def test_concurrent_confirm_imports_each_segment_once(
     created: list[str] = []
     outcomes: list[dict] = []
     errors: list[Exception] = []
-    original_create = QuestionService.create_manual_question
+    original_create = QuestionService.create_ai_reference
 
     def gated_create(*args, **kwargs):
-        created.append(kwargs["content_markdown"])
+        created.append(kwargs["stem"])
         try:
             concurrent_imports.wait(timeout=2)
         except threading.BrokenBarrierError:
@@ -231,7 +242,7 @@ def test_concurrent_confirm_imports_each_segment_once(
         except Exception as exc:  # noqa: BLE001 - 在线程外断言两种调用结果
             errors.append(exc)
 
-    monkeypatch.setattr(QuestionService, "create_manual_question", gated_create)
+    monkeypatch.setattr(QuestionService, "create_ai_reference", gated_create)
     threads = [threading.Thread(target=confirm) for _ in range(2)]
     for thread in threads:
         thread.start()
@@ -240,11 +251,11 @@ def test_concurrent_confirm_imports_each_segment_once(
         thread.join(timeout=10)
         assert not thread.is_alive()
 
-    assert len(outcomes) == 1
-    assert outcomes[0] == {"imported": 2, "skipped": [], "already_confirmed": False}
-    assert len(errors) == 1
-    assert isinstance(errors[0], ValueError)
-    assert "正在确认入库" in str(errors[0])
+    assert len(outcomes) + len(errors) == 2
+    first = next(outcome for outcome in outcomes if not outcome["already_confirmed"])
+    assert first == {"imported": 2, "skipped": [], "already_confirmed": False}
+    assert all(outcome["already_confirmed"] for outcome in outcomes if outcome is not first)
+    assert all(isinstance(error, ValueError) for error in errors)
     assert len(created) == 2
     assert len(set(created)) == 2
 
@@ -256,8 +267,8 @@ def test_concurrent_confirm_imports_each_segment_once(
     assert len(docs) == 2
     final = service.confirm_import(job_id, student_user.id)
     assert final == {
-        "imported": outcomes[0]["imported"],
-        "skipped": outcomes[0]["skipped"],
+        "imported": first["imported"],
+        "skipped": first["skipped"],
         "already_confirmed": True,
     }
 
@@ -298,7 +309,9 @@ def test_segments_endpoint(client, headers, tmp_path):
     assert body["needs_review_count"] == 0
     assert body["confirmed"] is False
     assert [s["number"] for s in body["segments"]] == ["1", "2"]
-    assert all(s["analysis"] for s in body["segments"])
+    assert all(
+        s["analysis"] or s["match_status"] == "exact" for s in body["segments"]
+    )
 
 
 def test_confirm_endpoint(client, headers, tmp_path):

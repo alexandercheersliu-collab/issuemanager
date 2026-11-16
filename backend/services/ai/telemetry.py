@@ -1,7 +1,7 @@
-"""AI 调用遥测：本地 JSONL 记录每次 LLM 调用（延迟/成功/提供商）。
+"""AI 调用与题库匹配遥测：本地 JSONL 记录延迟、结果、复用和实际用量。
 
-轻量自包含方案：写 data/telemetry/ai_calls.jsonl，一行一次调用。
-需要云端聚合时可将此文件接入 Langfuse 等（记录字段与其语义对齐）。
+写 data/telemetry/ai_calls.jsonl。token 仅记录提供商返回的实际值；题库复用
+只统计调用点节省，不推算 token。管理写操作的可追踪记录保存在 SQL 审计表。
 """
 from __future__ import annotations
 
@@ -44,15 +44,78 @@ def track_ai_call(operation: str) -> Iterator[dict]:
         raise
     finally:
         elapsed_ms = round((time.perf_counter() - start) * 1000)
-        _write(
-            {
-                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "operation": operation,
-                "latency_ms": elapsed_ms,
-                "ok": ctx["ok"],
-                "error": ctx["error"],
+        record = {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "event": "ai_call",
+            "operation": operation,
+            "latency_ms": elapsed_ms,
+            "ok": ctx["ok"],
+            "error": ctx["error"],
+        }
+        usage = ctx.get("token_usage")
+        if isinstance(usage, dict):
+            actual_usage = {
+                key: usage[key]
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if type(usage.get(key)) is int and usage[key] >= 0
             }
-        )
+            if actual_usage:
+                record["token_usage"] = actual_usage
+        _write(record)
+
+
+def record_bank_match(match_status: str) -> None:
+    """记录一次标准题匹配结果。"""
+    if match_status not in {"exact", "similar", "new"}:
+        raise ValueError("未知题库匹配状态")
+    _write(
+        {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "event": "bank_match",
+            "match_status": match_status,
+        }
+    )
+
+
+def record_bank_decision(decision: str) -> None:
+    """记录学生对相似候选作出的明确选择。"""
+    if decision not in {"accepted", "new"}:
+        raise ValueError("未知相似题决定")
+    _write(
+        {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "event": "bank_decision",
+            "decision": decision,
+        }
+    )
+
+
+def record_reuse_savings(
+    skipped_calls: dict[str, int],
+    *,
+    shared_generations: int = 0,
+    shared_storage_bytes: int = 0,
+) -> None:
+    """记录实际绕过的调用及复用共享图所避免的生成量和存储量。"""
+    actual = {
+        operation: count
+        for operation, count in skipped_calls.items()
+        if type(count) is int and count > 0
+    }
+    generations = max(0, shared_generations)
+    storage_bytes = max(0, shared_storage_bytes)
+    if actual or generations or storage_bytes:
+        record = {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "event": "reuse_savings",
+            "skipped_calls": actual,
+        }
+        if generations or storage_bytes:
+            record["shared_asset_savings"] = {
+                "generations_avoided": generations,
+                "storage_bytes_avoided": storage_bytes,
+            }
+        _write(record)
 
 
 def _write(record: dict) -> None:
@@ -97,22 +160,67 @@ def read_recent(limit: int = 100) -> list[dict]:
 
 
 def summarize(limit: int = 200) -> dict:
-    """汇总最近 limit 次调用：次数/成功率/平均延迟/按操作分组。"""
+    """汇总 AI 调用、题库匹配和提供商实际返回的 token 用量。"""
     records = read_recent(limit)
-    if not records:
-        return {"calls": 0, "success_rate": None, "avg_latency_ms": None, "by_operation": {}}
-    ok = sum(1 for r in records if r.get("ok"))
-    latencies = [r.get("latency_ms", 0) for r in records]
+    ai_records = [record for record in records if record.get("event", "ai_call") == "ai_call"]
     by_op: dict[str, dict] = {}
-    for r in records:
-        bucket = by_op.setdefault(r.get("operation", "unknown"), {"count": 0, "avg_ms": 0})
+    for record in ai_records:
+        bucket = by_op.setdefault(
+            record.get("operation", "unknown"), {"count": 0, "avg_ms": 0}
+        )
         bucket["count"] += 1
-    for op, bucket in by_op.items():
-        op_latencies = [r["latency_ms"] for r in records if r.get("operation") == op]
+    for operation, bucket in by_op.items():
+        op_latencies = [
+            record["latency_ms"]
+            for record in ai_records
+            if record.get("operation") == operation
+        ]
         bucket["avg_ms"] = round(sum(op_latencies) / len(op_latencies))
+
+    usage_records = [record["token_usage"] for record in ai_records if "token_usage" in record]
+    token_usage = None
+    if usage_records:
+        token_usage = {"calls_with_usage": len(usage_records)}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            values = [usage[key] for usage in usage_records if key in usage]
+            token_usage[key] = sum(values) if values else None
+
+    bank_records = [record for record in records if record.get("event") == "bank_match"]
+    matches = {status: 0 for status in ("exact", "similar", "new")}
+    for record in bank_records:
+        status = record.get("match_status")
+        if status in matches:
+            matches[status] += 1
+    decisions = {"accepted": 0, "new": 0}
+    for record in records:
+        if record.get("event") == "bank_decision" and record.get("decision") in decisions:
+            decisions[record["decision"]] += 1
+    skipped_calls: dict[str, int] = {}
+    shared_savings = {"generations_avoided": 0, "storage_bytes_avoided": 0}
+    for record in records:
+        if record.get("event") != "reuse_savings":
+            continue
+        for operation, count in (record.get("skipped_calls") or {}).items():
+            if type(count) is int and count > 0:
+                skipped_calls[operation] = skipped_calls.get(operation, 0) + count
+        for name in shared_savings:
+            count = (record.get("shared_asset_savings") or {}).get(name)
+            if type(count) is int and count > 0:
+                shared_savings[name] += count
+
+    ok = sum(1 for record in ai_records if record.get("ok"))
+    latencies = [record.get("latency_ms", 0) for record in ai_records]
     return {
-        "calls": len(records),
-        "success_rate": round(ok / len(records) * 100),
-        "avg_latency_ms": round(sum(latencies) / len(latencies)),
+        "calls": len(ai_records),
+        "success_rate": round(ok / len(ai_records) * 100) if ai_records else None,
+        "avg_latency_ms": round(sum(latencies) / len(latencies)) if latencies else None,
         "by_operation": by_op,
+        "question_bank": {
+            "matches": matches,
+            "skipped_ai_calls": skipped_calls,
+            "similar_decisions": decisions,
+            "corrections": {"similar_rejected": decisions["new"]},
+            "shared_asset_savings": shared_savings,
+        },
+        "token_usage": token_usage,
     }

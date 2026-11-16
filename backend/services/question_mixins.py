@@ -233,6 +233,124 @@ class CoreMixin:
 class EntryMixin:
     """错题录入：手动文本与拍照 AI 解析两条链路。"""
 
+    def reference_canonical(
+        self,
+        user_id: int,
+        canonical_id: int,
+        *,
+        private_image_path: str,
+        user_tags: list[str] | None = None,
+        match_method: str = "exact",
+        source: str = "ai",
+        source_doc: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
+        followup_question: str = "",
+        ocr_text: str | None = None,
+        image_hash: str | None = None,
+        error_category: str | None = None,
+        context=None,
+    ) -> QuestionOut:
+        private_image_path = (private_image_path or "").strip()
+        if not private_image_path:
+            raise ValueError("个人错题必须保留本次私有原图")
+        from backend.repositories.question_bank import QuestionBankRepository
+
+        with self._session() as repo:
+            bank = QuestionBankRepository(repo.session)
+            bank.acquire_write_lock()
+            canonical = bank.get_for_update(canonical_id)
+            if canonical is None:
+                raise ValueError("标准题不存在")
+            if not bank.is_reusable(canonical):
+                raise ValueError("标准题不完整，不能创建个人引用")
+            question = repo.create_reference(
+                user_id,
+                canonical=canonical,
+                private_image_path=private_image_path,
+                user_tags=user_tags,
+                match_method=match_method,
+                source=source,
+                source_doc=source_doc,
+                figure_paths=figure_paths,
+                figure_specs=figure_specs,
+                followup_question=followup_question,
+                ocr_text=ocr_text,
+                image_hash=image_hash,
+                error_category=error_category,
+                context=context,
+            )
+            if image_hash:
+                bank.add_source_fingerprint(canonical_id, image_hash)
+            return QuestionOut.from_orm_model(question)
+
+    def create_ai_reference(
+        self,
+        user_id: int,
+        *,
+        stem: str,
+        analysis: QuestionAnalysis,
+        private_image_path: str,
+        context,
+        user_tags: list[str] | None = None,
+        source: str = "ai",
+        source_doc: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
+        ocr_text: str | None = None,
+        image_hash: str | None = None,
+    ) -> QuestionOut:
+        from backend.services.question_bank import QuestionBankService
+
+        with self._user_session() as users:
+            actor = users.get_by_id(user_id)
+            if actor is None:
+                raise ValueError("用户不存在")
+        bank = QuestionBankService(
+            session_factory=self._session_factory,
+            vector_store=self.vector_store,
+        )
+        canonical = bank.create_or_upgrade(
+            stem,
+            analysis,
+            actor=actor,
+            context=context,
+        )
+        shared_paths = bank.register_shared_redraws(canonical.id, figure_specs or [])
+        saved_specs = [
+            {
+                **spec,
+                "render_path": shared_paths.get(
+                    str(spec.get("render_path") or ""), spec.get("render_path")
+                ),
+            }
+            for spec in figure_specs or []
+        ]
+        saved_paths = [
+            shared_paths.get(path, path) for path in figure_paths or []
+        ]
+        out = self.reference_canonical(
+            user_id,
+            canonical.id,
+            private_image_path=private_image_path,
+            user_tags=user_tags,
+            match_method="new",
+            source=source,
+            source_doc=source_doc,
+            figure_paths=saved_paths,
+            figure_specs=saved_specs,
+            followup_question=analysis.followup_question,
+            ocr_text=ocr_text,
+            image_hash=image_hash,
+            error_category=analysis.error_category,
+            context=context,
+        )
+        embed_text = f"{stem} {self._embeddable_text(analysis)}"
+        if ocr_text:
+            embed_text = f"{embed_text} {ocr_text}"
+        self._upsert_index(out, embed_text)
+        return out
+
     def create_manual_question(
         self,
         user_id: int,
@@ -392,44 +510,46 @@ class EntryMixin:
         from backend.services.ocr import extract_text
 
         ocr_text = extract_text(str(image_path))
-        # 优先使用聚焦小题题干；整图单题则保留切题结果中的题干。
-        # 题面 + 分隔线 + 解析的格式供复习闪卡与错题本分离展示。
+        # 优先使用聚焦小题或切题题干；无切题结果时保留完整 AI 内容作为标准题文本。
         stem = analysis.focused_sub_question.strip()
         if not stem and segments and len(segments) == 1:
             stem = str(segments[0].get("text") or "").strip()
-        if stem:
-            content = f"{stem}\n\n---\n\n{analysis.analysis}"
-        else:
-            content = analysis.analysis
-        with self._session() as repo:
-            question = repo.create(
-                user_id,
-                content_markdown=content,
-                answer=analysis.answer,
-                knowledge_points=analysis.knowledge_points,
-                tags=tags,
-                difficulty=analysis.difficulty,
-                followup_question=analysis.followup_question,
-                image_path=str(image_path),
-                figure_paths=figure_paths,
-                figure_specs=figure_specs,
-                ocr_text=ocr_text,
-                image_hash=image_hash,
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-                question_type=analysis.question_type or None,
-                chapter=analysis.chapter or None,
-                error_category=analysis.error_category,
-            )
-            out = QuestionOut.from_orm_model(question)
-
-        embed_text = self._embeddable_text(analysis)
-        if ocr_text:
-            embed_text = f"{embed_text} {ocr_text}"
-        self._upsert_index(out, embed_text)
+        if not stem:
+            stem = analysis.analysis.strip()
+        out = self.create_ai_reference(
+            user_id,
+            stem=stem,
+            analysis=analysis,
+            private_image_path=str(image_path),
+            context=context,
+            user_tags=tags,
+            figure_paths=figure_paths,
+            figure_specs=figure_specs,
+            ocr_text=ocr_text,
+            image_hash=image_hash,
+        )
         return out, analysis
+
+    def image_hash_duplicate(self, user_id: int, image_hash: str) -> EntryResult | None:
+        with self._session() as repo:
+            existing = repo.find_by_image_hash(user_id, image_hash)
+        if existing is None:
+            return None
+        out = QuestionOut.from_orm_model(existing)
+        analysis = QuestionAnalysis(
+            knowledge_points=list(out.knowledge_points or [])[:6],
+            analysis=out.content_markdown,
+            answer=out.answer,
+            difficulty=out.difficulty,  # type: ignore[arg-type]
+            tags=list(out.tags or [])[:6],
+            mistake_cause="",
+            followup_question=out.followup_question or "",
+            question_type=out.question_type or "",
+            chapter=out.chapter or "",
+            error_category=out.error_category,  # type: ignore[arg-type]
+        )
+        logger.info("重复图片 question=%s user=%s，直接复用", out.id, user_id)
+        return EntryResult(question=out, analysis=analysis, duplicated=True)
 
     def analyze_and_save_dedup(
         self,
@@ -447,24 +567,9 @@ class EntryMixin:
     ) -> EntryResult:
         """带去重的录题：同图已录入时跳过 AI 调用，直接返回既有记录。"""
         image_hash = hashlib.sha256(image_bytes).hexdigest()
-        with self._session() as repo:
-            existing = repo.find_by_image_hash(user_id, image_hash)
-        if existing is not None:
-            out = QuestionOut.from_orm_model(existing)
-            analysis = QuestionAnalysis(
-                knowledge_points=list(out.knowledge_points or [])[:6],
-                analysis=out.content_markdown,
-                answer=out.answer,
-                difficulty=out.difficulty,  # type: ignore[arg-type]
-                tags=list(out.tags or [])[:6],
-                mistake_cause="",
-                followup_question=out.followup_question or "",
-                question_type=out.question_type or "",
-                chapter=out.chapter or "",
-                error_category=out.error_category,  # type: ignore[arg-type]
-            )
-            logger.info("重复图片 question=%s user=%s，直接复用", out.id, user_id)
-            return EntryResult(question=out, analysis=analysis, duplicated=True)
+        duplicated = self.image_hash_duplicate(user_id, image_hash)
+        if duplicated is not None:
+            return duplicated
 
         out, analysis = self.analyze_and_save(
             user_id,
@@ -489,6 +594,7 @@ class EntryMixin:
         user_tags: list[str] | None = None,
         hint: str = "",
         image_path: str | None = None,
+        image_hash: str | None = None,
         segment: dict | None = None,
         subject: str = "math",
         grade: int | None = None,
@@ -526,32 +632,17 @@ class EntryMixin:
         tags = analysis.merged_tags(user_tags or [])
         # 大题只错一道小题时，以 AI 聚焦的小题题干替换整题题干入库
         stem = analysis.focused_sub_question.strip() or text.strip()
-        content = f"{stem}\n\n---\n\n{analysis.analysis}"
-
-        with self._session() as repo:
-            question = repo.create(
-                user_id,
-                content_markdown=content,
-                answer=analysis.answer,
-                knowledge_points=analysis.knowledge_points,
-                tags=tags,
-                difficulty=analysis.difficulty,
-                followup_question=analysis.followup_question,
-                image_path=image_path,
-                figure_paths=figure_paths,
-                figure_specs=figure_specs,
-                subject=subject,
-                grade=grade,
-                region=region,
-                textbook_version=textbook_version,
-                question_type=analysis.question_type or None,
-                chapter=analysis.chapter or None,
-                error_category=analysis.error_category,
-            )
-            out = QuestionOut.from_orm_model(question)
-
-        embed_text = f"{text.strip()} {self._embeddable_text(analysis)}"
-        self._upsert_index(out, embed_text)
+        out = self.create_ai_reference(
+            user_id,
+            stem=stem,
+            analysis=analysis,
+            private_image_path=image_path or "",
+            context=context,
+            user_tags=tags,
+            figure_paths=figure_paths,
+            figure_specs=figure_specs,
+            image_hash=image_hash,
+        )
         return out, analysis
 
 
@@ -1007,11 +1098,120 @@ class EditTagMixin:
                     self._reindex_owned(question)
         return changed
 
+    @staticmethod
+    def _remove_file_inside(
+        path: str,
+        roots: list[Path],
+        *,
+        ownership_root: Path | None = None,
+        owned_paths: set[Path] | None = None,
+    ) -> str | None:
+        candidate = Path(path).expanduser().resolve()
+        if not any(candidate != root and candidate.is_relative_to(root) for root in roots):
+            return f"拒绝越界文件路径: {candidate}"
+        if (
+            ownership_root is not None
+            and candidate.is_relative_to(ownership_root)
+            and candidate not in (owned_paths or set())
+        ):
+            return f"拒绝非本人文档资源: {candidate}"
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError as exc:
+            return str(exc)
+        return None
+
+    def _owned_document_paths(self, user_id: int) -> set[Path]:
+        owned: set[Path] = set()
+        with self._session() as repo:
+            jobs = repo.session.execute(
+                select(Job).where(Job.user_id == user_id, Job.type == "document_import")
+            ).scalars()
+            for job in jobs:
+                payload = job.payload or {}
+                result = job.result or {}
+                candidates = [payload.get("doc_path")]
+                candidates.extend(payload.get("image_paths") or [])
+                candidates.extend(result.get("page_images") or [])
+                for segment in result.get("segments") or []:
+                    candidates.extend(
+                        spec.get("crop_path")
+                        for spec in segment.get("figure_specs") or []
+                    )
+                owned.update(
+                    Path(path).expanduser().resolve() for path in candidates if path
+                )
+        return owned
+
+    def _record_cleanup_failure(
+        self, user_id: int, path: str, roots: list[Path], error: str
+    ) -> None:
+        with self._session() as repo:
+            repo.session.add(
+                Job(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    type="asset_cleanup",
+                    status="pending",
+                    payload={"paths": [path], "roots": [str(root) for root in roots]},
+                    error=error,
+                )
+            )
+
+    def _cleanup_files(
+        self,
+        user_id: int,
+        paths: list[str],
+        roots: list[Path],
+        *,
+        ownership_root: Path | None = None,
+        owned_paths: set[Path] | None = None,
+    ) -> None:
+        for path in paths:
+            error = self._remove_file_inside(
+                path,
+                roots,
+                ownership_root=ownership_root,
+                owned_paths=owned_paths,
+            )
+            if error is None:
+                continue
+            logger.warning("错题文件清理失败 user=%s path=%s: %s", user_id, path, error)
+            if not error.startswith("拒绝"):
+                self._record_cleanup_failure(user_id, path, roots, error)
+
     def delete_questions(self, question_ids: list[int], user_id: int) -> int:
         with self._session() as repo:
-            deleted = repo.delete_many(question_ids, user_id)
-        self.vector_store.delete_questions(question_ids)
-        return deleted
+            result = repo.delete_personal_with_orphans(question_ids, user_id)
+        document_root = self.settings.doc_upload_path.resolve()
+        private_roots = [
+            (self.settings.data_dir / "images" / f"u{user_id}").resolve(),
+            document_root,
+        ]
+        shared_roots = [
+            (self.settings.data_dir / "question-bank").resolve(),
+            (self.settings.data_dir / "figures" / "tikz").resolve(),
+        ]
+        self._cleanup_files(
+            user_id,
+            result.private_paths,
+            private_roots,
+            ownership_root=document_root,
+            owned_paths=self._owned_document_paths(user_id),
+        )
+        self._cleanup_files(user_id, result.orphan_asset_paths, shared_roots)
+        if result.question_ids:
+            self.vector_store.delete_questions(result.question_ids)
+        if result.orphan_canonical_ids:
+            from backend.services.question_bank import QuestionBankService
+
+            bank = QuestionBankService(
+                session_factory=self._session_factory,
+                vector_store=self.vector_store,
+            )
+            for canonical_id in result.orphan_canonical_ids:
+                bank.reconcile_canonical_vector(user_id, canonical_id, "delete")
+        return len(result.question_ids)
 
 
 class AdminMixin:
@@ -1117,7 +1317,9 @@ class ReviewMixin:
         """最近的复习记录（新→旧），供复习历史视图使用。"""
         with self._session() as repo:
             logs = repo.review_logs_for_user(user_id)
-            questions = {q.id: q for q in repo.list_for_user(user_id)}
+            questions = {
+                q.id: QuestionOut.from_orm_model(q) for q in repo.list_for_user(user_id)
+            }
         rows: list[dict] = []
         for log in reversed(logs[-limit:]):
             question = questions.get(log.question_id)

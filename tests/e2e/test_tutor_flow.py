@@ -1,10 +1,19 @@
 """E2E：AI 录题全流程与追问对话（mock 提供商，无需真实 API Key）。"""
 from __future__ import annotations
 
+import base64
 import os
+import socket
+import subprocess
+import sys
+import tempfile
 import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 import pytest
+from playwright.sync_api import expect
 
 pytestmark = [
     pytest.mark.e2e,
@@ -12,10 +21,154 @@ pytestmark = [
 ]
 
 BASE_URL = os.getenv("MM_E2E_BASE_URL", "http://localhost:8601")
+_CONTROLLED_WEB = """
+from backend.database import SessionLocal, init_db
+from backend.models.orm import QuestionAsset
+from backend.models.schemas import CanonicalQuestionOut, QuestionBankCandidate
+from backend.repositories.question_bank import QuestionBankRepository
+from backend.services.ai.mock import MockProvider
+from backend.services.question_bank import QuestionBankService
+
+EXACT = "【Web 受控精确题】直接复用标准解析。"
+SIMILAR_REUSE = "【Web 受控相似引用】确认后引用候选。"
+SIMILAR_NEW = "【Web 受控相似新题】明确作为新题解析。"
+NEW = "【Web 受控新题】没有匹配，执行新题解析。"
+CANDIDATE = "【Web 受控共享候选】候选标准题干。"
+original_segment = MockProvider.segment_page
+original_similar = QuestionBankService.find_similar
 
 
-def _login(page, username: str, password: str) -> None:
-    page.goto(BASE_URL)
+def segment_page(self, image_bytes, mime_type="image/png"):
+    if b"web-match-statuses" not in image_bytes:
+        return original_segment(self, image_bytes, mime_type)
+    return [
+        {"number": "1", "text": EXACT, "likely_wrong": True},
+        {"number": "2", "text": SIMILAR_REUSE, "likely_wrong": True},
+        {"number": "3", "text": SIMILAR_NEW, "likely_wrong": True},
+        {"number": "4", "text": NEW, "likely_wrong": True},
+    ]
+
+
+def find_similar(self, stem, *, context, limit=3):
+    if stem not in {SIMILAR_REUSE, SIMILAR_NEW}:
+        return original_similar(self, stem, context=context, limit=limit)
+    with SessionLocal() as session:
+        question = QuestionBankRepository(session).find_by_stem(CANDIDATE)
+        return [QuestionBankCandidate(
+            score=0.87,
+            question=CanonicalQuestionOut.from_orm_model(question),
+        )]
+
+
+MockProvider.segment_page = segment_page
+QuestionBankService.find_similar = find_similar
+init_db(seed_users=True)
+with SessionLocal() as session:
+    repository = QuestionBankRepository(session)
+    for stem in (EXACT, CANDIDATE):
+        if repository.find_by_stem(stem) is not None:
+            continue
+        question = repository.create(
+            stem_markdown=stem,
+            analysis_markdown="Web 受控标准解析摘要。",
+            answer="Web 受控答案",
+            origin="teacher",
+        )
+        session.flush()
+        shared = __import__("pathlib").Path(__import__("os").environ["DATA_DIR"]) / f"web-{question.id}.png"
+        shared.write_bytes(__import__("base64").b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        ))
+        session.add(QuestionAsset(
+            canonical_id=question.id,
+            kind="ai_redraw",
+            visibility="shared",
+            storage_path=str(shared),
+            is_preferred=True,
+        ))
+    session.commit()
+
+import app
+
+app.main()
+"""
+
+
+@pytest.fixture(scope="module")
+def controlled_web_url():
+    root = Path(__file__).resolve().parents[2]
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    with tempfile.TemporaryDirectory(prefix="mathmaster_web_match_e2e_") as data_dir:
+        script = Path(data_dir) / "controlled_app.py"
+        script.write_text(_CONTROLLED_WEB, encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "DATA_DIR": data_dir,
+                "DATABASE_URL": f"sqlite:///{Path(data_dir) / 'math_tutor.db'}",
+                "CHROMA_DIR": str(Path(data_dir) / "chroma"),
+                "CHROMA_MODEL_DIR": str(Path(data_dir) / "models"),
+                "AI_PROVIDER": "mock",
+                "RAG_ENABLED": "false",
+                "API_RATE_LIMIT_ENABLED": "false",
+                "BCRYPT_ROUNDS": "4",
+                "PYTHONPATH": str(root),
+            }
+        )
+        log_path = Path(data_dir) / "streamlit.log"
+        with log_path.open("w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "streamlit",
+                    "run",
+                    str(script),
+                    "--server.port",
+                    str(port),
+                    "--server.headless",
+                    "true",
+                ],
+                cwd=root,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                base_url = f"http://127.0.0.1:{port}"
+                deadline = time.monotonic() + 45
+                while True:
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            f"Controlled Web exited early:\n{log_path.read_text()}"
+                        )
+                    try:
+                        with urllib.request.urlopen(
+                            f"{base_url}/_stcore/health", timeout=0.5
+                        ) as response:
+                            if response.status == 200:
+                                break
+                    except (urllib.error.URLError, TimeoutError):
+                        pass
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"Controlled Web health check timed out:\n{log_path.read_text()}"
+                        )
+                    time.sleep(0.1)
+                yield base_url
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def _login(page, username: str, password: str, base_url: str = BASE_URL) -> None:
+    page.goto(base_url)
     page.wait_for_selector("input", timeout=30000)
     inputs = page.locator('input[type="text"], input[type="password"]')
     inputs.nth(0).fill(username)
@@ -77,8 +230,13 @@ def test_followup_chat_on_question(page, _sample_jpeg):
     file_input = page.locator('input[type="file"]').first
     file_input.set_input_files(_sample_jpeg)
     page.get_by_role("button", name="开始 AI 解析").first.click()
-    page.wait_for_selector("text=从图中识别出", timeout=30000)
-    page.get_by_role("button", name="确认录入").first.click()
+    page.wait_for_function(
+        """() => document.body.innerText.includes('从图中识别出')
+          || document.body.innerText.includes('已自动归档入错题本')""",
+        timeout=30000,
+    )
+    if page.locator("text=从图中识别出").first.is_visible():
+        page.get_by_role("button", name="确认录入").first.click()
     page.wait_for_selector("text=已自动归档入错题本", timeout=30000)
 
     _goto(page, "错题本", "语义搜索")
@@ -114,3 +272,49 @@ def test_followup_chat_on_question(page, _sample_jpeg):
     )
     # 发送后 st.rerun 会重新折叠面板 → 回复在 DOM 中但隐藏，attached 即可
     page.wait_for_selector("text=已收到你的追问", timeout=30000, state="attached")
+
+
+def test_controlled_match_decisions_and_reference_images(
+    page, controlled_web_url, tmp_path
+):
+    """Web 不得自动接受相似题；两种明确选择与双图展示必须在真实浏览器生效。"""
+    _login(page, "demo", "demo123", controlled_web_url)
+    _goto(page, "AI 录题", "拍照录题")
+    upload = tmp_path / "web-match.png"
+    upload.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        + b"web-match-statuses"
+    )
+    page.locator('input[type="file"]').first.set_input_files(upload)
+    page.get_by_role("button", name="开始 AI 解析").click()
+
+    page.wait_for_selector("text=从图中识别出 4 道题", timeout=30000)
+    expect(page.get_by_text("精确复用", exact=True)).to_have_count(1)
+    expect(page.get_by_text("相似待确认", exact=True)).to_have_count(2)
+    expect(page.get_by_text("新题解析", exact=True)).to_have_count(1)
+    confirm = page.get_by_role("button", name="确认录入（4 题）", exact=True)
+    expect(confirm).to_be_disabled()
+    selectors = page.locator('[data-testid="stSelectbox"]').filter(
+        has_text="相似题处理（必须明确选择）"
+    )
+    expect(selectors).to_have_count(2)
+    reuse_select = selectors.nth(0).get_by_role("combobox")
+    reuse_select.fill("引用此题")
+    reuse_select.press("ArrowDown")
+    reuse_select.press("Enter")
+    expect(confirm).to_be_disabled()
+    new_select = selectors.nth(1).get_by_role("combobox")
+    new_select.fill("作为新题解析")
+    new_select.press("ArrowDown")
+    new_select.press("Enter")
+    expect(confirm).to_be_enabled()
+    confirm.click()
+
+    page.wait_for_selector("text=已自动归档入错题本", timeout=30000)
+    expect(page.get_by_role("img", name="本次私有原图", exact=False)).to_have_count(1)
+    expect(page.get_by_role("img", name="共享 AI 重绘图", exact=False)).to_have_count(1)
+    page.locator("summary", has_text="web-match.png · 第 2 题").click()
+    expect(page.get_by_role("img", name="本次私有原图", exact=False)).to_have_count(2)
+    expect(page.get_by_role("img", name="共享 AI 重绘图", exact=False)).to_have_count(2)

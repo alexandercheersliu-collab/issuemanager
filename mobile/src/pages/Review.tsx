@@ -11,6 +11,7 @@ import type { Question } from '@/types'
 import AuthImage from '@/components/AuthImage'
 import DetectionPanel from '@/components/DetectionPanel'
 import MathText from '@/components/MathText'
+import QuestionEvidence from '@/components/QuestionEvidence'
 
 const GRADES = [
   { key: 'again', label: '😵 忘了', className: 'bg-red-500 hover:bg-red-600' },
@@ -18,16 +19,6 @@ const GRADES = [
   { key: 'good', label: '🙂 记得', className: 'bg-blue-600 hover:bg-blue-700' },
   { key: 'easy', label: '😎 秒懂', className: 'bg-green-600 hover:bg-green-700' },
 ] as const
-
-function QuestionImage({ questionId }: { questionId: number }) {
-  return (
-    <AuthImage
-      src={`/questions/${questionId}/image`}
-      alt="错题原图"
-      fallback={<p className="text-xs text-amber-700">原图暂不可用</p>}
-    />
-  )
-}
 
 export default function Review() {
   const [due, setDue] = useState<Question[] | null>(null)
@@ -171,7 +162,7 @@ export default function Review() {
                 alt={`题图 ${index + 1}`}
                 fallback={
                   question.image_path ? (
-                    <QuestionImage questionId={question.id} />
+                    <QuestionEvidence question={question} />
                   ) : (
                     <p className="text-xs text-amber-700">图形暂不可用</p>
                   )
@@ -185,7 +176,7 @@ export default function Review() {
           {question.figure_specs.length > question.figure_paths.length && (
             <div className="space-y-1">
               {question.image_path ? (
-                <QuestionImage questionId={question.id} />
+                <QuestionEvidence question={question} />
               ) : (
                 <p className="text-xs text-amber-700">图形暂不可用</p>
               )}
@@ -197,13 +188,16 @@ export default function Review() {
             </div>
           )}
 
-          {/* 题面：文字优先（Markdown + 公式渲染），原图折叠 */}
+          {/* 题面：文字优先；图片原图折叠，文档证据直接提供鉴权下载。 */}
+          {stem && question.evidence_type === 'document' && (
+            <QuestionEvidence question={question} />
+          )}
           {stem ? (
             <MathText text={stem} className="text-[1.05rem] text-slate-800" />
           ) : (
-            <QuestionImage questionId={question.id} />
+            <QuestionEvidence question={question} />
           )}
-          {question.image_path && stem && (
+          {question.image_path && stem && question.evidence_type !== 'document' && (
             <div>
               <Button
                 variant="ghost"
@@ -214,7 +208,7 @@ export default function Review() {
                 <ImageIcon className="mr-1.5 h-4 w-4" />
                 {showImage ? '收起原图' : '查看原图'}
               </Button>
-              {showImage && <QuestionImage questionId={question.id} />}
+              {showImage && <QuestionEvidence question={question} />}
             </div>
           )}
 

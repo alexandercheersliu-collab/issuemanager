@@ -47,6 +47,8 @@ class Segment:
     source: str = "rule"  # rule / visual
     figure_paths: list[str] = field(default_factory=list)
     figure_specs: list[dict] = field(default_factory=list)
+    figure_bboxes: list = field(default_factory=list)
+    figure_pages: list[int] = field(default_factory=list)
 
 
 def _cn_to_int(text: str) -> int | None:
@@ -163,6 +165,8 @@ def visual_segment_page(
                 source="visual",
                 figure_paths=figure_paths,
                 figure_specs=figure_specs,
+                figure_bboxes=list(item.get("figure_bboxes") or []),
+                figure_pages=[page_no] * len(item.get("figure_bboxes") or []),
             )
         )
     return segments
@@ -191,6 +195,8 @@ def _merge_page(
             segment.continued_from_prev = twin.continued_from_prev
             segment.figure_paths = list(twin.figure_paths)
             segment.figure_specs = list(twin.figure_specs)
+            segment.figure_bboxes = list(twin.figure_bboxes)
+            segment.figure_pages = list(twin.figure_pages)
             segment.needs_review = segment.needs_review or twin.needs_review
         return rule_segments
 
@@ -219,6 +225,8 @@ def _join_cross_page(segments: list[Segment]) -> list[Segment]:
             head.continues_to_next = segment.continues_to_next
             head.figure_paths.extend(segment.figure_paths)
             head.figure_specs.extend(segment.figure_specs)
+            head.figure_bboxes.extend(segment.figure_bboxes)
+            head.figure_pages.extend(segment.figure_pages)
             if segment.needs_review:
                 head.needs_review = True
         else:

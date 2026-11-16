@@ -13,6 +13,9 @@ export interface Question {
   id: number
   user_id: number
   image_path: string | null
+  evidence_type: 'image' | 'document' | null
+  evidence_mime_type: string | null
+  evidence_filename: string | null
   figure_paths: string[]
   figure_specs: FigureSpec[]
   content_markdown: string
@@ -55,6 +58,36 @@ export interface AnalyzeResult {
   }
 }
 
+export type MatchStatus = 'exact' | 'similar' | 'new'
+
+export interface CanonicalQuestion {
+  id: number
+  stem_markdown: string
+  normalized_stem: string
+  normalized_hash: string
+  analysis_markdown: string
+  answer: string
+  knowledge_points: string[]
+  tags: string[]
+  difficulty: string
+  question_type: string | null
+  chapter: string | null
+  subject: string
+  grade: number | null
+  region: string | null
+  textbook_version: string | null
+  origin: 'teacher' | 'student' | 'seed'
+  validation_state: string
+  published_by: number | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface QuestionBankCandidate {
+  score: number
+  question: CanonicalQuestion
+}
+
 export interface PhotoCandidate {
   id: string
   image: string
@@ -63,6 +96,9 @@ export interface PhotoCandidate {
   summary: string
   likely_wrong: boolean
   figure_bboxes: number[][]
+  match_status: MatchStatus
+  canonical_id: number | null
+  match_candidates: QuestionBankCandidate[]
 }
 
 export interface PhotoEntry {
@@ -133,6 +169,9 @@ export interface Segment {
   figure_specs: FigureSpec[]
   analysis: { knowledge_points?: string[]; difficulty?: string } | null
   error: string | null
+  match_status: MatchStatus
+  canonical_id: number | null
+  match_candidates: QuestionBankCandidate[]
 }
 
 /** 整卷导入：GET /documents/{job_id}/segments 的响应（轮询进度 + 题目列表） */

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import os
+from pathlib import Path
 
 import streamlit as st
 
@@ -10,6 +11,15 @@ from backend.models.schemas import SUBJECT_NAMES
 from frontend.common import render_markdown
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
+_RASTER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def is_raster_image_path(path: str | None) -> bool:
+    return bool(
+        path
+        and os.path.exists(path)
+        and os.path.splitext(path)[1].lower() in _RASTER_IMAGE_SUFFIXES
+    )
 
 
 def k12_meta_line(q) -> str:
@@ -51,7 +61,12 @@ def question_detail_view(q, show_hit: bool = True) -> None:
     img_col, content_col = st.columns([2, 3])
     with img_col:
         figures = [path for path in (getattr(q, "figure_paths", None) or []) if os.path.exists(path)]
-        has_page_image = bool(q.image_path and os.path.exists(q.image_path))
+        has_page_image = is_raster_image_path(q.image_path)
+        has_docx_evidence = bool(
+            q.image_path
+            and os.path.exists(q.image_path)
+            and os.path.splitext(q.image_path)[1].lower() == ".docx"
+        )
         if figures:
             render_figures(figures, alt_prefix=f"题 {q.id} 的图形")
             if has_page_image:
@@ -59,8 +74,17 @@ def question_detail_view(q, show_hit: bool = True) -> None:
                     st.image(q.image_path, width="stretch", alt=f"题 {q.id} 的完整原页")
         elif has_page_image:
             st.image(q.image_path, width="stretch", alt=f"题 {q.id} 的原图")
-        else:
+        elif not has_docx_evidence:
             st.caption("无原图（手动录入）")
+        if has_docx_evidence:
+            st.caption("原始 DOCX 已作为本次录入的私有凭证保留")
+            st.download_button(
+                "下载原始 DOCX",
+                data=Path(q.image_path).read_bytes(),
+                file_name=Path(q.image_path).name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"download_evidence_{q.id}",
+            )
         badges = " ".join(f"<span class='mm-badge'>{t}</span>" for t in q.tags)
         st.markdown(
             f"<div><span class='mm-badge mm-badge--blue'>{q.difficulty}</span>{badges}</div>",

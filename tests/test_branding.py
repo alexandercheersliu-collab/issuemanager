@@ -37,6 +37,16 @@ def test_sidebar_uses_icon_only_brand_and_material_navigation():
     assert notebook.icon == ":material/menu_book:"
 
 
+def test_sidebar_icon_loads_from_outside_project_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    at = _run_sidebar()
+
+    assert not at.exception
+    images = [image for element in at.get("image") for image in element.proto.imgs]
+    assert any(image.alt == "智能错题本图标" for image in images)
+
+
 def test_sidebar_user_card_omits_initials():
     at = _run_sidebar()
 

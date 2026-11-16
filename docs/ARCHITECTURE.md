@@ -206,3 +206,70 @@ POST /documents/{job_id}/confirm → 幂等入库；失败题跳过并展示可�
 CI 构建 `mobile/dist`，检查 8000 上 API 健康状态，再运行 8 个 390×844 Playwright Mobile 场景。测试默认另起带临时数据库和受控 MockProvider 的隔离 API，失败截图作为 artifact 上传；这些场景验证流程、契约、鉴权资源接线和兜底展示，不证明真实模型的几何识别或 TikZ 语义准确性，后者仍需单独人工验收。
 
 注册时采集学科、年级、地区和教材版本偏好，并用偏好替代默认上下文，仍是后续工作；当前没有该注册资料契约或 Mobile 表单。
+
+## 12. 共享标准题库、资源生命周期与对账
+
+### 12.1 权威模型与匹配
+
+`canonical_questions` 保存共享题干、答案、解析和 K12 元数据，`normalized_hash` 唯一；
+`questions.canonical_id` 保存学生个人引用，个人覆盖、私有证据、备注、错因和 SM-2 状态仍留在
+个人记录。`question_assets.visibility` 区分 `teacher_only` 与 `shared`，`question_bank_audit`
+记录编辑、未引用删除、admin 快照删除和学生来源孤儿清理；搜索不产生审计。
+
+SQL 是唯一权威来源。ChromaDB 的标准题向量仅以 `canonical_questions.id` 为文档 ID，负责相似
+候选召回，不能独立创建个人错题。精确哈希命中自动复用；相似命中只返回候选，Web/Mobile
+都必须提交明确选择，选择新题才进入 AI 解析。只有题干、答案、解析均非空的 canonical 才能
+精确复用或创建个人引用；不完整输入种子会被跳过，完整种子遇到同哈希不完整旧行会原地补齐。
+已有完整 canonical 仍可被后续不完整学生解析直接复用，避免生成空解析个人题。学生新题经结构
+校验后也通过 `QuestionService.create_ai_reference` 创建/复用 canonical，再建立个人引用；同哈希
+不完整行只补缺失标准字段，不改教师来源、发布状态或既有非空内容。唯一哈希竞争仍只留一行。
+个人原图哈希去重先于题库匹配，唯一 `teacher_original.content_hash` 或
+`question_source_fingerprints.content_hash` 命中先于切题；学生指纹只保存 SHA-256，不保存用户名、
+个人错题 ID 或私有图片路径。教师发布同时登记原始上传及 `doc_hash`，学生相同原文命中后仍另存私有副本。整卷在切题后立即做题干匹配，
+精确和未决相似题不调用逐题 AI 或几何重绘，明确选择新题后才执行；跨页题按每个图形框的源页
+延迟重绘，不再统一使用起始页。
+
+### 12.2 私有证据与共享资源
+
+- 每次学生引用都保存本次原图；个人错题存续期间不得省略或删除。学生主动删除本人错题时，
+  服务层清理其私有原图和手写裁剪图，其他学生的证据不受影响。
+- DOCX 没有固有页图时，每个确认批次都先保存原 DOCX 的私有证据副本，包括新题分支。同一批次
+  可共用一个副本，文件删除按存续个人记录重新计数，最后一道引用删除前不得 unlink。API 返回
+  evidence 类型/MIME/文件名；Mobile 在结果、详情和复习中使用鉴权下载，不把 DOCX 当栅格图。
+- 题库原始图片为 `teacher_only`，只在 Web 教师/admin 管理详情读取，不向学生返回 ID/URL。
+  通过校验且独立的 AI 重绘图复制到 `data/question-bank/shared/` 后注册为 `shared`，按内容哈希
+  幂等复用；fallback 私有裁剪图不共享，资源清理前会检查其他 canonical 和个人存续引用。
+- 学生来源标准题在最后一个引用删除后清理 SQL、共享 AI 图和向量；仍有引用或来源为
+  teacher/seed 时保留。admin 删除被引用题则先保存个人题干/答案/解析/元数据快照并解除引用，
+  学生原图、覆盖、复习、评论和检测记录继续存在。
+
+### 12.3 权限边界
+
+学生无题库管理权限；教师可搜索、编辑及删除未引用题；只有现有 `is_admin_username` 认定的
+admin 可预览影响并二次确认删除被引用题。确认携带预览引用数和固定短语，引用数变化即拒绝。
+标准题管理只在 Web 提供，Mobile 不增加管理入口。服务层重复校验权限，不能依赖隐藏导航。
+
+### 12.4 种子、迁移与向量对账
+
+```bash
+.venv/bin/python scripts/seed_question_bank.py   # 完整种子幂等写入 SQL，再按 SQL ID upsert 向量
+.venv/bin/python scripts/reindex_vectors.py     # 从 SQL 重建标准题及个人错题索引
+```
+
+`migrate_data.py` 采用复制 + 校验，不删除旧数据；更新 `DATA_DIR`/Chroma 配置后按输出执行上述
+命令。标准题重建后会删除 SQL 中不存在的旧 bank_id/孤儿题库向量；若个人向量与题库共用集合，
+带 `user_id` 的个人条目保留。标准题编辑/删除先提交 SQL，再同步向量。向量失败写入
+`vector_reconciliation` 待处理 Job，授权用户可按原 upsert/delete 操作重试；文件失败写
+`asset_cleanup` Job。界面保留未完成状态，不把部分失败报告为成功，也不回滚成半份 SQL 数据。
+
+### 12.5 可观测性
+
+`data/telemetry/ai_calls.jsonl` 分别记录 AI 调用、题库 `exact`/`similar`/`new` 匹配和实际复用
+节省事件。匹配查询本身不记节省；个人引用成功后，拍照按整图/切题路径分别记录实际绕过的
+`analyze_image`/`analyze_text`，文档记录 `analyze_text`；只有存在图形工作且同一
+`GeometryFigureService._tex_available()` 确认 TeX 可用时才记录 `redraw_geometry`，无 TeX 的
+裁剪兜底不算 AI 节省。聚合由 `telemetry.summarize()` 提供；这些是调用次数节省，不是估算 token。
+只有调用上下文收到提供商真实 `token_usage` 时才聚合 prompt/completion/total 实际值，否则
+`token_usage=null`。私有原图存续期间的占用不计入
+存储节省，删除后的正常清理单独看待。真实模型识别质量和真实 token 账单仍需独立人工/
+提供商验收，MockProvider 流程不构成证明。

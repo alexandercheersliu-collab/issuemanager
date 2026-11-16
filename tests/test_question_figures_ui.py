@@ -90,6 +90,24 @@ def test_question_detail_prefers_figures_and_folds_full_page(tmp_path):
     assert any("查看完整原页" in expander.label for expander in at.expander)
 
 
+def test_question_detail_downloads_docx_evidence_without_raster_rendering(tmp_path):
+    document = tmp_path / "evidence.docx"
+    document.write_bytes(b"docx-private-evidence")
+    at = _run(
+        "from backend.models.schemas import QuestionOut\n"
+        "from frontend.components import question_detail_view\n"
+        "q = QuestionOut(\n"
+        "    id=1, user_id=1, image_path=" + repr(str(document)) + ",\n"
+        "    content_markdown='题干\\n\\n---\\n\\n解析', answer='2',\n"
+        ")\n"
+        "question_detail_view(q)\n"
+    )
+
+    assert not at.exception
+    assert len(at.get("image")) == 0
+    assert at.download_button(key="download_evidence_1")
+
+
 def test_review_flashcard_displays_stem_and_current_figure(tmp_path):
     crop = _image(tmp_path / "crop.png")
     at = _run(

@@ -3,9 +3,21 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from doc_samples import make_text_pdf
 
 from backend.services.document_service import DocumentService
+
+
+@pytest.fixture(autouse=True)
+def no_uncontrolled_similar_candidates(monkeypatch):
+    from backend.services.rag import QuestionVectorStore, SimilarResult
+
+    monkeypatch.setattr(
+        QuestionVectorStore,
+        "similar_canonical_questions",
+        lambda self, *args, **kwargs: SimilarResult(),
+    )
 
 
 def _wait_job(service: DocumentService, job_id: str, user_id: int, timeout: float = 30.0) -> dict:
@@ -23,7 +35,7 @@ def test_pipeline_segments_and_analysis(question_service, student_user, tmp_path
     """文字版 PDF：双策略对齐（规则 1,2 = mock 视觉 1,2），逐题解构带 K12 字段。"""
     pdf = make_text_pdf(
         tmp_path / "exam.pdf",
-        ["1. 第一题：已知 x^2=9，求 x 的值。\n2. 第二题：计算 1+1 的结果。"],
+        ["1. 管线第一题：已知 x^2=9，求 x 的值。\n2. 管线第二题：计算 1+1 的结果。"],
     )
     service = DocumentService()
     job_id, duplicated = service.import_document(
@@ -58,7 +70,7 @@ def test_pipeline_mismatch_marks_needs_review(question_service, student_user, tm
     """规则切出 3 题 vs mock 视觉 2 题：不一致标 needs_review，解构仍完成。"""
     pdf = make_text_pdf(
         tmp_path / "exam3.pdf",
-        ["1. 题一：求 x。\n2. 题二：求 y。\n3. 题三：求 z。"],
+        ["1. 管线不一致题一：求 x。\n2. 管线不一致题二：求 y。\n3. 管线不一致题三：求 z。"],
     )
     service = DocumentService()
     job_id, _ = service.import_document(student_user.id, pdf.read_bytes(), "exam3.pdf")

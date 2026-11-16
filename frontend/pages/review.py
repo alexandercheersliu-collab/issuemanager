@@ -20,7 +20,7 @@ from frontend.common import (
     render_markdown,
     safe_truncate_math,
 )
-from frontend.components import k12_meta_line, render_figures
+from frontend.components import is_raster_image_path, k12_meta_line, render_figures
 
 _GRADE_LABELS = {"again": "😵 忘了", "hard": "😅 勉强", "good": "🙂 记得", "easy": "😎 秒懂"}
 # 评分按钮四色：忘了红 / 勉强橙 / 记得蓝 / 秒懂绿
@@ -174,7 +174,7 @@ def render_review_page(user: dict) -> None:
                 days_ago = (dt.datetime.now(dt.timezone.utc) - last).days
                 st.caption(f"上次复习：{days_ago} 天前 · 已连续记牢 {question.reps} 次")
             stem, analysis_part = split_stem_and_analysis(question.content_markdown)
-            has_image = bool(question.image_path and os.path.exists(question.image_path))
+            has_image = is_raster_image_path(question.image_path)
             figures = [
                 path for path in (question.figure_paths or []) if os.path.exists(path)
             ]

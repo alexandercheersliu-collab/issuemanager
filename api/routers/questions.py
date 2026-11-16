@@ -312,7 +312,7 @@ def question_figure(
 
 @router.get("/{question_id}/image")
 def question_image(question_id: int, user: User = Depends(get_current_user)) -> FileResponse:
-    """错题原图（移动端/第三方客户端按 id 拉取，鉴权后不落公开目录）。"""
+    """当前学生的私有原始证据；文档以附件下载，均要求鉴权。"""
     import os
 
     question = _service().get_question(question_id, user.id)
@@ -321,8 +321,14 @@ def question_image(question_id: int, user: User = Depends(get_current_user)) -> 
         or not question.image_path
         or not os.path.exists(question.image_path)
     ):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "图片不存在")
-    return FileResponse(question.image_path)
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "原始证据不存在")
+    return FileResponse(
+        question.image_path,
+        media_type=question.evidence_mime_type,
+        filename=(
+            question.evidence_filename if question.evidence_type == "document" else None
+        ),
+    )
 
 
 @router.get("/{question_id}", response_model=QuestionOut)

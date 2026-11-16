@@ -299,6 +299,42 @@ class QuestionVectorStore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("向量删除失败: %s", exc)
 
+    def delete_bank_questions(self, canonical_ids: list[str]) -> bool:
+        if not canonical_ids:
+            return True
+        collection = self._ensure_bank_collection()
+        if collection is None:
+            return not self.settings.rag_enabled
+        try:
+            collection.delete(ids=canonical_ids)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("标准题向量删除失败: %s", exc)
+            return False
+
+    def reconcile_bank_questions(self, canonical_ids: list[str]) -> bool:
+        """删除 SQL 中已不存在的题库向量，保留同集合中的个人向量。"""
+        collection = self._ensure_bank_collection()
+        if collection is None:
+            return not self.settings.rag_enabled
+        try:
+            result = collection.get(include=["metadatas"]) or {}
+            authoritative = {str(value) for value in canonical_ids}
+            stale = [
+                str(bank_id)
+                for bank_id, metadata in zip(
+                    result.get("ids") or [], result.get("metadatas") or [], strict=True
+                )
+                if str(bank_id) not in authoritative
+                and not dict(metadata or {}).get("user_id")
+            ]
+            if stale:
+                collection.delete(ids=stale)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("标准题向量对账失败: %s", exc)
+            return False
+
     # ---------- 检索 ----------
     def _is_leak(self, distance: float) -> bool:
         """防泄题：cosine 空间 distance = 1 - 相似度，相似度 ≥ 阈值视为泄题候选。"""
@@ -528,6 +564,46 @@ class QuestionVectorStore:
             return int(collection.count())
         except Exception:  # noqa: BLE001
             return 0
+
+    def similar_canonical_questions(
+        self,
+        query_text: str,
+        *,
+        constraints: SimilarConstraints | None = None,
+        top_k: int = 3,
+    ) -> SimilarResult:
+        """按标准题 SQL ID 召回候选；不过滤近重复，是否复用由上层决定。"""
+        collection = self._ensure_bank_collection()
+        if collection is None or not query_text.strip() or top_k <= 0:
+            return SimilarResult()
+        constraints = constraints or SimilarConstraints()
+        n_results = max(1, top_k * self.settings.rag_filter_oversample)
+        try:
+            result = collection.query(query_texts=[query_text], n_results=n_results) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("标准题向量检索失败: %s", exc)
+            return SimilarResult()
+
+        hits: list[RagHit] = []
+        ids = (result.get("ids") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+        documents = (result.get("documents") or [[]])[0]
+        metadatas = (result.get("metadatas") or [[]])[0]
+        for raw_id, dist, doc, meta in zip(ids, distances, documents, metadatas, strict=False):
+            metadata = dict(meta or {})
+            if not matches_constraints(metadata, constraints, level=0):
+                continue
+            hits.append(
+                RagHit(
+                    question_id=-1,
+                    distance=float(dist),
+                    snippet=(doc or "")[:200],
+                    source="bank",
+                    bank_id=str(raw_id),
+                    metadata=metadata,
+                )
+            )
+        return SimilarResult(hits=hits)
 
     def similar_from_bank(
         self,

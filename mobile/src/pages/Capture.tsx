@@ -9,7 +9,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api, ApiError } from '@/lib/api'
-import type { PhotoJob } from '@/types'
+import type { PhotoCandidate, PhotoJob } from '@/types'
+import AuthImage from '@/components/AuthImage'
+import MathText from '@/components/MathText'
+import QuestionEvidence from '@/components/QuestionEvidence'
 import BatchImport, { peekPendingJob } from '@/pages/BatchImport'
 
 const PHOTO_JOB_KEY = 'mm_photo_job'
@@ -28,6 +31,7 @@ export default function Capture({ onDone }: { onDone: () => void }) {
   const [jobId, setJobId] = useState<string | null>(() => localStorage.getItem(PHOTO_JOB_KEY))
   const [job, setJob] = useState<PhotoJob | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [matchChoices, setMatchChoices] = useState<Record<string, number | null>>({})
   const [pollFailures, setPollFailures] = useState(0)
 
   const applyJob = useCallback((next: PhotoJob) => {
@@ -37,6 +41,7 @@ export default function Capture({ onDone }: { onDone: () => void }) {
       setSelected(
         new Set(next.candidates.filter((candidate) => candidate.likely_wrong).map((c) => c.id)),
       )
+      setMatchChoices({})
     }
     if (next.phase === 'done') localStorage.removeItem(PHOTO_JOB_KEY)
   }, [])
@@ -99,6 +104,7 @@ export default function Capture({ onDone }: { onDone: () => void }) {
       const res = await api.createPhotoJob(files, { tags: tags.trim(), hint: hint.trim() })
       localStorage.setItem(PHOTO_JOB_KEY, res.job_id)
       setSelected(new Set())
+      setMatchChoices({})
       setJob(null)
       setJobId(res.job_id)
     } catch (err) {
@@ -112,7 +118,17 @@ export default function Capture({ onDone }: { onDone: () => void }) {
     if (!jobId) return
     setSubmitting(true)
     try {
-      applyJob(await api.confirmPhotoJob(jobId, Array.from(selected)))
+      const choices: Record<string, number | null> = {}
+      job?.candidates.forEach((candidate) => {
+        if (
+          selected.has(candidate.id) &&
+          candidate.match_status === 'similar' &&
+          Object.prototype.hasOwnProperty.call(matchChoices, candidate.id)
+        ) {
+          choices[candidate.id] = matchChoices[candidate.id]
+        }
+      })
+      applyJob(await api.confirmPhotoJob(jobId, Array.from(selected), choices))
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : '确认失败，请重试')
     } finally {
@@ -129,11 +145,16 @@ export default function Capture({ onDone }: { onDone: () => void }) {
     })
   }
 
+  function chooseMatch(candidateId: string, canonicalId: number | null) {
+    setMatchChoices((current) => ({ ...current, [candidateId]: canonicalId }))
+  }
+
   function reset() {
     localStorage.removeItem(PHOTO_JOB_KEY)
     setJobId(null)
     setJob(null)
     setSelected(new Set())
+    setMatchChoices({})
     setPollFailures(0)
     pick([])
     setTags('')
@@ -183,6 +204,29 @@ export default function Capture({ onDone }: { onDone: () => void }) {
                 ))}
               </div>
             )}
+            <div className="space-y-3 text-left">
+              {job.entries.map((entry) => {
+                const question = entry.question
+                if (!question || entry.error) return null
+                return (
+                  <div key={entry.name} className="space-y-2 rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs font-medium text-slate-500">{entry.name}</p>
+                    <MathText text={question.stem} className="text-sm text-slate-800" />
+                    <QuestionEvidence
+                      question={question}
+                      imageAlt={`本次私有原图：${entry.name}`}
+                    />
+                    {question.figure_paths.map((_, index) => (
+                      <AuthImage
+                        key={index}
+                        src={`/questions/${question.id}/figures/${index}`}
+                        alt={`共享 AI 重绘图 ${index + 1}：${entry.name}`}
+                      />
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
             <div className="flex gap-3 pt-2">
               <Button variant="outline" className="flex-1" onClick={reset}>
                 再录一道
@@ -215,6 +259,12 @@ export default function Capture({ onDone }: { onDone: () => void }) {
   }
 
   if (job?.phase === 'review') {
+    const unresolvedSimilar = job.candidates.some(
+      (candidate) =>
+        selected.has(candidate.id) &&
+        candidate.match_status === 'similar' &&
+        !Object.prototype.hasOwnProperty.call(matchChoices, candidate.id),
+    )
     return (
       <div className="px-4 pb-32 pt-6">
         <header className="mb-4">
@@ -238,11 +288,12 @@ export default function Capture({ onDone }: { onDone: () => void }) {
                   onCheckedChange={(checked) => toggleCandidate(candidate.id, checked === true)}
                   aria-label={`选择 ${candidate.image} 第 ${candidate.number} 题`}
                 />
-                <div className="min-w-0 flex-1 space-y-1.5">
+                <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                     <span>
                       {candidate.image} · 第 {candidate.number} 题
                     </span>
+                    <MatchStatusBadge status={candidate.match_status} />
                     {candidate.likely_wrong && (
                       <Badge variant="secondary" className="bg-red-50 text-red-700">
                         疑似做错
@@ -250,6 +301,14 @@ export default function Capture({ onDone }: { onDone: () => void }) {
                     )}
                   </div>
                   <p className="text-sm leading-relaxed text-slate-800">{candidate.summary}</p>
+                  {candidate.match_status === 'similar' && selected.has(candidate.id) && (
+                    <SimilarMatchChoices
+                      candidate={candidate}
+                      hasChoice={Object.prototype.hasOwnProperty.call(matchChoices, candidate.id)}
+                      choice={matchChoices[candidate.id]}
+                      onChoose={(canonicalId) => chooseMatch(candidate.id, canonicalId)}
+                    />
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -259,7 +318,11 @@ export default function Capture({ onDone }: { onDone: () => void }) {
           <Button
             className="w-full"
             size="lg"
-            disabled={submitting || (selected.size === 0 && job.fallback_count === 0)}
+            disabled={
+              submitting ||
+              unresolvedSimilar ||
+              (selected.size === 0 && job.fallback_count === 0)
+            }
             onClick={confirm}
           >
             {submitting ? (
@@ -397,6 +460,72 @@ export default function Capture({ onDone }: { onDone: () => void }) {
         <FileStack className="h-4 w-4" />
         拍的是一整张试卷？试试整卷导入 →
       </button>
+    </div>
+  )
+}
+
+function MatchStatusBadge({ status }: { status: PhotoCandidate['match_status'] }) {
+  if (status === 'exact') {
+    return <Badge className="bg-blue-50 text-blue-700">精确复用</Badge>
+  }
+  if (status === 'similar') {
+    return <Badge className="bg-amber-50 text-amber-700">相似待确认</Badge>
+  }
+  return <Badge className="bg-teal-50 text-teal-700">新题解析</Badge>
+}
+
+function SimilarMatchChoices({
+  candidate,
+  hasChoice,
+  choice,
+  onChoose,
+}: {
+  candidate: PhotoCandidate
+  hasChoice: boolean
+  choice: number | null | undefined
+  onChoose: (canonicalId: number | null) => void
+}) {
+  return (
+    <div className="space-y-2 rounded-lg bg-amber-50/60 p-2.5">
+      <p className="text-xs text-amber-700">请核对候选；未选择前不会复用或解析。</p>
+      {candidate.match_candidates.map(({ question, score }) => (
+        <div key={question.id} className="space-y-2 rounded-md bg-white p-2.5">
+          <MathText text={question.stem_markdown} className="text-xs text-slate-800" />
+          <p className="text-xs text-slate-500">
+            {question.origin === 'teacher'
+              ? '教师发布'
+              : question.origin === 'student'
+                ? '学生机器校验'
+                : '预置题库'}{' '}
+            · 相似度 {Math.round(score * 100)}%
+          </p>
+          {question.analysis_markdown && (
+            <p className="line-clamp-2 text-xs text-slate-500">
+              解析摘要：{question.analysis_markdown}
+            </p>
+          )}
+          <Button
+            type="button"
+            size="sm"
+            variant={hasChoice && choice === question.id ? 'default' : 'outline'}
+            className="w-full"
+            aria-pressed={hasChoice && choice === question.id}
+            onClick={() => onChoose(question.id)}
+          >
+            引用此题
+          </Button>
+        </div>
+      ))}
+      <Button
+        type="button"
+        size="sm"
+        variant={hasChoice && choice === null ? 'default' : 'outline'}
+        className="w-full"
+        aria-pressed={hasChoice && choice === null}
+        onClick={() => onChoose(null)}
+      >
+        作为新题解析
+      </Button>
     </div>
   )
 }

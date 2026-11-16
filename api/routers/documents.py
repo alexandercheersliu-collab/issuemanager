@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
@@ -141,13 +141,32 @@ def get_segments(job_id: str, user: User = Depends(get_current_user)) -> dict:
     }
 
 
+class ConfirmImportRequest(BaseModel):
+    publish_to_bank: bool = False
+    question_type_overrides: dict[int, str] = Field(default_factory=dict)
+    match_choices: dict[int, int | None] = Field(default_factory=dict)
+
+
 @router.post("/{job_id}/confirm")
-def confirm_import(job_id: str, user: User = Depends(get_current_user)) -> dict:
-    """确认入库：解构成功的题批量写入错题本（幂等，重复确认返回既有结果）。"""
+def confirm_import(
+    job_id: str,
+    body: ConfirmImportRequest | None = None,
+    user: User = Depends(get_current_user),
+) -> dict:
+    """确认入库或教师预发布；相似题必须按 segment index 明确选择。"""
+    body = body or ConfirmImportRequest()
     try:
-        return _service().confirm_import(job_id, user.id)
+        return _service().confirm_import(
+            job_id,
+            user.id,
+            publish_to_bank=body.publish_to_bank,
+            question_type_overrides=body.question_type_overrides,
+            match_choices=body.match_choices,
+        )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 

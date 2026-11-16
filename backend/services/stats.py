@@ -269,6 +269,6 @@ def mastery_trend(
             points.append({"date": day.strftime("%m-%d"), "mastery": 0})
             continue
         stats = build_tag_stats(qs, day_logs)
-        avg = sum(s.mastery for s in stats) / len(stats)
+        avg = sum(s.mastery for s in stats) / len(stats) if stats else 0.0
         points.append({"date": day.strftime("%m-%d"), "mastery": round(avg * 100)})
     return points

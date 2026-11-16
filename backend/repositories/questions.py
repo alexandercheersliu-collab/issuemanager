@@ -5,12 +5,27 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass, field
 
-from sqlalchemy import String, delete, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import String, case, delete, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
-from backend.models.orm import Question, ReviewLog
+from backend.models.orm import CanonicalQuestion, Question, ReviewLog
 from backend.models.schemas import QuestionOut
+
+
+def _question_query():
+    return select(Question).options(
+        selectinload(Question.canonical).selectinload(CanonicalQuestion.assets)
+    )
+
+
+@dataclass
+class PersonalDeleteResult:
+    question_ids: list[int] = field(default_factory=list)
+    private_paths: list[str] = field(default_factory=list)
+    orphan_canonical_ids: list[int] = field(default_factory=list)
+    orphan_asset_paths: list[str] = field(default_factory=list)
 
 
 class QuestionRepository:
@@ -70,6 +85,70 @@ class QuestionRepository:
         self.session.flush()
         return question
 
+    def create_reference(
+        self,
+        user_id: int,
+        *,
+        canonical: CanonicalQuestion,
+        private_image_path: str,
+        user_tags: list[str] | None = None,
+        match_method: str = "exact",
+        source: str = "ai",
+        source_doc: str | None = None,
+        figure_paths: list[str] | None = None,
+        figure_specs: list[dict] | None = None,
+        followup_question: str = "",
+        ocr_text: str | None = None,
+        image_hash: str | None = None,
+        error_category: str | None = None,
+        context=None,
+    ) -> Question:
+        metadata_snapshot = {
+            name: getattr(canonical, name)
+            for name in (
+                "knowledge_points",
+                "tags",
+                "difficulty",
+                "question_type",
+                "chapter",
+                "subject",
+                "grade",
+                "region",
+                "textbook_version",
+            )
+        }
+        question = Question(
+            user_id=user_id,
+            canonical=canonical,
+            private_image_path=private_image_path,
+            image_path=private_image_path,
+            stem_snapshot=canonical.stem_markdown,
+            analysis_snapshot=canonical.analysis_markdown,
+            answer_snapshot=canonical.answer,
+            metadata_snapshot=metadata_snapshot,
+            match_method=match_method,
+            content_markdown="",
+            answer="",
+            knowledge_points=[],
+            tags=list(user_tags or []),
+            difficulty="medium",
+            subject=(context.subject if context is not None else "") or "",
+            grade=context.grade if context is not None else None,
+            region=context.region if context is not None else None,
+            textbook_version=context.textbook_version if context is not None else None,
+            source=source,
+            source_doc=source_doc or None,
+            figure_paths=figure_paths or [],
+            figure_specs=figure_specs or [],
+            followup_question=followup_question or None,
+            ocr_text=ocr_text or None,
+            image_hash=image_hash,
+            error_category=error_category,
+        )
+        self.session.add(question)
+        self.session.flush()
+        return question
+
     def update(
         self,
         question_id: int,
@@ -91,10 +170,24 @@ class QuestionRepository:
         question = self._get_owned(question_id, user_id)
         if question is None:
             return None
+        has_shared_content = question.canonical_id is not None or any(
+            getattr(question, name, None) is not None
+            for name in ("stem_snapshot", "analysis_snapshot", "answer_snapshot")
+        )
         if content_markdown is not None:
-            question.content_markdown = content_markdown
+            if has_shared_content:
+                from backend.services.question_content import split_stem_and_analysis
+
+                stem, analysis = split_stem_and_analysis(content_markdown)
+                question.stem_override = stem
+                question.analysis_override = analysis or ""
+            else:
+                question.content_markdown = content_markdown
         if answer is not None:
-            question.answer = answer
+            if has_shared_content:
+                question.answer_override = answer
+            else:
+                question.answer = answer
         if tags is not None:
             question.tags = tags
         if knowledge_points is not None:
@@ -147,6 +240,66 @@ class QuestionRepository:
         )
         return int(result.rowcount or 0)
 
+    def delete_personal_with_orphans(
+        self, question_ids: list[int], user_id: int
+    ) -> PersonalDeleteResult:
+        if not question_ids:
+            return PersonalDeleteResult()
+        if self.session.get_bind().dialect.name == "sqlite":
+            # SQLite 忽略 FOR UPDATE；零行写入先取得写锁，序列化删除与引用计数。
+            self.session.execute(delete(Question).where(False))
+        questions = list(
+            self.session.execute(
+                _question_query()
+                .where(Question.id.in_(question_ids), Question.user_id == user_id)
+                .order_by(Question.id)
+                .with_for_update()
+            ).scalars()
+        )
+        if not questions:
+            return PersonalDeleteResult()
+
+        from backend.repositories.question_bank import QuestionBankRepository
+
+        canonical_ids = sorted(
+            {q.canonical_id for q in questions if q.canonical_id is not None}
+        )
+        bank = QuestionBankRepository(self.session)
+        bank.lock_many(canonical_ids)
+        result = PersonalDeleteResult(question_ids=[q.id for q in questions])
+        for question in questions:
+            candidates = [question.private_image_path or question.image_path]
+            candidates.extend(
+                str(spec.get("crop_path"))
+                for spec in question.figure_specs or []
+                if spec.get("crop_path")
+            )
+            for path in candidates:
+                if path and path not in result.private_paths:
+                    result.private_paths.append(path)
+            self.session.delete(question)
+        self.session.flush()
+
+        result.private_paths = [
+            path
+            for path in result.private_paths
+            if self.session.execute(
+                select(func.count(Question.id)).where(
+                    or_(
+                        Question.private_image_path == path,
+                        Question.image_path == path,
+                    )
+                )
+            ).scalar_one()
+            == 0
+        ]
+        for canonical_id in canonical_ids:
+            shared_paths = bank.delete_student_orphan(canonical_id)
+            if shared_paths is not None:
+                result.orphan_canonical_ids.append(canonical_id)
+                result.orphan_asset_paths.extend(shared_paths)
+        return result
+
     # ---------- 后台管理（全系统口径，调用方负责 admin 鉴权） ----------
     def subject_counts_all(self) -> list[tuple[str, int]]:
         """全系统各学科错题数（跨用户），按数量降序。"""
@@ -180,7 +333,7 @@ class QuestionRepository:
     def find_by_image_hash(self, user_id: int, image_hash: str) -> Question | None:
         """按原图哈希查找用户的既有错题（上传去重用）。"""
         return self.session.execute(
-            select(Question)
+            _question_query()
             .where(Question.user_id == user_id, Question.image_hash == image_hash)
             .order_by(Question.created_at.desc())
         ).scalars().first()
@@ -191,7 +344,7 @@ class QuestionRepository:
             return []
         return list(
             self.session.execute(
-                select(Question).where(Question.id.in_(ids))
+                _question_query().where(Question.id.in_(ids))
             ).scalars()
         )
 
@@ -217,19 +370,52 @@ class QuestionRepository:
         source_doc 按「文档名」前缀匹配（落库格式为 文档名#页码），
         LIKE 通配符先转义，避免文档名含 %/_ 时误匹配。
         """
-        stmt = select(Question).order_by(Question.created_at.desc())
+        stmt = (
+            _question_query()
+            .outerjoin(CanonicalQuestion, Question.canonical_id == CanonicalQuestion.id)
+            .order_by(Question.created_at.desc())
+        )
         if not include_others:
             stmt = stmt.where(Question.user_id == user_id)
         if tag:
             stmt = stmt.where(Question.tags.cast(String).contains(f'"{tag}"'))
         if subject:
-            stmt = stmt.where(Question.subject == subject)
+            stmt = stmt.where(
+                func.coalesce(
+                    func.nullif(Question.subject, ""),
+                    CanonicalQuestion.subject,
+                    func.json_extract(Question.metadata_snapshot, "$.subject"),
+                    Question.subject,
+                )
+                == subject
+            )
         if grade is not None:
-            stmt = stmt.where(Question.grade == grade)
+            stmt = stmt.where(
+                func.coalesce(
+                    Question.grade,
+                    CanonicalQuestion.grade,
+                    func.json_extract(Question.metadata_snapshot, "$.grade"),
+                )
+                == grade
+            )
         if region:
-            stmt = stmt.where(Question.region == region)
+            stmt = stmt.where(
+                func.coalesce(
+                    Question.region,
+                    CanonicalQuestion.region,
+                    func.json_extract(Question.metadata_snapshot, "$.region"),
+                )
+                == region
+            )
         if textbook_version:
-            stmt = stmt.where(Question.textbook_version == textbook_version)
+            stmt = stmt.where(
+                func.coalesce(
+                    Question.textbook_version,
+                    CanonicalQuestion.textbook_version,
+                    func.json_extract(Question.metadata_snapshot, "$.textbook_version"),
+                )
+                == textbook_version
+            )
         if error_category:
             stmt = stmt.where(Question.error_category == error_category)
         if source:
@@ -241,13 +427,39 @@ class QuestionRepository:
             stmt = stmt.where(Question.source_doc.like(f"{escaped}#%", escape="\\"))
         if keyword:
             like = f"%{keyword}%"
+            effective_stem = case(
+                (Question.stem_override.is_not(None), Question.stem_override),
+                (CanonicalQuestion.id.is_not(None), CanonicalQuestion.stem_markdown),
+                else_=func.coalesce(Question.stem_snapshot, Question.content_markdown),
+            )
+            effective_analysis = case(
+                (Question.analysis_override.is_not(None), Question.analysis_override),
+                (CanonicalQuestion.id.is_not(None), CanonicalQuestion.analysis_markdown),
+                else_=Question.analysis_snapshot,
+            )
+            effective_answer = case(
+                (Question.answer_override.is_not(None), Question.answer_override),
+                (CanonicalQuestion.id.is_not(None), CanonicalQuestion.answer),
+                else_=func.coalesce(Question.answer_snapshot, Question.answer),
+            )
+            effective_knowledge_points = case(
+                (
+                    func.json_array_length(Question.knowledge_points) > 0,
+                    Question.knowledge_points,
+                ),
+                (CanonicalQuestion.id.is_not(None), CanonicalQuestion.knowledge_points),
+                else_=func.json_extract(
+                    Question.metadata_snapshot, "$.knowledge_points"
+                ),
+            )
             stmt = stmt.where(
                 or_(
-                    Question.content_markdown.ilike(like),
-                    Question.answer.ilike(like),
+                    effective_stem.ilike(like),
+                    effective_analysis.ilike(like),
+                    effective_answer.ilike(like),
                     Question.ocr_text.ilike(like),
                     Question.tags.cast(String).ilike(like),
-                    Question.knowledge_points.cast(String).ilike(like),
+                    effective_knowledge_points.cast(String).ilike(like),
                 )
             )
         return stmt
@@ -324,7 +536,7 @@ class QuestionRepository:
         """到期错题（SQL 下推）；新题 due_at 为 NULL 视为立即到期。"""
         now = now or dt.datetime.now(dt.timezone.utc)
         stmt = (
-            select(Question)
+            _question_query()
             .where(Question.user_id == user_id)
             .where(or_(Question.due_at.is_(None), Question.due_at <= now))
             .order_by(Question.created_at.desc())
@@ -389,7 +601,7 @@ class QuestionRepository:
     # ---------- 内部 ----------
     def _get_owned(self, question_id: int, user_id: int) -> Question | None:
         return self.session.execute(
-            select(Question).where(Question.id == question_id, Question.user_id == user_id)
+            _question_query().where(Question.id == question_id, Question.user_id == user_id)
         ).scalar_one_or_none()
 
 
