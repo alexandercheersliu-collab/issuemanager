@@ -8,6 +8,7 @@ validate_upload_selection）便于单测。
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 
@@ -52,12 +53,16 @@ def validate_upload_selection(names: list[str]) -> str | None:
 
 
 def summarize_segments(segments: list[dict]) -> dict:
-    """切题结果统计：总数 / 待校对 / 解构失败 / 可入库（有解构结果）。"""
+    """新题需有解构结果；精确命中和待选相似题均可进入确认流程。"""
     return {
         "total": len(segments),
         "needs_review": sum(1 for s in segments if s.get("needs_review")),
         "failed": sum(1 for s in segments if s.get("error")),
-        "importable": sum(1 for s in segments if s.get("analysis")),
+        "importable": sum(
+            1
+            for s in segments
+            if s.get("analysis") or s.get("match_status") in {"exact", "similar"}
+        ),
     }
 
 
@@ -240,20 +245,64 @@ def _render_review(
         st.warning("未切出任何题目，请检查文档内容后重新上传。")
         return
 
+    job_id = _job_id(job)
+    publish_to_bank = False
+    question_types: list[str] = []
+    if user["role"] == "teacher":
+        publish_to_bank = st.checkbox(
+            "发布到共享题库",
+            key=f"import_doc_publish_{job_id}",
+            help="仅创建或升级标准题，不在教师个人错题本生成记录。",
+        )
+        if publish_to_bank:
+            from backend.services.question_bank import QuestionBankService
+
+            question_types = QuestionBankService().list_question_types(
+                payload.get("subject") or "math"
+            )
+
     page_images = result.get("page_images") or []
+    question_type_overrides: dict[int, str] = {}
+    match_choices: dict[int, int | None] = {}
     for index, segment in enumerate(segments):
-        _render_segment(service, user, _job_id(job), index, segment, page_images)
+        question_type, choice_ready, match_choice = _render_segment(
+            service,
+            user,
+            job_id,
+            index,
+            segment,
+            page_images,
+            publish_to_bank=publish_to_bank,
+            question_types=question_types,
+        )
+        if question_type is not None:
+            question_type_overrides[index] = question_type
+        if choice_ready:
+            match_choices[index] = match_choice
 
     st.divider()
     if summary["needs_review"]:
-        st.warning(f"还有 {summary['needs_review']} 题待校对，确认入库时会跳过未解构的题。")
+        st.warning(f"还有 {summary['needs_review']} 题待校对；未完成解析的新题会被跳过。")
+    action = "确认发布" if publish_to_bank else "确认入库"
     if st.button(
-        f"确认入库（{summary['importable']} 题可入库）",
+        f"{action}（{summary['importable']} 题可处理）",
+        key=f"import_doc_confirm_{job_id}",
         type="primary",
         width="stretch",
         disabled=summary["importable"] == 0,
     ):
-        outcome = service.confirm_import(_job_id(job), user["id"], context=context)
+        try:
+            outcome = service.confirm_import(
+                job_id,
+                user["id"],
+                context=context,
+                publish_to_bank=publish_to_bank,
+                question_type_overrides=question_type_overrides,
+                match_choices=match_choices,
+            )
+        except (PermissionError, ValueError) as exc:
+            st.error(str(exc))
+            return
         st.session_state["import_doc_outcome"] = outcome
         st.rerun()
 
@@ -261,11 +310,21 @@ def _render_review(
 def _render_confirm_result(result: dict) -> None:
     imported = result.get("imported", 0)
     skipped = result.get("skipped", [])
-    st.success(f"已确认入库 {imported} 题（source=document，可按来源文档筛选）")
+    published = result.get("published_to_bank", False)
+    st.success(
+        f"已发布 {imported} 题到共享题库"
+        if published
+        else f"已确认入库 {imported} 题（source=document，可按来源文档筛选）"
+    )
     if skipped:
         with st.expander(f"跳过 {len(skipped)} 题及原因", expanded=True):
             for item in skipped:
                 st.warning(f"题 {item.get('number')}: {item.get('reason')}")
+    if published:
+        if st.button("导入新文档", width="stretch"):
+            st.session_state.pop("import_doc_job_id", None)
+            st.rerun()
+        return
     col_nb, col_new = st.columns(2)
     with col_nb:
         if st.button("去错题本查看", type="primary", width="stretch"):
@@ -287,7 +346,16 @@ def _render_segment(
     index: int,
     segment: dict,
     page_images: list[str | None],
-) -> None:
+    *,
+    publish_to_bank: bool = False,
+    question_types: list[str] | None = None,
+) -> tuple[str | None, bool, int | None]:
+    question_type_override = None
+    choice_ready = False
+    match_choice = None
+    segment_key = hashlib.sha256(
+        str(segment.get("text") or "").encode("utf-8")
+    ).hexdigest()[:12]
     expanded = bool(segment.get("needs_review"))
     with st.expander(segment_headline(segment), expanded=expanded):
         if segment.get("error"):
@@ -299,6 +367,48 @@ def _render_segment(
             else f"第 {page_start}-{page_end} 页（跨页拼接）"
         )
         st.caption(f"{page_label} · 切题来源：{segment.get('source', '-')}")
+        if publish_to_bank and segment.get("analysis"):
+            ai_type = (segment.get("analysis") or {}).get("question_type") or ""
+            available_types = list(dict.fromkeys([*(question_types or []), ai_type]))
+            available_types = [name for name in available_types if name]
+            selected_type = st.selectbox(
+                "发布题型",
+                ["沿用 AI 题型", *available_types],
+                index=0,
+                key=f"import_doc_type_{job_id}_{index}_{segment_key}",
+            )
+            if selected_type != "沿用 AI 题型":
+                question_type_override = selected_type
+        match_status = segment.get("match_status") or "new"
+        if match_status == "exact":
+            st.caption("精确复用：已匹配共享标准题")
+        elif match_status == "similar":
+            candidates = segment.get("match_candidates") or []
+            candidate_ids = [
+                item.get("question", {}).get("id")
+                for item in candidates
+                if item.get("question", {}).get("id") is not None
+            ]
+            labels = {"new": "作为新题处理"}
+            labels.update(
+                {
+                    item["question"]["id"]: "使用标准题："
+                    + safe_truncate_math(item["question"].get("stem_markdown") or "", 36)
+                    for item in candidates
+                    if item.get("question", {}).get("id") is not None
+                }
+            )
+            selected_choice = st.selectbox(
+                "相似题处理（必须明确选择）",
+                ["new", *candidate_ids],
+                index=None,
+                placeholder="请选择引用候选或作为新题",
+                format_func=lambda value: labels[value],
+                key=f"import_doc_match_{job_id}_{index}_{segment_key}",
+            )
+            if selected_choice is not None:
+                choice_ready = True
+                match_choice = None if selected_choice == "new" else selected_choice
 
         # 裁剪图保留当前题所需图形；完整原页用于按需回溯
         figures = [
@@ -335,6 +445,7 @@ def _render_segment(
         # 校对表单整体默认折叠，页面以渲染预览为主；解构失败的题需手动补字段，默认展开
         with st.expander("✏️ 编辑校对（LaTeX 源码）", expanded=bool(segment.get("error"))):
             _render_segment_edit_form(service, user, job_id, index, segment)
+    return question_type_override, choice_ready, match_choice
 
 
 def _render_figure_review(

@@ -281,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  DATA_DIR={new_data_dir}")
     print(f"  CHROMA_DIR={chroma_dst}")
     print(f"  CHROMA_MODEL_DIR={model_dst}")
+    print("SQL 是标准题权威来源；更新配置后重建种子与向量索引：")
+    print("  .venv/bin/python scripts/seed_question_bank.py")
+    print("  .venv/bin/python scripts/reindex_vectors.py")
     print("确认应用在新路径运行正常后，可手工清理旧目录。")
     return 0 if all_ok else 1
 

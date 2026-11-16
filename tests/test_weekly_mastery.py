@@ -94,3 +94,15 @@ def test_mastery_trend_skips_days_before_creation():
     trend = mastery_trend(questions, [], days=5, today=_TODAY)
     # 9/8 之前的日期无错题，不产出点位
     assert all(p["date"] in {"09-08", "09-09"} for p in trend)
+
+
+def test_mastery_trend_treats_reviewed_untagged_questions_as_zero():
+    questions = [_Q(1, dt.datetime(2026, 9, 8, 9, 0), [])]
+    logs = [_Log(1, dt.datetime(2026, 9, 9, 9, 0), "good")]
+
+    trend = mastery_trend(questions, logs, days=3, today=_TODAY)
+
+    assert trend == [
+        {"date": "09-08", "mastery": 0},
+        {"date": "09-09", "mastery": 0},
+    ]

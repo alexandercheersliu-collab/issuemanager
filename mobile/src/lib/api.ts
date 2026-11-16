@@ -122,11 +122,15 @@ export const api = {
 
   getPhotoJob: (jobId: string) => request<PhotoJob>(`/photo-entry/jobs/${jobId}`),
 
-  confirmPhotoJob: (jobId: string, candidateIds: string[]) =>
+  confirmPhotoJob: (
+    jobId: string,
+    candidateIds: string[],
+    matchChoices: Record<string, number | null>,
+  ) =>
     request<PhotoJob>(`/photo-entry/jobs/${jobId}/confirm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ candidate_ids: candidateIds }),
+      body: JSON.stringify({ candidate_ids: candidateIds, match_choices: matchChoices }),
     }),
 
   dashboard: () => request<DashboardStats>('/stats/dashboard'),
@@ -155,8 +159,12 @@ export const api = {
   getDocumentSegments: (jobId: string) =>
     request<SegmentsResult>(`/documents/${jobId}/segments`),
 
-  confirmImport: (jobId: string) =>
-    request<ConfirmResult>(`/documents/${jobId}/confirm`, { method: 'POST' }),
+  confirmImport: (jobId: string, matchChoices: Record<number, number | null>) =>
+    request<ConfirmResult>(`/documents/${jobId}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ match_choices: matchChoices }),
+    }),
 
   deleteSegment: (jobId: string, index: number) =>
     request<{ deleted: number }>(`/documents/${jobId}/segments/${index}`, { method: 'DELETE' }),

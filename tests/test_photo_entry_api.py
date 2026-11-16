@@ -182,3 +182,83 @@ def test_invalid_grade_is_rejected_before_job_creation(client, headers, db_sessi
 
     assert response.status_code == 422, response.text
     assert db_session.query(Job).filter_by(type="photo_entry").count() == before
+
+
+def test_similar_confirmation_requires_an_offered_canonical_or_explicit_new_choice(
+    client, headers, db_session, monkeypatch
+):
+    import uuid
+
+    from backend.repositories.question_bank import QuestionBankRepository
+    from backend.services.ai.mock import MockProvider
+    from backend.services.question_identity import normalize_stem
+    from backend.services.rag import RagHit, SimilarResult
+
+    stem = f"API 未精确存在的相似题干-{uuid.uuid4().hex}"
+    monkeypatch.setattr(
+        MockProvider,
+        "segment_page",
+        lambda self, *args, **kwargs: [
+            {"number": "1", "text": stem},
+            {"number": "2", "text": f"另一道题-{uuid.uuid4().hex}"},
+        ],
+    )
+    canonical = QuestionBankRepository(db_session).create(
+        stem_markdown=f"API 相似候选标准题-{uuid.uuid4().hex}",
+        analysis_markdown="标准解析：计算判别式并检查参数范围。",
+        answer="标准答案",
+        origin="teacher",
+    )
+    db_session.commit()
+
+    class Vectors:
+        def similar_canonical_questions(self, query_text, *, constraints, top_k):
+            hits = []
+            if query_text == normalize_stem(stem):
+                hits = [
+                    RagHit(
+                        question_id=-1,
+                        distance=0.0,
+                        source="bank",
+                        bank_id=str(canonical.id),
+                    )
+                ]
+            return SimilarResult(hits=hits)
+
+    monkeypatch.setattr("backend.services.question_bank.QuestionVectorStore", Vectors)
+    job_id = _create_job(client, headers, ("similar.jpg", b"api-similar", "image/jpeg"))
+    review = _wait_for_phase(client, headers, job_id, "review")
+    similar = review["candidates"][0]
+    assert similar["match_status"] == "similar"
+    assert similar["canonical_id"] is None
+    assert [item["question"]["id"] for item in similar["match_candidates"]] == [canonical.id]
+
+    unresolved = client.post(
+        f"/api/photo-entry/jobs/{job_id}/confirm",
+        headers=headers,
+        json={"candidate_ids": [similar["id"]]},
+    )
+    forged = client.post(
+        f"/api/photo-entry/jobs/{job_id}/confirm",
+        headers=headers,
+        json={
+            "candidate_ids": [similar["id"]],
+            "match_choices": {similar["id"]: 99999999},
+        },
+    )
+    assert unresolved.status_code == 409, unresolved.text
+    assert forged.status_code == 409, forged.text
+    assert client.get(f"/api/photo-entry/jobs/{job_id}", headers=headers).json()["phase"] == "review"
+
+    accepted = client.post(
+        f"/api/photo-entry/jobs/{job_id}/confirm",
+        headers=headers,
+        json={
+            "candidate_ids": [similar["id"]],
+            "match_choices": {similar["id"]: None},
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    done = _wait_for_phase(client, headers, job_id, "done")
+    assert done["entries"][0]["question"]["canonical_id"] != canonical.id
+    assert done["entries"][0]["question"]["match_method"] == "new"

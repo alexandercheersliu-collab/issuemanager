@@ -51,3 +51,28 @@ uvicorn api.main:app --port 8000
 pip install locust
 locust -f locustfile.py --host http://localhost:8000 --headless -u 20 -r 5 -t 30s --csv benchmark
 ```
+
+## 共享题库复用观测
+
+`backend.services.ai.telemetry.summarize()` 在最近记录窗口内分别汇总 AI 调用与题库匹配：
+
+- `question_bank.matches`：`exact` / `similar` / `new` 的匹配次数；相似候选仍需学生明确确认，
+  不能把相似命中直接算作复用成功。
+- `question_bank.skipped_ai_calls`：只在个人引用成功后按实际路径累计。整图拍照复用计
+  `analyze_image`，切题/文档复用计 `analyze_text`；只有该题确有图形工作且既有几何服务确认
+  TeX 可用时才计 `redraw_geometry`。无图形、仅查询命中或无 TeX 的裁剪兜底不记该项节省。
+  这是调用次数指标，不是响应延迟或费用估算。
+- `question_bank.similar_decisions` / `corrections`：分别记录明确接受、明确作为新题和相似纠正
+  次数；未确认候选不算接受。
+- `question_bank.shared_asset_savings`：按实际复用的共享 AI 图累计 `generations_avoided` 与现存
+  文件字节 `storage_bytes_avoided`，不把学生私有证据计入存储节省。
+- `token_usage`：仅当提供商在调用上下文中给出真实用量时，聚合实际 prompt/completion/total
+  token 和有用量的调用数；没有用量时为 `null`，不按题干长度、历史平均值或模型价格推算。
+- SQL `question_bank_audit` 追踪编辑、删除、admin 快照删除和学生孤儿清理；搜索不写审计。
+  相似候选阈值由 `BANK_SIMILARITY_THRESHOLD` 配置。`scripts.eval_retrieval.evaluate_bank_matching`
+  的独立受控数据集覆盖同题、空白/LaTeX、OCR 噪声、改数字和同知识点异题，分别输出精确准确率、
+  相似召回率和误匹配率；该受控评测不代表真实嵌入模型质量。
+
+比较复用效果时应分别报告调用次数、匹配结果、相似确认结果和共享资产复用，不把 MockProvider
+的零调用流程解释为真实模型识别准确率或真实 token 账单。向量故障重试、资源清理待办和真实
+模型质量需要各自独立验收。

@@ -14,6 +14,7 @@ from backend.config import Settings, get_settings
 from backend.database import SessionLocal
 from backend.models.orm import Job
 from backend.services.ai.base import AnalysisContext
+from backend.services.ai.telemetry import record_reuse_savings
 from backend.services.entry_types import DEFAULT_IMPORT_CONTEXT, EntryResult, PhotoImage
 from backend.utils.logging import get_logger
 
@@ -47,6 +48,20 @@ def _entry(name: str, result: EntryResult | None, error: str | None) -> dict:
         "analysis": result.analysis.model_dump(mode="json") if result else None,
         "duplicated": bool(result and result.duplicated),
     }
+
+
+def _reference_entry(name: str, question) -> dict:  # noqa: ANN001 - QuestionOut
+    return {
+        "name": name,
+        "error": None,
+        "question": question.model_dump(mode="json"),
+        "analysis": None,
+        "duplicated": False,
+    }
+
+
+def _new_match() -> dict:
+    return {"match_status": "new", "canonical_id": None, "match_candidates": []}
 
 
 class PhotoEntryService:
@@ -123,6 +138,34 @@ class PhotoEntryService:
 
         return QuestionService(session_factory=SessionLocal)
 
+    @staticmethod
+    def _question_bank_service():
+        from backend.services.question_bank import QuestionBankService
+
+        return QuestionBankService(session_factory=SessionLocal)
+
+    @staticmethod
+    def _match_stem(bank, text: str, context: AnalysisContext) -> dict:  # noqa: ANN001
+        if not text:
+            return _new_match()
+        exact = bank.match_exact(text)
+        if exact is not None:
+            return {
+                "match_status": "exact",
+                "canonical_id": exact.id,
+                "match_candidates": [],
+            }
+        similar = bank.find_similar(text, context=context)
+        if similar:
+            return {
+                "match_status": "similar",
+                "canonical_id": None,
+                "match_candidates": [
+                    candidate.model_dump(mode="json") for candidate in similar
+                ],
+            }
+        return _new_match()
+
     def _run_planning(self, job_id: str, user_id: int) -> None:
         result = _initial_result()
         try:
@@ -135,6 +178,25 @@ class PhotoEntryService:
                 session.commit()
 
             service = self._question_service()
+            bank = self._question_bank_service()
+            context = AnalysisContext(
+                subject=payload.get("subject") or "math",
+                grade=payload.get("grade"),
+                region=payload.get("region"),
+                textbook_version=payload.get("textbook_version"),
+            )
+            image_hashes: dict[int, str] = {}
+            original_matches: dict[int, object] = {}
+            for index, image in enumerate(payload["images"]):
+                image_hash = hashlib.sha256(Path(image["path"]).read_bytes()).hexdigest()
+                image_hashes[index] = image_hash
+                try:
+                    matched = bank.match_original_hash(image_hash)
+                except Exception as exc:  # noqa: BLE001 - 单图匹配失败继续切题
+                    logger.info("题库原图哈希匹配失败 job=%s: %s", job_id, exc)
+                else:
+                    if matched is not None:
+                        original_matches[index] = matched
 
             def _segment(image_index: int):
                 image = payload["images"][image_index]
@@ -145,11 +207,37 @@ class PhotoEntryService:
                     logger.info("切题失败，回退整图 job=%s image=%s: %s", job_id, image["name"], exc)
                     return image_index, None
 
+            def _match(text: str) -> dict:
+                try:
+                    return self._match_stem(bank, text, context)
+                except Exception as exc:  # noqa: BLE001 - 匹配失败按新题隔离处理
+                    logger.info("题库匹配失败，按新题处理 job=%s: %s", job_id, exc)
+                    return _new_match()
+
+            def _candidate(
+                image_index: int, segment_index: int, image: dict, segment: dict, match: dict
+            ) -> dict:
+                text = str(segment.get("text", "") or "").strip()
+                return {
+                    "id": f"{image_index}:{segment_index}",
+                    "image": image["name"],
+                    "number": str(segment.get("number", "")).strip() or "?",
+                    "text": text,
+                    "summary": _summary(text),
+                    "likely_wrong": bool(segment.get("likely_wrong", False)),
+                    "figure_bboxes": list(segment.get("figure_bboxes") or []),
+                    **match,
+                    "image_path": image["path"],
+                    "image_hash": image_hashes[image_index],
+                }
+
             segment_results: list[list[dict] | None] = [None] * len(payload["images"])
             workers = max(1, self.settings.import_concurrency)
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
-                    pool.submit(_segment, index) for index in range(len(payload["images"]))
+                    pool.submit(_segment, index)
+                    for index in range(len(payload["images"]))
+                    if index not in original_matches
                 ]
                 for future in as_completed(futures):
                     image_index, segments = future.result()
@@ -160,35 +248,54 @@ class PhotoEntryService:
             for image_index, (image, segments) in enumerate(
                 zip(payload["images"], segment_results, strict=True)
             ):
-                if isinstance(segments, list) and len(segments) >= 2:
-                    for segment_index, segment in enumerate(segments):
-                        text = str(segment.get("text", "") or "").strip()
-                        candidate = {
-                            "id": f"{image_index}:{segment_index}",
-                            "image": image["name"],
-                            "number": str(segment.get("number", "")).strip() or "?",
-                            "text": text,
-                            "summary": _summary(text),
-                            "likely_wrong": bool(segment.get("likely_wrong", False)),
-                            "figure_bboxes": list(segment.get("figure_bboxes") or []),
-                        }
-                        candidates.append({**candidate, "image_path": image["path"]})
-                else:
+                original = original_matches.get(image_index)
+                if original is not None:
                     fallbacks.append(
                         {
                             **image,
-                            "image_hash": hashlib.sha256(
-                                Path(image["path"]).read_bytes()
-                            ).hexdigest(),
-                            "segments": segments if isinstance(segments, list) else [],
+                            "image_hash": image_hashes[image_index],
+                            "segments": [],
+                            "match_status": "exact",
+                            "canonical_id": original.id,
+                            "match_candidates": [],
                         }
                     )
+                    continue
+                if isinstance(segments, list) and len(segments) >= 2:
+                    for segment_index, segment in enumerate(segments):
+                        text = str(segment.get("text", "") or "").strip()
+                        candidates.append(
+                            _candidate(image_index, segment_index, image, segment, _match(text))
+                        )
+                    continue
+
+                stored_segments = segments if isinstance(segments, list) else []
+                match = _new_match()
+                if len(stored_segments) == 1:
+                    segment = stored_segments[0]
+                    text = str(segment.get("text", "") or "").strip()
+                    match = _match(text)
+                    if match["match_status"] == "similar":
+                        candidates.append(_candidate(image_index, 0, image, segment, match))
+                        continue
+                fallbacks.append(
+                    {
+                        **image,
+                        "image_hash": image_hashes[image_index],
+                        "segments": stored_segments,
+                        **match,
+                    }
+                )
 
             payload["candidates"] = candidates
             payload["fallbacks"] = fallbacks
             result.update(
                 candidates=[
-                    {key: value for key, value in candidate.items() if key != "image_path"}
+                    {
+                        key: value
+                        for key, value in candidate.items()
+                        if key not in {"image_path", "image_hash"}
+                    }
                     for candidate in candidates
                 ],
                 fallback_count=len(fallbacks),
@@ -206,7 +313,13 @@ class PhotoEntryService:
             logger.warning("拍照切题规划失败 job=%s: %s", job_id, exc)
             self._fail(job_id, result, exc)
 
-    def confirm(self, job_id: str, user_id: int, candidate_ids: list[str]) -> None:
+    def confirm(
+        self,
+        job_id: str,
+        user_id: int,
+        candidate_ids: list[str],
+        match_choices: dict[str, int | None] | None = None,
+    ) -> None:
         from sqlalchemy import update
 
         with SessionLocal() as session:
@@ -233,7 +346,37 @@ class PhotoEntryService:
             if not selected and not fallbacks:
                 raise ValueError("请至少勾选一道题")
 
+            choices = dict(match_choices or {})
+            for candidate_id, canonical_id in choices.items():
+                candidate = by_id.get(candidate_id)
+                if (
+                    candidate_id not in selected_ids
+                    or candidate is None
+                    or candidate.get("match_status") != "similar"
+                ):
+                    raise ValueError("匹配选择候选 ID 无效")
+                offered_ids = {
+                    item["question"]["id"] for item in candidate.get("match_candidates") or []
+                }
+                if canonical_id is not None and (
+                    type(canonical_id) is not int or canonical_id not in offered_ids
+                ):
+                    raise ValueError("标准题不属于该候选的匹配集合")
+            unresolved = [
+                candidate["id"]
+                for candidate in selected
+                if candidate.get("match_status") == "similar"
+                and candidate["id"] not in choices
+            ]
+            if unresolved:
+                raise ValueError("相似题必须明确选择引用候选或作为新题")
+
             payload["selected_candidate_ids"] = [candidate["id"] for candidate in selected]
+            payload["match_choices"] = {
+                candidate["id"]: choices[candidate["id"]]
+                for candidate in selected
+                if candidate.get("match_status") == "similar"
+            }
             result.update(
                 phase="importing",
                 total=len(selected) + len(fallbacks),
@@ -258,6 +401,13 @@ class PhotoEntryService:
                 return
             session.commit()
 
+        from backend.services.ai.telemetry import record_bank_decision
+
+        for candidate in selected:
+            if candidate.get("match_status") == "similar":
+                record_bank_decision(
+                    "accepted" if payload["match_choices"][candidate["id"]] is not None else "new"
+                )
         threading.Thread(
             target=self._run_import, args=(job_id, user_id), daemon=True
         ).start()
@@ -276,6 +426,7 @@ class PhotoEntryService:
                 session.commit()
 
             service = self._question_service()
+            bank = self._question_bank_service()
             selected_ids = set(payload.get("selected_candidate_ids") or [])
             selected = [
                 candidate
@@ -290,7 +441,7 @@ class PhotoEntryService:
             path_lock = threading.Lock()
             fallback_groups: dict[str, list[int]] = {}
             for index, (kind, item) in enumerate(items):
-                if kind == "fallback":
+                if kind == "fallback" and item.get("match_status") != "exact":
                     fallback_groups.setdefault(item["image_hash"], []).append(index)
             fallback_positions = {
                 index: position
@@ -302,10 +453,57 @@ class PhotoEntryService:
             }
             fallback_turns = {image_hash: 0 for image_hash in fallback_groups}
 
+            def _reference(
+                index: int, name: str, item: dict, canonical_id: int, match_method: str
+            ):
+                try:
+                    source_path = item.get("image_path") or item["path"]
+                    with path_lock:
+                        if source_path not in path_cache:
+                            path_cache[source_path] = str(
+                                service._persist_image(user_id, Path(source_path).read_bytes())
+                            )
+                    out = service.reference_canonical(
+                        user_id,
+                        canonical_id,
+                        private_image_path=path_cache[source_path],
+                        user_tags=list(payload.get("tags") or []),
+                        match_method=match_method,
+                        image_hash=item.get("image_hash"),
+                        context=AnalysisContext(
+                            subject=payload.get("subject") or "math",
+                            grade=payload.get("grade"),
+                            region=payload.get("region"),
+                            textbook_version=payload.get("textbook_version"),
+                        ),
+                    )
+                    is_candidate = "image_path" in item
+                    skipped = {"analyze_text": 1} if is_candidate else {"analyze_image": 1}
+                    segments = [item] if is_candidate else list(item.get("segments") or [])
+                    if any(segment.get("figure_bboxes") for segment in segments) and (
+                        service._geometry_figures()._tex_available()
+                    ):
+                        skipped["redraw_geometry"] = 1
+                    generations, storage_bytes = bank.shared_asset_savings(canonical_id)
+                    record_reuse_savings(
+                        skipped,
+                        shared_generations=generations,
+                        shared_storage_bytes=storage_bytes,
+                    )
+                    return index, _reference_entry(name, out)
+                except Exception as exc:  # noqa: BLE001 - 单题复用失败不影响其余
+                    return index, _entry(name, None, str(exc))
+
             def _import(index: int):
                 kind, item = items[index]
                 if kind == "candidate":
                     name = f"{item['image']} · 第 {item['number']} 题"
+                    match_status = item.get("match_status") or "new"
+                    choice = (payload.get("match_choices") or {}).get(item["id"])
+                    if match_status == "exact":
+                        return _reference(index, name, item, item["canonical_id"], "exact")
+                    if match_status == "similar" and choice is not None:
+                        return _reference(index, name, item, choice, "confirmed_similar")
                     try:
                         source_path = item["image_path"]
                         with path_lock:
@@ -321,6 +519,7 @@ class PhotoEntryService:
                             user_tags=list(payload.get("tags") or []),
                             hint=payload.get("hint", ""),
                             image_path=path_cache[source_path],
+                            image_hash=item.get("image_hash"),
                             segment=item,
                             subject=payload.get("subject") or "math",
                             grade=payload.get("grade"),
@@ -334,6 +533,11 @@ class PhotoEntryService:
                         return index, _entry(name, None, str(exc))
 
                 name = item["name"]
+                if item.get("match_status") == "exact":
+                    duplicate = service.image_hash_duplicate(user_id, item["image_hash"])
+                    if duplicate is not None:
+                        return index, _entry(name, duplicate, None)
+                    return _reference(index, name, item, item["canonical_id"], "exact")
                 image_hash = item["image_hash"]
                 condition = fallback_conditions[image_hash]
                 try:

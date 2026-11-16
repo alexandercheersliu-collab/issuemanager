@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -86,6 +88,129 @@ class User(Base):
         return self.username
 
 
+class CanonicalQuestion(Base):
+    __tablename__ = "canonical_questions"
+    __table_args__ = (
+        CheckConstraint(
+            "origin IN ('teacher', 'student', 'seed')",
+            name="ck_canonical_questions_origin",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stem_markdown: Mapped[str] = mapped_column(Text)
+    normalized_stem: Mapped[str] = mapped_column(Text)
+    normalized_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    analysis_markdown: Mapped[str] = mapped_column(Text, default="", server_default="")
+    answer: Mapped[str] = mapped_column(Text, default="", server_default="")
+    knowledge_points: Mapped[list] = mapped_column(JSON, default=list)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    difficulty: Mapped[str] = mapped_column(String(16), default="medium", server_default="medium")
+    question_type: Mapped[str | None] = mapped_column(String(32))
+    chapter: Mapped[str | None] = mapped_column(String(128))
+    subject: Mapped[str] = mapped_column(
+        String(32), default="math", server_default="math", index=True
+    )
+    grade: Mapped[int | None] = mapped_column(Integer)
+    region: Mapped[str | None] = mapped_column(String(64))
+    textbook_version: Mapped[str | None] = mapped_column(String(64))
+    origin: Mapped[str] = mapped_column(String(16), default="student")
+    validation_state: Mapped[str] = mapped_column(
+        String(32), default="machine_validated", server_default="machine_validated"
+    )
+    published_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    publisher: Mapped[User | None] = relationship()
+    assets: Mapped[list[QuestionAsset]] = relationship(
+        back_populates="canonical", cascade="all, delete-orphan"
+    )
+    questions: Mapped[list[Question]] = relationship(back_populates="canonical")
+
+
+class QuestionAsset(Base):
+    __tablename__ = "question_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('teacher_only', 'shared')",
+            name="ck_question_assets_visibility",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canonical_id: Mapped[int] = mapped_column(
+        ForeignKey("canonical_questions.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    visibility: Mapped[str] = mapped_column(String(16))
+    storage_path: Mapped[str] = mapped_column(String(512))
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    is_preferred: Mapped[bool] = mapped_column(Boolean, default=False, server_default=func.false())
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    canonical: Mapped[CanonicalQuestion] = relationship(back_populates="assets")
+
+
+class QuestionSourceFingerprint(Base):
+    __tablename__ = "question_source_fingerprints"
+    __table_args__ = (
+        UniqueConstraint("canonical_id", "content_hash", name="uq_source_fingerprint_canonical_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canonical_id: Mapped[int] = mapped_column(
+        ForeignKey("canonical_questions.id", ondelete="CASCADE"), index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class QuestionTypeDefinition(Base):
+    __tablename__ = "question_type_definitions"
+    __table_args__ = (
+        UniqueConstraint("subject", "name", name="uq_question_type_definitions_subject_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=func.true())
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    creator: Mapped[User | None] = relationship()
+
+
+class QuestionBankAudit(Base):
+    __tablename__ = "question_bank_audit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor: Mapped[str] = mapped_column(String(64), default="system", server_default="system")
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    canonical_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    change_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    affected_student_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    affected_question_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class Question(Base):
     """一道错题：原图 + AI 结构化解析 + SM-2 复习调度状态。"""
 
@@ -97,6 +222,19 @@ class Question(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    canonical_id: Mapped[int | None] = mapped_column(
+        ForeignKey("canonical_questions.id", ondelete="SET NULL"), index=True
+    )
+    private_image_path: Mapped[str | None] = mapped_column(String(512))
+    stem_override: Mapped[str | None] = mapped_column(Text)
+    analysis_override: Mapped[str | None] = mapped_column(Text)
+    answer_override: Mapped[str | None] = mapped_column(Text)
+    stem_snapshot: Mapped[str | None] = mapped_column(Text)
+    analysis_snapshot: Mapped[str | None] = mapped_column(Text)
+    answer_snapshot: Mapped[str | None] = mapped_column(Text)
+    metadata_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    detached_reason: Mapped[str | None] = mapped_column(String(64))
+    match_method: Mapped[str] = mapped_column(String(32), default="new", server_default="new")
 
     image_path: Mapped[str | None] = mapped_column(String(512))
     figure_paths: Mapped[list | None] = mapped_column(JSON, default=list)
@@ -167,6 +305,7 @@ class Question(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="questions")
+    canonical: Mapped[CanonicalQuestion | None] = relationship(back_populates="questions")
     review_logs: Mapped[list[ReviewLog]] = relationship(
         back_populates="question", cascade="all, delete-orphan"
     )

@@ -56,6 +56,7 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
   const [stage, setStage] = useState<Stage>('pick')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<SegmentsResult | null>(null)
+  const [matchChoices, setMatchChoices] = useState<Record<number, number | null>>({})
   const [confirming, setConfirming] = useState(false)
   const [result, setResult] = useState<ConfirmResult | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
@@ -183,7 +184,9 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
     if (!jobId) return
     try {
       await api.deleteSegment(jobId, index)
-      setJob(await api.getDocumentSegments(jobId))
+      const next = await api.getDocumentSegments(jobId)
+      setMatchChoices({})
+      setJob(next)
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : '删除失败')
     }
@@ -194,6 +197,11 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
     try {
       await api.reanalyzeSegment(jobId, index)
       setJob(await api.getDocumentSegments(jobId))
+      setMatchChoices((current) => {
+        const next = { ...current }
+        delete next[index]
+        return next
+      })
     } catch (err) {
       try {
         setJob(await api.getDocumentSegments(jobId))
@@ -208,7 +216,7 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
     if (!jobId) return
     setConfirming(true)
     try {
-      const res = await api.confirmImport(jobId)
+      const res = await api.confirmImport(jobId, matchChoices)
       localStorage.removeItem(JOB_KEY)
       setResult(res)
       setStage('done')
@@ -219,11 +227,16 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
     }
   }
 
+  function chooseMatch(index: number, canonicalId: number | null) {
+    setMatchChoices((current) => ({ ...current, [index]: canonicalId }))
+  }
+
   /** 逃生出口：任务卡死（如服务端重启后状态永远 running）时放弃它，回到选页。 */
   function abandon() {
     localStorage.removeItem(JOB_KEY)
     setJobId(null)
     setJob(null)
+    setMatchChoices({})
     setStage('pick')
   }
 
@@ -266,7 +279,14 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
 
   // ---------- 校对页 ----------
   if (stage === 'review' && job) {
-    const importable = job.segments.filter((s) => s.analysis).length
+    const importable = job.segments.filter(
+      (s) => s.analysis || s.match_status === 'exact' || s.match_status === 'similar',
+    ).length
+    const unresolvedSimilar = job.segments.some(
+      (segment, index) =>
+        segment.match_status === 'similar' &&
+        !Object.prototype.hasOwnProperty.call(matchChoices, index),
+    )
     return (
       <div className="px-4 pb-32 pt-6">
         <header className="mb-4">
@@ -284,6 +304,9 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
               jobId={jobId!}
               index={i}
               segment={seg}
+              hasMatchChoice={Object.prototype.hasOwnProperty.call(matchChoices, i)}
+              matchChoice={matchChoices[i]}
+              onChooseMatch={(canonicalId) => chooseMatch(i, canonicalId)}
               onRemove={() => removeSegment(i)}
               onReanalyze={() => reanalyzeSegment(i)}
             />
@@ -291,7 +314,12 @@ export default function BatchImport({ onBack, onDone }: { onBack: () => void; on
         </div>
 
         <div className="fixed inset-x-0 bottom-14 z-10 mx-auto max-w-md border-t border-slate-200 bg-white p-3">
-          <Button className="w-full" size="lg" disabled={importable === 0 || confirming} onClick={confirm}>
+          <Button
+            className="w-full"
+            size="lg"
+            disabled={importable === 0 || unresolvedSimilar || confirming}
+            onClick={confirm}
+          >
             {confirming ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> 入库中…
@@ -436,16 +464,23 @@ function SegmentCard({
   jobId,
   index,
   segment,
+  hasMatchChoice,
+  matchChoice,
+  onChooseMatch,
   onRemove,
   onReanalyze,
 }: {
   jobId: string
   index: number
   segment: Segment
+  hasMatchChoice: boolean
+  matchChoice: number | null | undefined
+  onChooseMatch: (canonicalId: number | null) => void
   onRemove: () => void
   onReanalyze: () => void
 }) {
-  const failed = !segment.analysis || segment.error
+  const reusable = segment.match_status === 'exact' || segment.match_status === 'similar'
+  const failed = (!segment.analysis && !reusable) || segment.error
   const figurePaths = segment.figure_paths ?? []
   const figureSpecs = segment.figure_specs ?? []
   const page = segment.page_start === segment.page_end
@@ -464,6 +499,7 @@ function SegmentCard({
             <span className="text-sm font-semibold text-slate-800">
               {segment.number ? `第 ${segment.number} 题` : '未编号'}
             </span>
+            <SegmentMatchStatus status={segment.match_status} />
             {segment.needs_review && (
               <Badge variant="secondary" className="bg-amber-100 text-amber-700">
                 <AlertTriangle className="mr-1 h-3 w-3" /> 建议复核
@@ -520,6 +556,49 @@ function SegmentCard({
           <div className="line-clamp-2">
             <MathText text={segment.text} className="text-sm text-slate-600" />
           </div>
+          {segment.match_status === 'similar' && (
+            <div className="space-y-2 rounded-lg bg-amber-50/60 p-2.5">
+              <p className="text-xs text-amber-700">请核对候选；未选择前不会复用或解析。</p>
+              {segment.match_candidates.map(({ question, score }) => (
+                <div key={question.id} className="space-y-2 rounded-md bg-white p-2.5">
+                  <MathText text={question.stem_markdown} className="text-xs text-slate-800" />
+                  <p className="text-xs text-slate-500">
+                    {question.origin === 'teacher'
+                      ? '教师发布'
+                      : question.origin === 'student'
+                        ? '学生机器校验'
+                        : '预置题库'}{' '}
+                    · 相似度 {Math.round(score * 100)}%
+                  </p>
+                  {question.analysis_markdown && (
+                    <p className="line-clamp-2 text-xs text-slate-500">
+                      解析摘要：{question.analysis_markdown}
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={hasMatchChoice && matchChoice === question.id ? 'default' : 'outline'}
+                    className="w-full"
+                    aria-pressed={hasMatchChoice && matchChoice === question.id}
+                    onClick={() => onChooseMatch(question.id)}
+                  >
+                    引用此题
+                  </Button>
+                </div>
+              ))}
+              <Button
+                type="button"
+                size="sm"
+                variant={hasMatchChoice && matchChoice === null ? 'default' : 'outline'}
+                className="w-full"
+                aria-pressed={hasMatchChoice && matchChoice === null}
+                onClick={() => onChooseMatch(null)}
+              >
+                作为新题解析
+              </Button>
+            </div>
+          )}
           {segment.analysis && segment.error && (
             <p className="text-xs font-medium text-amber-700">
               重新解析失败，将使用上次成功结果
@@ -548,4 +627,14 @@ function SegmentCard({
       </CardContent>
     </Card>
   )
+}
+
+function SegmentMatchStatus({ status }: { status: Segment['match_status'] }) {
+  if (status === 'exact') {
+    return <Badge className="bg-blue-50 text-blue-700">精确复用</Badge>
+  }
+  if (status === 'similar') {
+    return <Badge className="bg-amber-50 text-amber-700">相似待确认</Badge>
+  }
+  return <Badge className="bg-teal-50 text-teal-700">新题解析</Badge>
 }

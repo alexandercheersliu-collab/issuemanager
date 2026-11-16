@@ -65,16 +65,13 @@ JSON_INSTRUCTION = f"""请只输出一个 JSON 对象，结构如下：
 
 @dataclass(frozen=True)
 class AnalysisContext:
-    """录题时的 K12 上下文：学科 + 年级 + 地区 + 教材版本（全部可选）。
-
-    缺省（全空）时提示词与基座行为完全一致；任一字段提供后，
-    系统提示词按上下文动态组装，引导模型输出贴合学段与教材的解析。
-    """
+    """录题时的 K12 上下文与同学科教师题型（全部可选）。"""
 
     subject: str = "math"
     grade: int | None = None
     region: str | None = None
     textbook_version: str | None = None
+    question_types: tuple[str, ...] = ()
 
     def is_default(self) -> bool:
         return (
@@ -85,32 +82,41 @@ class AnalysisContext:
         )
 
 
-def build_system_prompt(context: AnalysisContext | None = None) -> str:
-    """按 K12 上下文组装系统提示词；无上下文时返回基座原版 SYSTEM_PROMPT。"""
+def build_system_prompt(
+    context: AnalysisContext | None = None, *, question_types: list[str] | None = None
+) -> str:
+    """按 K12 上下文组装系统提示词，并优先使用教师已发布题型。"""
+    types = tuple(question_types or (context.question_types if context else ()))
     if context is None or context.is_default():
-        return SYSTEM_PROMPT
-
-    subject_name = SUBJECT_NAMES.get(context.subject, context.subject or "数学")
-    teacher = f"你是一位经验丰富、讲解亲切的{subject_name}老师。"
-    audience: list[str] = []
-    if context.grade is not None:
-        audience.append(f"{context.grade} 年级")
-    if context.region:
-        audience.append(f"{context.region}地区")
-    if context.textbook_version:
-        audience.append(f"使用{context.textbook_version}教材")
-    if audience:
-        teacher += f"学生是{'，'.join(audience)}的学生，讲解的深度、措辞与引用的知识点要贴合该学段与教材。"
-    return (
-        f"{teacher}学生会上传一张写有{subject_name}错题的图片，"
-        "请严谨地识别题目（包括手写内容与 LaTeX 公式），分析错误原因并给出逐步讲解。"
-        "识别时先检查题目是否拍全（题干、选项、各小问有无缺失），再留意卷面上的"
-        "批改痕迹（打叉、扣分、红笔批注）：若图片是一道含多道小题的大题，且只有部分"
-        "小题被判错或学生指明了做错的小题，只提取做错的那道小题作为错题，"
-        "解析、答案与错因都紧紧围绕该小题，不要复述无关小题。"
-        "所有讲解使用简体中文，公式使用 LaTeX（$...$ 行内，$$...$$ 独立）。"
-        "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
-    )
+        prompt = SYSTEM_PROMPT
+    else:
+        subject_name = SUBJECT_NAMES.get(context.subject, context.subject or "数学")
+        teacher = f"你是一位经验丰富、讲解亲切的{subject_name}老师。"
+        audience: list[str] = []
+        if context.grade is not None:
+            audience.append(f"{context.grade} 年级")
+        if context.region:
+            audience.append(f"{context.region}地区")
+        if context.textbook_version:
+            audience.append(f"使用{context.textbook_version}教材")
+        if audience:
+            teacher += f"学生是{'，'.join(audience)}的学生，讲解的深度、措辞与引用的知识点要贴合该学段与教材。"
+        prompt = (
+            f"{teacher}学生会上传一张写有{subject_name}错题的图片，"
+            "请严谨地识别题目（包括手写内容与 LaTeX 公式），分析错误原因并给出逐步讲解。"
+            "识别时先检查题目是否拍全（题干、选项、各小问有无缺失），再留意卷面上的"
+            "批改痕迹（打叉、扣分、红笔批注）：若图片是一道含多道小题的大题，且只有部分"
+            "小题被判错或学生指明了做错的小题，只提取做错的那道小题作为错题，"
+            "解析、答案与错因都紧紧围绕该小题，不要复述无关小题。"
+            "所有讲解使用简体中文，公式使用 LaTeX（$...$ 行内，$$...$$ 独立）。"
+            "必须严格输出 JSON，不要输出任何 JSON 以外的内容。"
+        )
+    if types:
+        prompt += (
+            f"\n同学科教师已发布题型：{'、'.join(types)}。"
+            "question_type 必须优先选用其中确实适用的类别；没有合适类别时才生成新类别。"
+        )
+    return prompt
 
 
 def build_user_prompt(hint: str, context: AnalysisContext | None = None) -> str:

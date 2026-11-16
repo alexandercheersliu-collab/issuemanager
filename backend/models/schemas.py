@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import mimetypes
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, computed_field, field_validator
@@ -118,6 +120,9 @@ class QuestionOut(BaseModel):
     id: int
     user_id: int
     image_path: str | None
+    evidence_type: Literal["image", "document"] | None = None
+    evidence_mime_type: str | None = None
+    evidence_filename: str | None = None
     figure_paths: list[str] = Field(default_factory=list)
     figure_specs: list[FigureSpec] = Field(default_factory=list)
     content_markdown: str
@@ -138,6 +143,8 @@ class QuestionOut(BaseModel):
     chapter: str | None = None
     error_category: str | None = None
     source_doc: str | None = None
+    canonical_id: int | None = None
+    match_method: str = "new"
     reps: int = 0
     ease: float = 2.5
     interval_days: float = 0
@@ -149,41 +156,118 @@ class QuestionOut(BaseModel):
 
     @classmethod
     def from_orm_model(cls, q) -> QuestionOut:  # noqa: ANN001 - ORM 实例
-        # 原图路径自愈：库里的绝对路径在 DATA_DIR 迁移后可能失效，
-        # 这里换成当前真实可用路径（找不到则留空，界面按"无图"处理）。
-        resolved = q.resolved_image_path() if hasattr(q, "resolved_image_path") else None
-        resolved_figures = (
-            q.resolved_figure_paths() if hasattr(q, "resolved_figure_paths") else []
-        )
+        private_image = getattr(q, "private_image_path", None)
+        if private_image:
+            from backend.models.orm import resolve_image_path
+
+            resolved = resolve_image_path(private_image, q.user_id)
+        else:
+            resolved = q.resolved_image_path() if hasattr(q, "resolved_image_path") else None
+        resolved_figures = [
+            str(path)
+            for path in (
+                q.resolved_figure_paths() if hasattr(q, "resolved_figure_paths") else []
+            )
+        ]
         resolved_figure_specs = (
             q.resolved_figure_specs()
             if hasattr(q, "resolved_figure_specs")
             else getattr(q, "figure_specs", None) or []
         )
+        canonical = getattr(q, "canonical", None)
+        snapshot = getattr(q, "metadata_snapshot", None) or {}
+        has_shared_content = canonical is not None or any(
+            getattr(q, name, None) is not None
+            for name in ("stem_snapshot", "analysis_snapshot", "answer_snapshot")
+        )
+        if has_shared_content:
+            stem_override = getattr(q, "stem_override", None)
+            analysis_override = getattr(q, "analysis_override", None)
+            answer_override = getattr(q, "answer_override", None)
+            stem = stem_override if stem_override is not None else (
+                canonical.stem_markdown
+                if canonical is not None
+                else getattr(q, "stem_snapshot", None) or ""
+            )
+            analysis = analysis_override if analysis_override is not None else (
+                canonical.analysis_markdown
+                if canonical is not None
+                else getattr(q, "analysis_snapshot", None)
+            )
+            content_markdown = stem + (f"\n\n---\n\n{analysis}" if analysis else "")
+            answer = answer_override if answer_override is not None else (
+                canonical.answer
+                if canonical is not None
+                else getattr(q, "answer_snapshot", None) or ""
+            )
+            if canonical is not None:
+                resolved_figures.extend(
+                    asset.storage_path
+                    for asset in canonical.assets
+                    if asset.visibility == "shared"
+                    and asset.storage_path not in resolved_figures
+                )
+            standard = canonical
+        else:
+            content_markdown = q.content_markdown
+            answer = q.answer
+            standard = None
+
+        def standard_value(name: str, default=None):  # noqa: ANN001,ANN202
+            if standard is not None:
+                return getattr(standard, name)
+            return snapshot.get(name, default)
+
+        knowledge_points = list(q.knowledge_points or []) or list(
+            standard_value("knowledge_points", []) or []
+        )
+        evidence_mime = mimetypes.guess_type(str(resolved))[0] if resolved else None
+        evidence_type = (
+            "image" if (evidence_mime or "").startswith("image/") else "document"
+        ) if resolved else None
         return cls(
             id=q.id,
             user_id=q.user_id,
             image_path=str(resolved) if resolved else None,
-            figure_paths=[str(path) for path in resolved_figures],
+            evidence_type=evidence_type,
+            evidence_mime_type=evidence_mime,
+            evidence_filename=Path(resolved).name if resolved else None,
+            figure_paths=resolved_figures,
             figure_specs=resolved_figure_specs,
-            content_markdown=q.content_markdown,
-            answer=q.answer,
-            knowledge_points=list(q.knowledge_points or []),
+            content_markdown=content_markdown,
+            answer=answer,
+            knowledge_points=knowledge_points,
             tags=list(q.tags or []),
-            difficulty=q.difficulty,
+            difficulty=(
+                standard_value("difficulty", "medium") if has_shared_content else q.difficulty
+            ),
             followup_question=q.followup_question,
             source=q.source,
             user_note=q.user_note,
             ocr_text=q.ocr_text,
-            # K12 元数据：getattr 兜底，兼容无新列的轻量替身对象（老测试桩/第三方模型）
-            subject=getattr(q, "subject", None) or "math",
-            grade=getattr(q, "grade", None),
-            region=getattr(q, "region", None),
-            textbook_version=getattr(q, "textbook_version", None),
-            question_type=getattr(q, "question_type", None),
-            chapter=getattr(q, "chapter", None),
+            subject=(
+                getattr(q, "subject", None)
+                or standard_value("subject", None)
+                or "math"
+            ),
+            grade=(
+                getattr(q, "grade", None)
+                if getattr(q, "grade", None) is not None
+                else standard_value("grade")
+            ),
+            region=getattr(q, "region", None) or standard_value("region"),
+            textbook_version=(
+                getattr(q, "textbook_version", None)
+                or standard_value("textbook_version")
+            ),
+            question_type=(
+                getattr(q, "question_type", None) or standard_value("question_type")
+            ),
+            chapter=getattr(q, "chapter", None) or standard_value("chapter"),
             error_category=getattr(q, "error_category", None),
             source_doc=getattr(q, "source_doc", None),
+            canonical_id=getattr(q, "canonical_id", None),
+            match_method=getattr(q, "match_method", None) or "new",
             reps=q.reps,
             ease=q.ease,
             interval_days=q.interval_days,
@@ -214,6 +298,90 @@ class QuestionOut(BaseModel):
     def mastered(self) -> bool:
         """掌握归档：连续记牢 ≥3 次且调度间隔 ≥21 天的题移出每日复习池。"""
         return self.reps >= 3 and self.interval_days >= 21
+
+
+class CanonicalQuestionOut(BaseModel):
+    id: int
+    stem_markdown: str
+    normalized_stem: str
+    normalized_hash: str
+    analysis_markdown: str = ""
+    answer: str = ""
+    knowledge_points: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    difficulty: str = "medium"
+    question_type: str | None = None
+    chapter: str | None = None
+    subject: str = "math"
+    grade: int | None = None
+    region: str | None = None
+    textbook_version: str | None = None
+    origin: Literal["teacher", "student", "seed"] = "student"
+    validation_state: str = "machine_validated"
+    published_by: int | None = None
+    created_at: dt.datetime | None = None
+    updated_at: dt.datetime | None = None
+    reference_count: int = 0
+
+    @classmethod
+    def from_orm_model(
+        cls, question, *, reference_count: int = 0
+    ) -> CanonicalQuestionOut:  # noqa: ANN001 - ORM 实例
+        return cls(
+            id=question.id,
+            stem_markdown=question.stem_markdown,
+            normalized_stem=question.normalized_stem,
+            normalized_hash=question.normalized_hash,
+            analysis_markdown=question.analysis_markdown,
+            answer=question.answer,
+            knowledge_points=list(question.knowledge_points or []),
+            tags=list(question.tags or []),
+            difficulty=question.difficulty,
+            question_type=question.question_type,
+            chapter=question.chapter,
+            subject=question.subject,
+            grade=question.grade,
+            region=question.region,
+            textbook_version=question.textbook_version,
+            origin=question.origin,
+            validation_state=question.validation_state,
+            published_by=question.published_by,
+            created_at=question.created_at,
+            updated_at=question.updated_at,
+            reference_count=reference_count,
+        )
+
+
+class QuestionBankCandidate(BaseModel):
+    score: float
+    question: CanonicalQuestionOut
+
+
+class PhotoEntryConfirmation(BaseModel):
+    candidate_ids: list[str]
+    match_choices: dict[str, int | None] = Field(default_factory=dict)
+
+
+class CanonicalQuestionUpdate(BaseModel):
+    stem_markdown: str | None = None
+    analysis_markdown: str | None = None
+    answer: str | None = None
+    knowledge_points: list[str] | None = None
+    tags: list[str] | None = None
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    question_type: str | None = None
+    chapter: str | None = None
+    subject: str | None = None
+    grade: int | None = None
+    region: str | None = None
+    textbook_version: str | None = None
+
+
+class DeleteImpactOut(BaseModel):
+    canonical_id: int
+    reference_count: int
+    affected_students: list[dict] = Field(default_factory=list)
+    affected_question_ids: list[int] = Field(default_factory=list)
 
 
 class TagStat(BaseModel):

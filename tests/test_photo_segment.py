@@ -42,8 +42,8 @@ class _FakePhotoEntryService:
         self.get_calls.append((job_id, user_id))
         return self.job
 
-    def confirm(self, job_id, user_id, candidate_ids):
-        self.confirm_calls.append((job_id, user_id, candidate_ids))
+    def confirm(self, job_id, user_id, candidate_ids, match_choices=None):
+        self.confirm_calls.append((job_id, user_id, candidate_ids, match_choices))
         self.job = _job("done")
 
 
@@ -116,7 +116,7 @@ def test_active_photo_job_is_polled_until_candidate_review(monkeypatch):
     at.session_state["photo_job_id"] = "job-1"
 
     at.run()
-    assert service.get_calls == [("job-1", 7)]
+    assert service.get_calls == [("job-1", 7), ("job-1", 7)]
     service.job = _job(
         "review",
         candidates=[
@@ -134,9 +134,32 @@ def test_active_photo_job_is_polled_until_candidate_review(monkeypatch):
     at.run()
 
     assert not at.exception
-    assert service.get_calls == [("job-1", 7), ("job-1", 7)]
+    assert service.get_calls == [("job-1", 7)] * 3
     assert any("从图中识别出 1 道题" in item.value for item in at.success)
     assert at.checkbox[0].value is True
+
+
+def test_photo_progress_does_not_rerun_whole_page(monkeypatch):
+    service = _FakePhotoEntryService(_job("importing", total=1, done=0))
+    _patch_page(monkeypatch, service)
+
+    def unexpected_full_rerun():
+        raise AssertionError("进度轮询不应触发整页 rerun")
+
+    monkeypatch.setattr(tutor.st, "rerun", unexpected_full_rerun)
+    monkeypatch.setattr(
+        tutor,
+        "time",
+        SimpleNamespace(sleep=lambda _: (_ for _ in ()).throw(AssertionError("不应整页 sleep"))),
+        raising=False,
+    )
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
+
+    at.run()
+
+    assert not at.exception
+    assert any("正在录入" in item.value for item in at.markdown)
 
 
 def test_candidate_confirmation_delegates_stable_ids(monkeypatch):
@@ -174,7 +197,7 @@ def test_candidate_confirmation_delegates_stable_ids(monkeypatch):
     confirm[0].click().run()
 
     assert not at.exception
-    assert service.confirm_calls == [("job-1", 7, ["0:0"])]
+    assert service.confirm_calls == [("job-1", 7, ["0:0"], {})]
 
 
 def test_photo_job_failure_is_recoverable(monkeypatch):
@@ -189,3 +212,128 @@ def test_photo_job_failure_is_recoverable(monkeypatch):
     assert any("model down" in item.value for item in at.error)
     start = next(button for button in at.button if button.label == "开始 AI 解析")
     assert start.disabled is False
+
+
+def _matched_candidate(candidate_id: str, number: str, text: str, status: str) -> dict:
+    candidate = {
+        "id": candidate_id,
+        "image": "paper.jpg",
+        "number": number,
+        "text": text,
+        "summary": text,
+        "likely_wrong": True,
+        "figure_bboxes": [],
+        "match_status": status,
+        "canonical_id": 40 if status == "exact" else None,
+        "match_candidates": [],
+    }
+    if status == "similar":
+        candidate["match_candidates"] = [
+            {
+                "score": 0.8,
+                "question": {
+                    "id": 41,
+                    "stem_markdown": "共享候选题干",
+                    "analysis_markdown": "共享候选解析摘要",
+                    "origin": "teacher",
+                },
+            }
+        ]
+    return candidate
+
+
+def test_match_statuses_require_choices_and_submit_candidate_scoped_decisions(monkeypatch):
+    """缺少状态、默认接受相似题或不提交候选 ID 决策时，本契约失败。"""
+    candidates = [
+        _matched_candidate("0:0", "1", "精确题", "exact"),
+        _matched_candidate("0:1", "2", "相似并引用", "similar"),
+        _matched_candidate("0:2", "3", "相似但新建", "similar"),
+        _matched_candidate("0:3", "4", "全新题", "new"),
+    ]
+    service = _FakePhotoEntryService(_job("review", candidates=candidates))
+    _patch_page(monkeypatch, service)
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert not at.exception
+    rendered = "\n".join(item.value for item in at.markdown)
+    assert rendered.count("精确复用") == 1
+    assert rendered.count("相似待确认") == 2
+    assert rendered.count("新题解析") == 1
+    reuse = at.selectbox(key="photo_match_job-1_0:1")
+    create_new = at.selectbox(key="photo_match_job-1_0:2")
+    assert reuse.value is None and create_new.value is None
+    confirm = next(button for button in at.button if button.label.startswith("确认录入"))
+    assert confirm.disabled is True
+
+    reuse.select(41)
+    create_new.select("new").run()
+    confirm = next(button for button in at.button if button.label.startswith("确认录入"))
+    assert confirm.disabled is False
+    confirm.click().run()
+
+    assert not at.exception
+    assert service.confirm_calls == [
+        (
+            "job-1",
+            7,
+            ["0:0", "0:1", "0:2", "0:3"],
+            {"0:1": 41, "0:2": None},
+        )
+    ]
+
+
+def test_reference_result_keeps_private_original_and_shared_ai_redraw(
+    monkeypatch, tmp_path
+):
+    """复用结果若没有分析对象，仍须同时显示个人原图与共享 AI 重绘图。"""
+    private = tmp_path / "private.png"
+    shared = tmp_path / "shared-ai.png"
+    Image.new("RGB", (3, 3), "white").save(private)
+    Image.new("RGB", (3, 3), "blue").save(shared)
+    question = {
+        "id": 88,
+        "user_id": 7,
+        "image_path": str(private),
+        "figure_paths": [str(shared)],
+        "figure_specs": [
+            {
+                "kind": "geometry",
+                "semantic_spec": {},
+                "tikz_source": "",
+                "render_path": str(shared),
+                "validation_status": "ai_passed",
+            }
+        ],
+        "content_markdown": "共享标准题干\n\n---\n\n共享标准解析",
+        "answer": "42",
+        "canonical_id": 40,
+        "match_method": "exact",
+    }
+    service = _FakePhotoEntryService(
+        _job(
+            "done",
+            entries=[
+                {
+                    "name": "paper.jpg · 第 1 题",
+                    "error": None,
+                    "question": question,
+                    "analysis": None,
+                    "duplicated": False,
+                }
+            ],
+        )
+    )
+    _patch_page(monkeypatch, service)
+    monkeypatch.setattr(tutor, "followup_chat", lambda *args, **kwargs: None)
+    at = _app()
+    at.session_state["photo_job_id"] = "job-1"
+    at.run()
+
+    assert not at.exception
+    images = at.get("image")
+    assert len(images) == 2
+    assert any("私有原图" in item.proto.imgs[0].alt for item in images)
+    assert any("共享 AI 重绘图" in item.proto.imgs[0].alt for item in images)
+    assert any("共享标准解析" in item.value for item in at.markdown)

@@ -35,6 +35,21 @@ def test_summarize_segments_counts():
     assert summary == {"total": 4, "needs_review": 2, "failed": 1, "importable": 2}
 
 
+def test_summarize_segments_counts_deferred_reuse_without_analysis():
+    segments = [
+        _segment(analysis=None, match_status="exact"),
+        _segment(number="2", analysis=None, match_status="similar"),
+        _segment(number="3", analysis=None, match_status="new"),
+    ]
+
+    assert summarize_segments(segments) == {
+        "total": 3,
+        "needs_review": 0,
+        "failed": 0,
+        "importable": 2,
+    }
+
+
 def test_summarize_segments_empty():
     assert summarize_segments([]) == {
         "total": 0,

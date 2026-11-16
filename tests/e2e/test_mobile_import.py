@@ -28,22 +28,40 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 _CONTROLLED_SERVER = """
+import base64
 import time
 
-from backend.models.schemas import QuestionOut
+from backend.config import get_settings
+from backend.database import SessionLocal
+from backend.models.orm import Question, QuestionAsset, User
+from backend.models.schemas import CanonicalQuestionOut, QuestionBankCandidate, QuestionOut
+from backend.repositories.question_bank import QuestionBankRepository
 from backend.services.ai.mock import MockProvider
 from backend.services.geometry_figures import FigureOutcome, GeometryFigureService
 from backend.services.photo_entry import PhotoEntryService
+from backend.services.question_bank import QuestionBankService
 from backend.services.question_mixins import SimilarQuestionsOutcome
 from backend.services.question_service import QuestionService
+from backend.services.rag import QuestionVectorStore
 
 _original_segment_page = MockProvider.segment_page
 _original_analyze_text = MockProvider.analyze_text
 _original_redraw_segment = GeometryFigureService.redraw_segment
 _original_similar_questions = QuestionService.similar_questions
+_original_find_similar = QuestionBankService.find_similar
+_original_delete_bank_questions = QuestionVectorStore.delete_bank_questions
 _original_confirm = PhotoEntryService.confirm
 _reanalyzed = set()
 _reanalyze_attempts = {}
+_EXACT_STEM = "【受控精确题】直接复用标准解析。"
+_SIMILAR_REUSE_STEM = "【受控相似引用】确认后引用候选。"
+_SIMILAR_NEW_STEM = "【受控相似新题】明确作为新题解析。"
+_NEW_STEM = "【受控新题】没有匹配，执行新题解析。"
+_CANDIDATE_STEM = "【受控共享候选】候选标准题干。"
+_AB_STEM = "【受控 AB 生命周期题】两个学生依次引用和删除。"
+_CONTROLLED_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _item(number, text):
@@ -58,6 +76,21 @@ def _item(number, text):
 
 
 def _controlled_segment_page(self, image_bytes, mime_type="image/png"):
+    if b"match-statuses" in image_bytes:
+        return [
+            dict(_item("1", _EXACT_STEM), likely_wrong=True),
+            dict(_item("2", _SIMILAR_REUSE_STEM), likely_wrong=True),
+            dict(_item("3", _SIMILAR_NEW_STEM), likely_wrong=True),
+            dict(_item("4", _NEW_STEM), likely_wrong=True),
+        ]
+    if b"batch-match" in image_bytes:
+        return [
+            _item("1", _EXACT_STEM),
+            _item("2", _SIMILAR_REUSE_STEM),
+            _item("3", "【受控整卷新题】只在本场景执行新题解析。"),
+        ]
+    if b"ab-exact" in image_bytes:
+        return [_item("1", _AB_STEM)]
     if b"single-fallback" in image_bytes or b"duplicate-fallback" in image_bytes:
         return [_item("1", "【演示单题】自动回退整图解析。")]
     if b"batch-first" in image_bytes:
@@ -146,8 +179,29 @@ def _controlled_similar_questions(self, question, *args, **kwargs):
     return SimilarQuestionsOutcome(items=[tested])
 
 
-def _confirm_to_completion(self, job_id, user_id, candidate_ids):
-    _original_confirm(self, job_id, user_id, candidate_ids)
+def _controlled_find_similar(self, stem, *, context, limit=3):
+    if stem not in {_SIMILAR_REUSE_STEM, _SIMILAR_NEW_STEM}:
+        return _original_find_similar(self, stem, context=context, limit=limit)
+    with SessionLocal() as session:
+        question = QuestionBankRepository(session).find_by_stem(_CANDIDATE_STEM)
+        return [
+            QuestionBankCandidate(
+                score=0.87, question=CanonicalQuestionOut.from_orm_model(question)
+            )
+        ]
+
+
+def _record_bank_vector_deletion(self, canonical_ids):
+    _original_delete_bank_questions(self, canonical_ids)
+    log_path = get_settings().data_dir / "bank-vector-deletions.log"
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(",".join(canonical_ids) + "\\n")
+
+
+def _confirm_to_completion(self, job_id, user_id, candidate_ids, match_choices=None):
+    _original_confirm(
+        self, job_id, user_id, candidate_ids, match_choices=match_choices
+    )
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         job = self.get_job(job_id, user_id)
@@ -157,15 +211,97 @@ def _confirm_to_completion(self, job_id, user_id, candidate_ids):
     raise RuntimeError("controlled photo confirmation did not finish")
 
 
+def _seed_match_fixtures():
+    settings = get_settings()
+    shared_dir = settings.data_dir / "question-bank"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    with SessionLocal() as session:
+        repository = QuestionBankRepository(session)
+        for stem, origin in (
+            (_EXACT_STEM, "teacher"),
+            (_CANDIDATE_STEM, "teacher"),
+            (_AB_STEM, "student"),
+        ):
+            question = repository.create(
+                stem_markdown=stem,
+                analysis_markdown="受控标准解析摘要：按步骤计算并验证。",
+                answer="受控答案",
+                knowledge_points=["受控知识点"],
+                origin=origin,
+            )
+            session.flush()
+            shared = shared_dir / f"canonical-{question.id}-ai.png"
+            private = shared_dir / f"canonical-{question.id}-teacher.png"
+            shared.write_bytes(_CONTROLLED_PNG)
+            private.write_bytes(_CONTROLLED_PNG)
+            session.add_all([
+                QuestionAsset(
+                    canonical_id=question.id,
+                    kind="ai_redraw",
+                    visibility="shared",
+                    storage_path=str(shared),
+                    is_preferred=True,
+                ),
+                QuestionAsset(
+                    canonical_id=question.id,
+                    kind="teacher_original",
+                    visibility="teacher_only",
+                    storage_path=str(private),
+                ),
+            ])
+        docx_stem = "【受控 DOCX 带图】仍须下载原始文档。"
+        docx_canonical = repository.create(
+            stem_markdown=docx_stem,
+            analysis_markdown="受控 DOCX 带图解析。",
+            answer="受控答案",
+            origin="teacher",
+        )
+        session.flush()
+        student = session.query(User).filter_by(username="demo").one()
+        private_dir = settings.data_dir / "images" / f"u{student.id}"
+        private_dir.mkdir(parents=True, exist_ok=True)
+        evidence = private_dir / "figure-evidence.docx"
+        crop = private_dir / "figure-crop.png"
+        evidence.write_bytes(b"controlled-docx-with-figure")
+        crop.write_bytes(_CONTROLLED_PNG)
+        session.add(
+            Question(
+                user_id=student.id,
+                canonical_id=docx_canonical.id,
+                private_image_path=str(evidence),
+                image_path=str(evidence),
+                figure_paths=[],
+                figure_specs=[{
+                    "kind": "geometry",
+                    "semantic_spec": {},
+                    "tikz_source": "",
+                    "render_path": None,
+                    "crop_path": str(crop),
+                    "validation_status": "fallback",
+                    "validation_issues": [],
+                    "assumptions": [],
+                }],
+                content_markdown="",
+                answer="",
+                match_method="new",
+            )
+        )
+        session.commit()
+
+
 MockProvider.segment_page = _controlled_segment_page
 MockProvider.analyze_text = _controlled_analyze_text
 GeometryFigureService.redraw_segment = _controlled_redraw_segment
 QuestionService.similar_questions = _controlled_similar_questions
+QuestionBankService.find_similar = _controlled_find_similar
+QuestionVectorStore.delete_bank_questions = _record_bank_vector_deletion
 PhotoEntryService.confirm = _confirm_to_completion
 
+import api.main as api_main
 import uvicorn
 
-uvicorn.run("api.main:app", host="127.0.0.1", port=int(__import__("os").environ["PORT"]))
+_seed_match_fixtures()
+uvicorn.run(api_main.app, host="127.0.0.1", port=int(__import__("os").environ["PORT"]))
 """
 
 
@@ -174,10 +310,10 @@ def _photo(name: str, marker: bytes) -> dict:
 
 
 @pytest.fixture(scope="module")
-def mobile_base_url():
+def mobile_server():
     external = os.getenv("MM_MOBILE_E2E_BASE_URL")
     if external:
-        yield external
+        yield {"base_url": external, "database_path": None}
         return
 
     root = Path(__file__).resolve().parents[2]
@@ -229,7 +365,10 @@ def mobile_base_url():
                             f"Controlled Mobile API health check timed out:\n{log_path.read_text()}"
                         )
                     time.sleep(0.1)
-                yield f"http://127.0.0.1:{port}/m/"
+                yield {
+                    "base_url": f"http://127.0.0.1:{port}/m/",
+                    "database_path": Path(data_dir) / "math_tutor.db",
+                }
             finally:
                 process.terminate()
                 try:
@@ -237,6 +376,11 @@ def mobile_base_url():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def mobile_base_url(mobile_server):
+    return mobile_server["base_url"]
 
 
 def _screenshot_on_failure(test):
@@ -620,3 +764,246 @@ def test_spec_only_question_uses_original_image_in_notebook_and_review(
     expect(page.get_by_role("img", name="错题原图", exact=True)).to_be_visible()
     expect(page.get_by_text("图形为原图裁剪，请核对准确性", exact=True)).to_be_visible()
     expect(page.get_by_role("img", name="题图 1", exact=True)).to_have_count(0)
+
+
+@_screenshot_on_failure
+def test_match_statuses_require_explicit_similar_choices_and_keep_private_images(
+    page, mobile_base_url
+):
+    """相似题自动接受、漏传选择或复用结果不显示双图时，本场景失败。"""
+    _open_capture(page, mobile_base_url)
+    page.locator('input[type="file"]').set_input_files(
+        _photo("match-statuses.png", b"match-statuses")
+    )
+    page.get_by_role("button", name="开始解析", exact=True).click()
+
+    expect(page.get_by_role("heading", name="确认识别结果", exact=True)).to_be_visible(timeout=30000)
+    expect(page.get_by_text("精确复用", exact=True)).to_have_count(1)
+    expect(page.get_by_text("相似待确认", exact=True)).to_have_count(2)
+    expect(page.get_by_text("新题解析", exact=True)).to_have_count(1)
+    confirm = page.get_by_role("button", name="确认录入", exact=True)
+    expect(confirm).to_be_disabled()
+    reuse_card = page.locator('[data-slot="card"]').filter(has_text="【受控相似引用】")
+    new_card = page.locator('[data-slot="card"]').filter(has_text="【受控相似新题】")
+    expect(reuse_card.get_by_text("【受控共享候选】", exact=False)).to_be_visible()
+    expect(reuse_card.get_by_text("受控标准解析摘要", exact=False)).to_be_visible()
+    expect(reuse_card.get_by_text("教师发布", exact=False)).to_be_visible()
+    reuse_card.get_by_role("button", name="引用此题", exact=True).click()
+    new_card.get_by_role("button", name="作为新题解析", exact=True).click()
+    expect(reuse_card.get_by_role("button", name="引用此题", exact=True)).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    expect(confirm).to_be_enabled()
+
+    page.set_viewport_size({"width": 320, "height": 700})
+    expect(reuse_card.get_by_role("button", name="引用此题", exact=True)).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.reload()
+    page.get_by_role("button", name="录题", exact=True).click()
+    expect(page.get_by_role("heading", name="确认识别结果", exact=True)).to_be_visible(timeout=30000)
+    expect(page.get_by_role("button", name="确认录入", exact=True)).to_be_disabled()
+    reuse_card = page.locator('[data-slot="card"]').filter(has_text="【受控相似引用】")
+    new_card = page.locator('[data-slot="card"]').filter(has_text="【受控相似新题】")
+    expect(reuse_card.get_by_role("button", name="引用此题", exact=True)).to_have_attribute(
+        "aria-pressed", "false"
+    )
+    reuse_card.get_by_role("button", name="引用此题", exact=True).click()
+    new_card.get_by_role("button", name="作为新题解析", exact=True).click()
+    page.get_by_role("button", name="确认录入", exact=True).click()
+
+    expect(page.get_by_role("heading", name="录入完成", exact=True)).to_be_visible(timeout=30000)
+    expect(page.get_by_text("已入库 4 道", exact=False)).to_be_visible()
+    expect(page.get_by_role("img", name="本次私有原图", exact=False)).to_have_count(4)
+    expect(page.get_by_role("img", name="共享 AI 重绘图", exact=False)).to_have_count(2)
+    expect(page.get_by_role("img", name="教师原图", exact=False)).to_have_count(0)
+    _assert_no_extra_entry_or_editing_controls(page)
+    expect(page.get_by_text("题库管理", exact=True)).to_have_count(0)
+
+
+@_screenshot_on_failure
+def test_batch_match_statuses_submit_segment_index_choice(page, mobile_base_url):
+    """整卷校对若遗漏服务端状态或错误使用候选 ID 作为键，本场景失败。"""
+    _open_batch(page, mobile_base_url)
+    page.locator('input[type="file"]').set_input_files(
+        _photo("batch-match.png", b"batch-match")
+    )
+    page.get_by_role("button", name="开始识别", exact=False).click()
+
+    expect(page.get_by_role("heading", name="确认识别结果", exact=True)).to_be_visible(timeout=30000)
+    expect(page.get_by_text("精确复用", exact=True)).to_have_count(1)
+    expect(page.get_by_text("相似待确认", exact=True)).to_have_count(1)
+    expect(page.get_by_text("新题解析", exact=True)).to_have_count(1)
+    confirm = page.get_by_role("button", name="确认入库（3 题）", exact=True)
+    expect(confirm).to_be_disabled()
+    similar = page.locator('[data-slot="card"]').filter(has_text="【受控相似引用】")
+    similar.get_by_role("button", name="作为新题解析", exact=True).click()
+    expect(confirm).to_be_enabled()
+    confirm.click()
+    expect(page.get_by_text("已入库 3 道题", exact=False)).to_be_visible(timeout=30000)
+
+
+def _register_student(page, api_base: str, username: str) -> str:
+    response = page.request.post(
+        f"{api_base}/auth/register",
+        data={"username": username, "password": "controlled-pass", "role": "student"},
+    )
+    assert response.ok, response.text()
+    return response.json()["access_token"]
+
+
+def _create_exact_reference(page, api_base: str, token: str) -> dict:
+    response = page.request.post(
+        f"{api_base}/photo-entry/jobs",
+        headers={"Authorization": f"Bearer {token}"},
+        multipart={"images": _photo("ab.png", b"ab-exact")},
+    )
+    assert response.status == 202, response.text()
+    job_id = response.json()["job_id"]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        current = page.request.get(
+            f"{api_base}/photo-entry/jobs/{job_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert current.ok, current.text()
+        job = current.json()
+        if job["phase"] == "done":
+            assert job["entries"][0]["error"] is None
+            return job["entries"][0]["question"]
+        assert job["phase"] != "failed", job["error"]
+        time.sleep(0.05)
+    raise TimeoutError("controlled exact reference did not finish")
+
+
+def test_ab_sequential_delete_cleans_only_private_then_student_orphan(
+    page, mobile_server
+):
+    """A 删除不能动 B 的原图/共享图；B 最后删除才清理学生来源标准题。"""
+    import sqlite3
+
+    database_path = mobile_server["database_path"]
+    if database_path is None:
+        pytest.skip("外部 Mobile E2E 服务不提供隔离数据库路径")
+    api_base = mobile_server["base_url"].removesuffix("/m/") + "/api"
+    token_a = _register_student(page, api_base, "controlled-student-a")
+    token_b = _register_student(page, api_base, "controlled-student-b")
+    question_a = _create_exact_reference(page, api_base, token_a)
+    question_b = _create_exact_reference(page, api_base, token_b)
+    canonical_id = question_a["canonical_id"]
+    assert question_b["canonical_id"] == canonical_id
+    vector_log = database_path.parent / "bank-vector-deletions.log"
+
+    def vector_deletions() -> list[str]:
+        return vector_log.read_text(encoding="utf-8").splitlines() if vector_log.exists() else []
+
+    vectors_before = vector_deletions()
+    with sqlite3.connect(database_path) as connection:
+        private_a = connection.execute(
+            "SELECT private_image_path FROM questions WHERE id = ?", (question_a["id"],)
+        ).fetchone()[0]
+        private_b = connection.execute(
+            "SELECT private_image_path FROM questions WHERE id = ?", (question_b["id"],)
+        ).fetchone()[0]
+        shared = connection.execute(
+            "SELECT storage_path FROM question_assets WHERE canonical_id = ? AND visibility = 'shared'",
+            (canonical_id,),
+        ).fetchone()[0]
+
+    deleted = page.request.delete(
+        f"{api_base}/questions/{question_a['id']}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert deleted.status == 204, deleted.text()
+    assert not Path(private_a).exists()
+    assert Path(private_b).exists() and Path(shared).exists()
+    assert vector_deletions() == vectors_before
+    image_a = page.request.get(
+        f"{api_base}/questions/{question_a['id']}/image",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    shared_b = page.request.get(
+        f"{api_base}/questions/{question_b['id']}/figures/0",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert image_a.status == 404
+    assert shared_b.status == 200
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM canonical_questions WHERE id = ?", (canonical_id,)
+        ).fetchone() == (1,)
+
+    deleted = page.request.delete(
+        f"{api_base}/questions/{question_b['id']}",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert deleted.status == 204, deleted.text()
+    assert not Path(private_b).exists() and not Path(shared).exists()
+    assert vector_deletions() == [*vectors_before, str(canonical_id)]
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM canonical_questions WHERE id = ?", (canonical_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT COUNT(*) FROM question_bank_audit WHERE canonical_id = ? AND action = 'student_orphan_cleanup'",
+            (canonical_id,),
+        ).fetchone() == (1,)
+
+
+@_screenshot_on_failure
+def test_docx_evidence_has_authenticated_download_in_notebook_and_review(
+    page, mobile_base_url, tmp_path
+):
+    """DOCX 原证据若仍走图片渲染或无鉴权下载，本场景失败。"""
+    from doc_samples import make_docx
+
+    marker = "【DOCX 私有证据】"
+    document = make_docx(
+        tmp_path / "mobile-evidence.docx",
+        [f"1. {marker}下载原始文档并保留内容。"],
+        with_image=False,
+    )
+    _open_batch(page, mobile_base_url)
+    page.locator('input[type="file"]').set_input_files(document)
+    page.get_by_role("button", name="开始识别", exact=False).click()
+    expect(page.get_by_role("heading", name="确认识别结果", exact=True)).to_be_visible(timeout=30000)
+    page.get_by_role("button", name="确认入库（1 题）", exact=True).click()
+    expect(page.get_by_text("已入库 1 道题", exact=False)).to_be_visible(timeout=30000)
+    page.get_by_role("button", name="去错题本看看", exact=True).click()
+
+    page.get_by_text(marker, exact=False).first.click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog.get_by_text("原始文档", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("DOCX", exact=True)).to_be_visible()
+    expect(dialog.get_by_role("img", name="错题原图", exact=True)).to_have_count(0)
+    with page.expect_download() as notebook_download:
+        dialog.get_by_role("button", name="下载原始文档", exact=True).click()
+    assert notebook_download.value.suggested_filename.endswith(".docx")
+    page.keyboard.press("Escape")
+
+    page.get_by_role("button", name="复习", exact=True).click()
+    _skip_to_review_question(page, marker, "DOCX question did not appear in review")
+    expect(page.get_by_text("原始文档", exact=True)).to_be_visible()
+    expect(page.get_by_role("img", name="错题原图", exact=True)).to_have_count(0)
+    with page.expect_download() as review_download:
+        page.get_by_role("button", name="下载原始文档", exact=True).click()
+    assert review_download.value.suggested_filename.endswith(".docx")
+
+
+@_screenshot_on_failure
+def test_docx_with_figure_spec_keeps_notebook_document_download(page, mobile_base_url):
+    """有图 DOCX 若隐藏文档入口或把 DOCX 送进 AuthImage，本场景失败。"""
+    _open_capture(page, mobile_base_url)
+    page.get_by_role("button", name="错题本", exact=True).click()
+    page.get_by_placeholder("搜索错题…").fill("【受控 DOCX 带图】")
+    expect(page.get_by_text("【受控 DOCX 带图】", exact=False).first).to_be_visible()
+    page.get_by_text("【受控 DOCX 带图】", exact=False).first.click()
+
+    dialog = page.get_by_role("dialog")
+    expect(dialog.get_by_text("原始文档", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("DOCX", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("图形为原图裁剪，请核对准确性", exact=True)).to_be_visible()
+    expect(dialog.get_by_role("img", name="错题原图", exact=True)).to_have_count(0)
+    with page.expect_download() as download:
+        dialog.get_by_role("button", name="下载原始文档", exact=True).click()
+    assert download.value.suggested_filename.endswith(".docx")

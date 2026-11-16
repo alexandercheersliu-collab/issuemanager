@@ -75,7 +75,13 @@ def test_single_question_entry_reuses_segmentation_and_saves_redraw(
 
     from backend.services.entry_types import PhotoImage
     from backend.services.photo_entry import PhotoEntryService
+    from backend.services.rag import QuestionVectorStore, SimilarResult
 
+    monkeypatch.setattr(
+        QuestionVectorStore,
+        "similar_canonical_questions",
+        lambda self, *args, **kwargs: SimilarResult(),
+    )
     provider = SingleGeometryProvider()
     figures = _FakeEntryFigures(tmp_path)
     question_service.ai = provider
@@ -99,7 +105,11 @@ def test_single_question_entry_reuses_segmentation_and_saves_redraw(
     entry = job["entries"][0]
     assert entry["duplicated"] is False
     assert entry["question"]["content_markdown"].startswith("单题几何\n\n---\n\n")
-    assert entry["question"]["figure_paths"] == [str(tmp_path / "redraw-1.png")]
+    from pathlib import Path
+
+    shared = Path(entry["question"]["figure_paths"][0])
+    assert shared.read_bytes() == (tmp_path / "redraw-1.png").read_bytes()
+    assert shared.is_relative_to(question_service.settings.data_dir / "question-bank")
     assert entry["question"]["figure_specs"][0]["tikz_source"] == "tikz"
     assert provider.segment_calls == 1
     assert figures.calls == ["1"]

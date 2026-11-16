@@ -8,6 +8,7 @@ import streamlit as st
 
 from backend.services.ai import get_provider_status
 from backend.services.ai.base import normalize_math_delimiters
+from backend.services.question_bank import QuestionBankService
 from backend.services.question_service import QuestionService
 
 _ASSETS = pathlib.Path(__file__).parent / "assets" / "style.css"
@@ -44,6 +45,11 @@ def get_question_service() -> QuestionService:
     QuestionService 内部每次操作独立开短事务，缓存实例是安全的。
     """
     return QuestionService()
+
+
+@st.cache_resource
+def get_question_bank_service() -> QuestionBankService:
+    return QuestionBankService()
 
 
 def stat_card(
@@ -161,6 +167,7 @@ _LABEL_TO_KEY = {
     "错题本": "notebook",
     "今日复习": "review",
     "知识图谱": "graph",
+    "标准题库": "question_bank",
     "设置": "settings",
 }
 

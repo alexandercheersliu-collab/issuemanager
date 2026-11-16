@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel
 
 from api.deps import get_current_user, rate_limit
 from backend.models.orm import User
+from backend.models.schemas import PhotoEntryConfirmation
 from backend.services.ai.base import AnalysisContext
 from backend.services.photo_entry import (
     DEFAULT_IMPORT_CONTEXT,
@@ -18,10 +18,6 @@ router = APIRouter(prefix="/photo-entry", tags=["photo-entry"])
 
 _ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
-
-
-class Confirmation(BaseModel):
-    candidate_ids: list[str]
 
 
 def _service() -> PhotoEntryService:
@@ -87,11 +83,16 @@ def get_job(job_id: str, user: User = Depends(get_current_user)) -> dict:
 
 @router.post("/jobs/{job_id}/confirm")
 def confirm_job(
-    job_id: str, body: Confirmation, user: User = Depends(get_current_user)
+    job_id: str, body: PhotoEntryConfirmation, user: User = Depends(get_current_user)
 ) -> dict:
     service = _service()
     try:
-        service.confirm(job_id, user.id, body.candidate_ids)
+        service.confirm(
+            job_id,
+            user.id,
+            body.candidate_ids,
+            match_choices=body.match_choices,
+        )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except ValueError as exc:

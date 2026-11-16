@@ -21,6 +21,12 @@ def _service_with_provider(
     monkeypatch.setattr(
         "backend.services.question_mixins.get_ai_service", lambda settings: provider
     )
+    from backend.services.rag import SimilarResult
+
+    monkeypatch.setattr(
+        "backend.services.question_bank.QuestionVectorStore.similar_canonical_questions",
+        lambda self, *args, **kwargs: SimilarResult(),
+    )
     return PhotoEntryService(settings)
 
 
@@ -100,7 +106,18 @@ def test_two_images_produce_stable_candidates_and_observable_defaults(monkeypatc
     assert review["candidates"][1]["summary"] == "第二题： 求 x^2=9 的解。"
     assert all(
         set(candidate)
-        == {"id", "image", "number", "text", "summary", "likely_wrong", "figure_bboxes"}
+        == {
+            "id",
+            "image",
+            "number",
+            "text",
+            "summary",
+            "likely_wrong",
+            "figure_bboxes",
+            "match_status",
+            "canonical_id",
+            "match_candidates",
+        }
         for candidate in review["candidates"]
     )
     assert len({candidate["id"] for candidate in review["candidates"]}) == 4
@@ -427,10 +444,20 @@ def test_unknown_candidate_id_is_rejected_without_import(monkeypatch, student_us
 def test_repeated_confirmation_returns_original_entries_without_reimport(
     monkeypatch, student_user
 ):
+    import uuid
+
+    stem = f"重复确认的新题-{uuid.uuid4().hex}"
+
     class Provider(MockProvider):
         def __init__(self):
             super().__init__()
             self.analyze_calls = 0
+
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [
+                {"number": "1", "text": stem},
+                {"number": "2", "text": f"未选择题-{uuid.uuid4().hex}"},
+            ]
 
         def analyze_text(self, text, hint="", context=None):
             self.analyze_calls += 1
@@ -491,10 +518,19 @@ def test_original_inputs_are_stored_under_job_directory(monkeypatch, student_use
 
 
 def test_import_progress_is_persisted_while_item_is_running(monkeypatch, student_user):
+    import uuid
+
     started = threading.Event()
     release = threading.Event()
+    stem = f"进度持久化新题-{uuid.uuid4().hex}"
 
     class Provider(MockProvider):
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [
+                {"number": "1", "text": stem},
+                {"number": "2", "text": f"未选择题-{uuid.uuid4().hex}"},
+            ]
+
         def analyze_text(self, text, hint="", context=None):
             started.set()
             assert release.wait(timeout=5)
@@ -522,15 +558,25 @@ def test_import_progress_is_persisted_while_item_is_running(monkeypatch, student
 def test_concurrent_confirmations_import_candidate_only_once(
     monkeypatch, student_user, question_service
 ):
+    import uuid
+
     from sqlalchemy import Select
 
     from backend.services import photo_entry as photo_entry_module
+
+    stem = f"并发确认的新题-{uuid.uuid4().hex}"
 
     class Provider(MockProvider):
         def __init__(self):
             super().__init__()
             self.analyze_calls = 0
             self.lock = threading.Lock()
+
+        def segment_page(self, image_bytes, mime_type="image/png"):
+            return [
+                {"number": "1", "text": stem},
+                {"number": "2", "text": f"未选择题-{uuid.uuid4().hex}"},
+            ]
 
         def analyze_text(self, text, hint="", context=None):
             with self.lock:

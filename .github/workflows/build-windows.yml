@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pytest
 
       - name: 预下载内置嵌入模型（约 79MB，打进包内离线可用）
         run: python scripts/install_onnx_model.py --dir deploy/bundle/models/onnx
@@ -47,8 +47,18 @@ jobs:
           npm ci
           npm run build
 
+      - name: 验证任意工作目录下的资源加载
+        run: python -m pytest tests/test_branding.py tests/test_deploy_launcher.py -q
+
       - name: PyInstaller 构建 onedir
         run: pyinstaller deploy/issues_manager.spec --noconfirm
+
+      - name: 验证包内图标资源
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/IssuesManager/_internal/static/icon.png")) {
+            throw "Windows 包缺少 _internal/static/icon.png"
+          }
 
       - name: 拷入手册并打 zip
         shell: pwsh

@@ -16,6 +16,17 @@ from backend.services.geometry_figures import FigureOutcome, GeometryFigureServi
 from backend.services.tikz import TikzRenderer
 
 
+@pytest.fixture(autouse=True)
+def no_uncontrolled_similar_candidates(monkeypatch):
+    from backend.services.rag import QuestionVectorStore, SimilarResult
+
+    monkeypatch.setattr(
+        QuestionVectorStore,
+        "similar_canonical_questions",
+        lambda self, *args, **kwargs: SimilarResult(),
+    )
+
+
 def _wait_job(service: DocumentService, job_id: str, user_id: int, timeout: float = 30.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -30,7 +41,7 @@ def _wait_job(service: DocumentService, job_id: str, user_id: int, timeout: floa
 def _import_and_wait(student_user, tmp_path, name="edit.pdf"):
     pdf = make_text_pdf(
         tmp_path / name,
-        ["1. 校对题一：已知 x^2=9，求 x 的值。\n2. 校对题二：计算 1+1 的结果。"],
+        [f"1. 校对题一【{name}】：已知 x^2=9，求 x 的值。\n2. 校对题二【{name}】：计算 1+1 的结果。"],
     )
     service = DocumentService()
     job_id, _ = service.import_document(

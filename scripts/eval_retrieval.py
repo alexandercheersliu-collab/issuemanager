@@ -8,12 +8,107 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import os  # noqa: E402
+
+BANK_MATCH_EVALUATION_CASES = [
+    {
+        "category": "identical",
+        "canonical_stem": "已知 $x+1=2$，求 $x$。",
+        "query": "已知 $x+1=2$，求 $x$。",
+        "exact_expected": True,
+        "equivalent": True,
+        "similar_distance": None,
+    },
+    {
+        "category": "whitespace_latex",
+        "canonical_stem": "已知 \\(2x=4\\)，求 \\(x\\)。",
+        "query": "1.  已知 $2x=4$，求 $x$。\n",
+        "exact_expected": True,
+        "equivalent": True,
+        "similar_distance": None,
+    },
+    {
+        "category": "ocr_noise",
+        "canonical_stem": "解方程：2x + 1 = 7。",
+        "query": "解方程：2x + l = 7。",
+        "exact_expected": False,
+        "equivalent": True,
+        "similar_distance": 0.1,
+    },
+    {
+        "category": "number_changed",
+        "canonical_stem": "计算 2 + 3。",
+        "query": "计算 2 + 4。",
+        "exact_expected": False,
+        "equivalent": False,
+        "similar_distance": 0.5,
+    },
+    {
+        "category": "same_knowledge_different_question",
+        "canonical_stem": "已知 x+1=2，求 x。",
+        "query": "已知 3x-1=5，求 x。",
+        "exact_expected": False,
+        "equivalent": False,
+        "similar_distance": 0.6,
+    },
+]
+
+
+def evaluate_bank_matching(session_factory, vector_store) -> dict:
+    """用受控向量结果评测匹配规则；结果不代表真实嵌入模型质量。"""
+    from backend.repositories.question_bank import QuestionBankRepository
+    from backend.services.ai.base import AnalysisContext
+    from backend.services.question_bank import QuestionBankService
+
+    service = QuestionBankService(
+        session_factory=session_factory, vector_store=vector_store
+    )
+    cases = [dict(case) for case in BANK_MATCH_EVALUATION_CASES]
+    with session_factory() as session:
+        repository = QuestionBankRepository(session)
+        for case in cases:
+            canonical = repository.create(
+                stem_markdown=case["canonical_stem"],
+                analysis_markdown="完整解析：按数学关系计算并检验。",
+                answer="评测答案",
+                origin="teacher",
+            )
+            session.flush()
+            case["canonical_id"] = canonical.id
+        session.commit()
+
+    exact_correct = 0
+    similar_found = 0
+    similar_total = 0
+    false_matches = 0
+    negative_total = 0
+    for case in cases:
+        exact = service.match_exact(case["query"])
+        expected_id = case["canonical_id"] if case["exact_expected"] else None
+        exact_correct += (exact.id if exact is not None else None) == expected_id
+        if case["exact_expected"]:
+            continue
+        candidates = service.find_similar(case["query"], context=AnalysisContext())
+        matched = any(
+            candidate.question.id == case["canonical_id"] for candidate in candidates
+        )
+        if case["equivalent"]:
+            similar_total += 1
+            similar_found += matched
+        else:
+            negative_total += 1
+            false_matches += matched
+    return {
+        "cases": len(cases),
+        "exact_accuracy": exact_correct / len(cases),
+        "similar_recall": similar_found / similar_total if similar_total else 0.0,
+        "false_match_rate": false_matches / negative_total if negative_total else 0.0,
+    }
 
 
 def main() -> None:

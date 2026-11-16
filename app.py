@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 import threading
+from pathlib import Path
 
 import bootstrap  # noqa: F401  注入 HOME/HF_HOME 等本地化环境变量，必须在其他 import 之前
 
@@ -27,6 +28,7 @@ from frontend.pages.settings import render_settings_page
 from frontend.pages.tutor import render_tutor_page
 
 logger = get_logger("app")
+_ICON_PATH = str(Path(__file__).resolve().parent / "static" / "icon.png")
 
 
 def _warmup() -> None:
@@ -69,7 +71,7 @@ settings = get_settings()
 
 st.set_page_config(
     page_title="智能错题本",
-    page_icon="static/icon.png",
+    page_icon=_ICON_PATH,
     layout="wide",
     initial_sidebar_state="auto",  # 窄屏自动折叠，兼顾移动端
 )
@@ -117,7 +119,10 @@ _PAGES = {
 
 _TEACHER_PAGES = {
     t("nav.students"): "students",
+    t("nav.question_bank"): "question_bank",
 }
+
+_QUESTION_BANK_PAGE = {t("nav.question_bank"): "question_bank"}
 
 # 管理员专属页（ADMIN_USERNAMES 名单，与 role 独立）
 _ADMIN_PAGES = {
@@ -133,6 +138,7 @@ _NAV_ICONS = {
     "review": ":material/autorenew:",
     "graph": ":material/account_tree:",
     "students": ":material/group:",
+    "question_bank": ":material/library_books:",
     "admin": ":material/admin_panel_settings:",
     "assistant": ":material/smart_toy:",
     "settings": ":material/settings:",
@@ -151,17 +157,21 @@ def _render_sidebar(user: dict) -> str:
         )
         ordered[insert_at:insert_at] = list(_TEACHER_PAGES.items())
     if is_admin(user):
-        # 管理员专属页插在「设置」之前
+        # 管理员专属页插在「设置」之前；非教师角色的 admin 也可见标准题库。
         insert_at = next(
             (i for i, (label, key) in enumerate(ordered) if key == "settings"),
             len(ordered),
         )
-        ordered[insert_at:insert_at] = list(_ADMIN_PAGES.items())
+        admin_pages = {}
+        if user.get("role") != "teacher":
+            admin_pages.update(_QUESTION_BANK_PAGE)
+        admin_pages.update(_ADMIN_PAGES)
+        ordered[insert_at:insert_at] = list(admin_pages.items())
     visible = dict(ordered)
 
     with st.sidebar:
         with st.container(key="sidebar_brand"):
-            st.image("static/icon.png", width=44, alt="智能错题本图标")
+            st.image(_ICON_PATH, width=44, alt="智能错题本图标")
         pending = st.session_state.pop("_pending_nav", None)
         if pending in visible:
             st.session_state["nav"] = pending
@@ -226,6 +236,10 @@ def _dispatch(page: str, user: dict) -> None:
         from frontend.pages.students import render_students_page
 
         render_students_page(user)
+    elif page == "question_bank":
+        from frontend.pages.question_bank import render_question_bank_page
+
+        render_question_bank_page(user)
     elif page == "admin":
         from frontend.pages.admin import render_admin_page
 

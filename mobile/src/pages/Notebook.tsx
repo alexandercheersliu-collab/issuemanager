@@ -12,6 +12,7 @@ import type { Question } from '@/types'
 import AuthImage from '@/components/AuthImage'
 import DetectionPanel from '@/components/DetectionPanel'
 import MathText from '@/components/MathText'
+import QuestionEvidence from '@/components/QuestionEvidence'
 
 const PAGE_SIZE = 15
 
@@ -126,6 +127,7 @@ export default function Notebook() {
                   </Badge>
                 ))}
               </div>
+              {detail.evidence_type === 'document' && <QuestionEvidence question={detail} />}
               {detail.figure_paths.map((_, index) => (
                 <div key={index} className="space-y-1">
                   <AuthImage
@@ -133,7 +135,7 @@ export default function Notebook() {
                     alt={`题图 ${index + 1}`}
                     fallback={
                       detail.image_path ? (
-                        <AuthImage src={`/questions/${detail.id}/image`} alt="错题原图" />
+                        <QuestionEvidence question={detail} showDocument={false} />
                       ) : (
                         <p className="text-xs text-amber-700">图形暂不可用</p>
                       )
@@ -147,7 +149,7 @@ export default function Notebook() {
               {detail.figure_specs.length > detail.figure_paths.length && (
                 <div className="space-y-1">
                   {detail.image_path ? (
-                    <AuthImage src={`/questions/${detail.id}/image`} alt="错题原图" />
+                    <QuestionEvidence question={detail} showDocument={false} />
                   ) : (
                     <p className="text-xs text-amber-700">图形暂不可用</p>
                   )}
@@ -158,6 +160,9 @@ export default function Notebook() {
                   )}
                 </div>
               )}
+              {detail.evidence_type !== 'document' &&
+                !detail.figure_paths.length &&
+                !detail.figure_specs.length && <QuestionEvidence question={detail} />}
               <MathText text={detail.stem} className="text-sm text-slate-800" />
               {detail.analysis && (
                 <div className="border-t pt-3">
